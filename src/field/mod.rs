@@ -1,6 +1,10 @@
 use bevy::prelude::*;
+mod consts;
 mod editor;
+mod material;
 pub mod ops;
+mod sdf;
+mod visibility;
 
 /// Core trait representing a 3D grid of data.
 pub trait Field<T: Copy + Default> {
