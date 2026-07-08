@@ -1,15 +1,16 @@
-use super::{Field, Lod};
+use super::{Field, LOD};
 use bevy::{platform::collections::HashSet, prelude::*};
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Component, Clone)]
-pub struct SdfField {
+pub struct SDFField {
     pub size: u32,
     data: Box<[f32]>,
     dirty: HashSet<u32>,
 }
 
-impl SdfField {
-    pub fn new(lod: Lod) -> Self {
+impl SDFField {
+    pub fn new(lod: LOD) -> Self {
         let size = lod.size();
         let volume = lod.volume();
         Self {
@@ -79,7 +80,7 @@ const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
-impl Field<f32> for SdfField {
+impl Field<f32> for SDFField {
     fn size(&self) -> UVec3 {
         UVec3::splat(self.size)
     }
@@ -97,4 +98,3 @@ impl Field<f32> for SdfField {
         }
     }
 }
-

@@ -7,6 +7,17 @@ pub struct VisibilityField {
     pub words: Box<[u64; MAX_VISIBILITY_WORDS]>,
 }
 
+impl VisibilityField {
+    #[inline]
+    pub fn all_false(&self) -> bool {
+        todo!()
+    }
+    #[inline]
+    pub fn all_true(&self) -> bool {
+        todo!()
+    }
+}
+
 impl Default for VisibilityField {
     fn default() -> Self {
         Self {
@@ -40,4 +51,3 @@ impl Field<bool> for VisibilityField {
         }
     }
 }
-

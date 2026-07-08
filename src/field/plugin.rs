@@ -3,7 +3,7 @@ use bevy::ecs::component::Mutable;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
 
-use crate::field::{MaterialField, SdfField, VisibilityField};
+use crate::field::{MaterialField, SDFField, VisibilityField};
 
 use super::{
     Field,
@@ -26,7 +26,7 @@ impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, (FieldSet::Edit, FieldSet::Reinit).chain());
         app.add_systems(Update, reinit_dirty_sdf.in_set(FieldSet::Reinit));
-        app.add_field::<SdfField, f32>()
+        app.add_field::<SDFField, f32>()
             .add_field::<MaterialField, u8>()
             .add_field::<VisibilityField, bool>();
     }
@@ -59,4 +59,3 @@ impl AppFieldExt for App {
         self
     }
 }
-

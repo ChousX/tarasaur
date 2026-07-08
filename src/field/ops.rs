@@ -185,4 +185,3 @@ pub trait FieldBoxOps<T: Copy + Default>: Field<T> {
 // Blanket implementations for all Field types, accounting for dynamically sized types (?Sized)
 impl<T: Copy + Default, F: Field<T> + ?Sized> FieldSphereOps<T> for F {}
 impl<T: Copy + Default, F: Field<T> + ?Sized> FieldBoxOps<T> for F {}
-

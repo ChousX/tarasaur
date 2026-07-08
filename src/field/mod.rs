@@ -10,10 +10,11 @@ mod sdf;
 pub mod systems;
 mod visibility;
 
-pub use lod::Lod;
+pub use lod::LOD;
 pub use material::MaterialField;
+pub use plugin::AppFieldExt;
 pub use plugin::{FieldSet, FieldsPlugin};
-pub use sdf::SdfField;
+pub use sdf::SDFField;
 pub use visibility::VisibilityField;
 
 /// Core trait representing a 3D grid of data.

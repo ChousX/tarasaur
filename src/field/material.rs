@@ -1,4 +1,4 @@
-use super::{Field, Lod};
+use super::{Field, LOD};
 use bevy::prelude::*;
 
 #[derive(Component, Clone)]
@@ -8,13 +8,16 @@ pub struct MaterialField {
 }
 
 impl MaterialField {
-    pub fn new(lod: Lod) -> Self {
+    pub fn new(lod: LOD) -> Self {
         let size = lod.size();
         let volume = lod.volume();
         Self {
             size,
             data: vec![0; volume].into_boxed_slice(),
         }
+    }
+    pub fn update_size(&mut self, lod: &LOD) {
+        todo!()
     }
 }
 
@@ -33,4 +36,3 @@ impl Field<u8> for MaterialField {
         self.data[idx] = value;
     }
 }
-
