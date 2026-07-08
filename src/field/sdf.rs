@@ -1,23 +1,37 @@
-// fields/sdf.rs
-use super::{Field, consts::*};
+use super::{Field, Lod};
 use bevy::{platform::collections::HashSet, prelude::*};
 
 #[derive(Component, Clone)]
 pub struct SdfField {
-    data: Box<[f32; CHUNK_VOLUME]>,
+    pub size: u32,
+    data: Box<[f32]>,
     dirty: HashSet<u32>,
 }
 
-impl Default for SdfField {
-    fn default() -> Self {
+impl SdfField {
+    pub fn new(lod: Lod) -> Self {
+        let size = lod.size();
+        let volume = lod.volume();
         Self {
-            data: Box::new([f32::MAX; CHUNK_VOLUME]),
+            size,
+            data: vec![f32::MAX; volume].into_boxed_slice(),
             dirty: HashSet::default(),
         }
     }
-}
 
-impl SdfField {
+    #[inline]
+    fn flatten(&self, x: u32, y: u32, z: u32) -> u32 {
+        z * self.size * self.size + y * self.size + x
+    }
+
+    #[inline]
+    fn unflatten(&self, flat: u32) -> (u32, u32, u32) {
+        let x = flat % self.size;
+        let y = (flat / self.size) % self.size;
+        let z = flat / (self.size * self.size);
+        (x, y, z)
+    }
+
     pub fn is_dirty(&self) -> bool {
         !self.dirty.is_empty()
     }
@@ -28,23 +42,31 @@ impl SdfField {
         }
         let mut to_fix: HashSet<u32> = HashSet::default();
         for &flat in &self.dirty {
-            let (x, y, z) = unflatten(flat);
+            let (x, y, z) = self.unflatten(flat);
             to_fix.insert(flat);
             for (dx, dy, dz) in NEIGHBOR_OFFSETS {
-                if let Some((nx, ny, nz)) = offset(x, y, z, dx, dy, dz) {
-                    to_fix.insert(flatten(nx, ny, nz));
+                if let Some((nx, ny, nz)) = self.offset(x, y, z, dx, dy, dz) {
+                    to_fix.insert(self.flatten(nx, ny, nz));
                 }
             }
         }
         for flat in to_fix {
-            let (x, y, z) = unflatten(flat);
+            let (x, y, z) = self.unflatten(flat);
             self.fixup_cell(x, y, z);
         }
         self.dirty.clear();
     }
 
-    fn fixup_cell(&mut self, _x: u32, _y: u32, _z: u32) {
-        // local sign/distance fixup goes here
+    fn fixup_cell(&mut self, _x: u32, _y: u32, _z: u32) {}
+
+    #[inline]
+    fn offset(&self, x: u32, y: u32, z: u32, dx: i32, dy: i32, dz: i32) -> Option<(u32, u32, u32)> {
+        let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+        if nx < 0 || ny < 0 || nz < 0 {
+            return None;
+        }
+        let (nx, ny, nz) = (nx as u32, ny as u32, nz as u32);
+        (nx < self.size && ny < self.size && nz < self.size).then_some((nx, ny, nz))
     }
 }
 
@@ -57,27 +79,18 @@ const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
-#[inline]
-fn offset(x: u32, y: u32, z: u32, dx: i32, dy: i32, dz: i32) -> Option<(u32, u32, u32)> {
-    let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
-    if nx < 0 || ny < 0 || nz < 0 {
-        return None;
-    }
-    let (nx, ny, nz) = (nx as u32, ny as u32, nz as u32);
-    (nx < CHUNK_SIZE && ny < CHUNK_SIZE && nz < CHUNK_SIZE).then_some((nx, ny, nz))
-}
-
 impl Field<f32> for SdfField {
     fn size(&self) -> UVec3 {
-        UVec3::splat(CHUNK_SIZE)
+        UVec3::splat(self.size)
     }
 
     fn get(&self, x: u32, y: u32, z: u32) -> f32 {
-        self.data[flatten(x, y, z) as usize]
+        let i = self.flatten(x, y, z);
+        self.data[i as usize]
     }
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: f32) {
-        let i = flatten(x, y, z);
+        let i = self.flatten(x, y, z);
         if self.data[i as usize] != value {
             self.data[i as usize] = value;
             self.dirty.insert(i);

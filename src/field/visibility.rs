@@ -4,34 +4,40 @@ use bevy::prelude::*;
 
 #[derive(Component, Clone)]
 pub struct VisibilityField {
-    words: Box<[u64; VISIBILITY_WORDS]>,
+    pub words: Box<[u64; MAX_VISIBILITY_WORDS]>,
 }
 
 impl Default for VisibilityField {
     fn default() -> Self {
         Self {
-            words: Box::new([u64::MAX; VISIBILITY_WORDS]),
-        } // default visible
+            words: Box::new([0; MAX_VISIBILITY_WORDS]),
+        }
     }
 }
 
 impl Field<bool> for VisibilityField {
     fn size(&self) -> UVec3 {
-        UVec3::splat(CHUNK_SIZE)
+        // Keeps trait matching system-wide MAX footprint
+        UVec3::splat(MAX_SIZE)
     }
 
     fn get(&self, x: u32, y: u32, z: u32) -> bool {
-        let bit = flatten(x, y, z) as usize;
-        (self.words[bit / 64] >> (bit % 64)) & 1 != 0
+        let bit = flatten_with_size(x, y, z, MAX_SIZE);
+        let word_idx = (bit / 64) as usize;
+        let shift = bit % 64;
+        ((self.words[word_idx] >> shift) & 1) == 1
     }
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: bool) {
-        let bit = flatten(x, y, z) as usize;
-        let (word, shift) = (bit / 64, bit % 64);
+        let bit = flatten_with_size(x, y, z, MAX_SIZE);
+        let word_idx = (bit / 64) as usize;
+        let shift = bit % 64;
+
         if value {
-            self.words[word] |= 1 << shift;
+            self.words[word_idx] |= 1 << shift;
         } else {
-            self.words[word] &= !(1 << shift);
+            self.words[word_idx] &= !(1 << shift);
         }
     }
 }
+
