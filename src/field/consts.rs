@@ -1,3 +1,5 @@
+use bevy::math::UVec3;
+
 pub const MAX_SIZE: u32 = 64;
 pub const MAX_VOLUME: usize = (MAX_SIZE * MAX_SIZE * MAX_SIZE) as usize; // 262,144
 
@@ -5,6 +7,7 @@ pub const MAX_VOLUME: usize = (MAX_SIZE * MAX_SIZE * MAX_SIZE) as usize; // 262,
 pub const MAX_VISIBILITY_WORDS: usize = MAX_VOLUME / 64;
 
 #[inline]
-pub fn flatten_with_size(x: u32, y: u32, z: u32, size: u32) -> u32 {
-    z * size * size + y * size + x
+pub fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> u32 {
+    // Index = z * (width * height) + y * width + x
+    z * (size.x * size.y) + y * size.x + x
 }

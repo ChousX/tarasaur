@@ -26,3 +26,7 @@ pub trait Field<T: Copy + Default>: Component {
     /// Sets the value at the given grid coordinates.
     fn set(&mut self, x: u32, y: u32, z: u32, value: T);
 }
+
+pub trait FieldGen<T: Copy + Default>: Field<T> {
+    fn build(&mut self, pos: UVec3) -> T;
+}

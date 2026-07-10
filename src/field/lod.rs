@@ -1,10 +1,11 @@
 use bevy::prelude::*;
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LOD {
     Lowest = 4,
     Low = 16,
+    #[default]
     Medium = 32,
     High = 64,
 }

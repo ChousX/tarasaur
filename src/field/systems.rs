@@ -4,7 +4,10 @@ use super::{
     editor::{EditFieldMessage, EditMode},
     ops::{AccumulateExt, BlendExt, FieldBoxOps, FieldSphereOps},
 };
-use crate::chunk::{ChunkManager, world_pos_to_chunk_pos};
+use crate::{
+    CHUNK_SIZE,
+    chunk::{ChunkManager, world_pos_to_chunk_pos},
+};
 use bevy::{
     ecs::{component::Mutable, message::MessageReader},
     math::primitives::{Cuboid, Sphere},
@@ -33,15 +36,19 @@ pub fn process_sphere_edits<F, V>(
             let Ok(mut field) = query.get_mut(chunk_id) else {
                 return;
             };
+            // Transform center from world space to chunk-local space
+            let chunk_world_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
+            let local_center = *center - chunk_world_origin;
+
             match mode {
                 EditMode::Absolute => {
-                    field.fill_sphere(*center, *shape, *val);
+                    field.fill_sphere(local_center, *shape, *val);
                 }
                 EditMode::Accumulate { delta } => {
-                    field.accumulate_sphere(*center, *shape, *delta);
+                    field.accumulate_sphere(local_center, *shape, *delta);
                 }
                 EditMode::Blend { rate } => {
-                    field.blend_sphere(*center, *shape, *val, *rate);
+                    field.blend_sphere(local_center, *shape, *val, *rate);
                 }
             }
         }
@@ -70,16 +77,17 @@ pub fn process_box_edits<F, V>(
             let Ok(mut field) = query.get_mut(chunk_id) else {
                 return;
             };
-
+            let chunk_world_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
+            let local_center = *center - chunk_world_origin;
             match *mode {
                 EditMode::Absolute => {
-                    field.fill_box(*center, *shape, *val);
+                    field.fill_box(local_center, *shape, *val);
                 }
                 EditMode::Accumulate { delta } => {
-                    field.accumulate_box(*center, *shape, delta);
+                    field.accumulate_box(local_center, *shape, delta);
                 }
                 EditMode::Blend { rate } => {
-                    field.blend_box(*center, *shape, *val, rate);
+                    field.blend_box(local_center, *shape, *val, rate);
                 }
             }
         }

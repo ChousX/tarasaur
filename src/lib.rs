@@ -1,8 +1,10 @@
 mod chunk;
 mod field;
-mod material;
+mod index_generation;
+mod indirect_draw;
 mod plugin;
-mod topolagy;
+mod steam_compaction;
+mod voxel_pipeline;
 
 pub use chunk::{CHUNK_SIZE, ChunkManager, ChunkPosition};
 pub use field::{AppFieldExt, Field, FieldSet, LOD, SDFField, VisibilityField};
