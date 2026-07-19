@@ -1,8 +1,10 @@
 // fields/plugin.rs
 use bevy::ecs::component::Mutable;
+use bevy::ecs::system::command::trigger;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
 
+use crate::chunk::NewChunkSpawned;
 use crate::field::{MaterialField, SDFField, VisibilityField};
 
 use super::{
@@ -26,9 +28,14 @@ impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, (FieldSet::Edit, FieldSet::Reinit).chain());
         app.add_systems(Update, reinit_dirty_sdf.in_set(FieldSet::Reinit));
+
         app.add_field::<SDFField, f32>()
             .add_field::<MaterialField, u8>()
             .add_field::<VisibilityField, bool>();
+
+        app.add_observer(sdf_build_on_chunk_spawn)
+            .add_observer(material_build_on_chunk_spawn)
+            .add_observer(visibility_build_on_chunk_spawn);
     }
 }
 
@@ -58,4 +65,56 @@ impl AppFieldExt for App {
 
         self
     }
+}
+
+fn sdf_build_on_chunk_spawn(
+    trigger: On<NewChunkSpawned>,
+    mut commands: Commands,
+    chunk_q: Query<(), With<SDFField>>,
+) {
+    let NewChunkSpawned {
+        entity,
+        ..
+        //world_position,
+        //chunk_position,
+    } = trigger.event();
+    if chunk_q.get(*entity).is_ok() {
+        return;
+    }
+    let new_sdf = SDFField::default();
+    commands.entity(*entity).insert(new_sdf);
+}
+fn visibility_build_on_chunk_spawn(
+    trigger: On<NewChunkSpawned>,
+    mut commands: Commands,
+    chunk_q: Query<(), With<VisibilityField>>,
+) {
+    let NewChunkSpawned {
+        entity,
+        ..
+        //world_position,
+        //chunk_position,
+    } = trigger.event();
+    if chunk_q.get(*entity).is_ok() {
+        return;
+    }
+    let new_visibility = SDFField::default();
+    commands.entity(*entity).insert(new_visibility);
+}
+fn material_build_on_chunk_spawn(
+    trigger: On<NewChunkSpawned>,
+    mut commands: Commands,
+    chunk_q: Query<(), With<MaterialField>>,
+) {
+    let NewChunkSpawned {
+        entity,
+        ..
+        //world_position,
+        //chunk_position,
+    } = trigger.event();
+    if chunk_q.get(*entity).is_ok() {
+        return;
+    }
+    let new_material = SDFField::default();
+    commands.entity(*entity).insert(new_material);
 }

@@ -30,7 +30,7 @@ impl PackedCoord {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Default)]
 pub struct SDFField {
     pub lod: LOD,
     data: Box<[f32]>,
