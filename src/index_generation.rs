@@ -1,3 +1,4 @@
+//src/index_generation.rs
 use bevy::{
     prelude::*,
     render::{
@@ -58,7 +59,7 @@ impl Plugin for VoxelIndexGenerationPlugin {
                     },
                     count: None,
                 },
-                // Binding 1: Scattered Cell Flags
+                // Binding 1: Scattered Cell Flags (Read-Only in Pass 3)
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
@@ -69,7 +70,7 @@ impl Plugin for VoxelIndexGenerationPlugin {
                     },
                     count: None,
                 },
-                // Binding 2: Compacted Cell Prefix Sum Offsets
+                // Binding 2: Compacted Cell Prefix Sum Offsets (Read-Only in Pass 3)
                 BindGroupLayoutEntry {
                     binding: 2,
                     visibility: ShaderStages::COMPUTE,
@@ -113,12 +114,11 @@ impl Plugin for VoxelIndexGenerationPlugin {
         });
 
         // 2. Safely embed the WGSL shader code directly via raw string
-        // Inside your plugin's finish function around line 116
         let shader = unsafe {
             render_device.create_shader_module(ShaderModuleDescriptor {
                 label: Some("surface_nets_pass3_shader"),
                 source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                    "../assets/shaders/surface_nets_pass3.wgsl"
+                    "shaders/surface_nets_pass3.wgsl"
                 ))),
             })
         };
@@ -187,8 +187,12 @@ fn dispatch_index_generation_pass(
         compute_pass.set_pipeline(&pipeline_cache.pipeline);
         compute_pass.set_bind_group(0, &pass3_bind_group, &[]);
 
-        // Dispatch across volume domain bounds (32 / 8 = 4 workgroups per axis)
-        compute_pass.dispatch_workgroups(4, 4, 4);
+        // Dynamic workgroup calculation supporting LOD scales from 4 up to 64
+        // (Assumes `chunk.chunk_size` stores the active u32 dimension length per axis)
+        let workgroup_size = 8;
+        let chunk_dim = chunk.lod;
+        let dispatch_dim = (chunk_dim + workgroup_size - 1) / workgroup_size;
+
+        compute_pass.dispatch_workgroups(dispatch_dim, dispatch_dim, dispatch_dim);
     }
 }
-

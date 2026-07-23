@@ -2,11 +2,16 @@ use crate::voxel_pipeline::GpuVoxelChunkBuffers;
 use bevy::{
     prelude::*,
     render::{
-        Render, RenderApp, RenderSystems,
+        ExtractSchedule, Render, RenderApp, RenderSystems,
+        render_asset::RenderAssets,
+        render_phase::TrackedRenderPass,
         render_resource::*,
-        renderer::{RenderContext, RenderDevice},
+        renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::GpuImage,
-        view::{ExtractedView, ViewDepthTexture, ViewTarget},
+        view::{
+            ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset,
+            ViewUniforms,
+        },
     },
 };
 
@@ -29,7 +34,8 @@ impl Plugin for VoxelIndirectDrawPlugin {
                 Render,
                 (
                     prepare_voxel_draw_pipeline.in_set(RenderSystems::Prepare),
-                    render_voxel_chunks_indirect.in_set(RenderSystems::Render),
+                    render_voxel_chunks_indirect.run_if(resource_exists::<VoxelDrawPipeline>), //in_set(RenderSystems::Render)
+                                                                                               //.run_if(resource_exists::<VoxelDrawPipeline>),
                 ),
             );
     }
@@ -74,29 +80,32 @@ fn extract_voxel_chunks(
 fn extract_voxel_material(
     render_device: Res<RenderDevice>,
     pipeline: Option<Res<VoxelDrawPipeline>>,
-    gpu_images: Res<bevy::render::render_asset::RenderAssets<GpuImage>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
     material_asset: Option<Res<VoxelMaterialAsset>>,
     mut extracted_material: ResMut<ExtractedVoxelMaterial>,
 ) {
-    if let (Some(pipeline), Some(material)) = (pipeline, material_asset) {
-        if extracted_material.material_bind_group.is_none() {
-            if let Some(gpu_image) = gpu_images.get(&material.texture_handle) {
-                let bind_group = render_device.create_bind_group(
-                    Some("voxel_material_bind_group"),
-                    &pipeline.material_bind_group_layout,
-                    &[
-                        BindGroupEntry {
-                            binding: 0,
-                            resource: BindingResource::TextureView(&gpu_image.texture_view),
-                        },
-                        BindGroupEntry {
-                            binding: 1,
-                            resource: BindingResource::Sampler(&gpu_image.sampler),
-                        },
-                    ],
-                );
-                extracted_material.material_bind_group = Some(bind_group);
-            }
+    let (Some(pipeline), Some(material)) = (pipeline, material_asset) else {
+        extracted_material.material_bind_group = None;
+        return;
+    };
+
+    if extracted_material.material_bind_group.is_none() {
+        if let Some(gpu_image) = gpu_images.get(&material.texture_handle) {
+            let bind_group = render_device.create_bind_group(
+                Some("voxel_material_bind_group"),
+                &pipeline.material_bind_group_layout,
+                &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::TextureView(&gpu_image.texture_view),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindingResource::Sampler(&gpu_image.sampler),
+                    },
+                ],
+            );
+            extracted_material.material_bind_group = Some(bind_group);
         }
     }
 }
@@ -108,11 +117,19 @@ pub struct VoxelDrawPipeline {
     pub material_bind_group_layout: BindGroupLayout,
 }
 
-fn prepare_voxel_draw_pipeline(mut commands: Commands, render_device: Res<RenderDevice>) {
+fn prepare_voxel_draw_pipeline(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    existing_pipeline: Option<Res<VoxelDrawPipeline>>,
+) {
+    if existing_pipeline.is_some() {
+        return;
+    }
+
     let shader = unsafe {
         render_device.create_shader_module(ShaderModuleDescriptor {
             label: Some("voxel_draw_shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/shaders/voxel_raster.wgsl").into()),
+            source: ShaderSource::Wgsl(include_str!("shaders/voxel_raster.wgsl").into()),
         })
     };
 
@@ -123,8 +140,8 @@ fn prepare_voxel_draw_pipeline(mut commands: Commands, render_device: Res<Render
             visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             ty: BindingType::Buffer {
                 ty: BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+                has_dynamic_offset: true,
+                min_binding_size: Some(ViewUniform::min_size()),
             },
             count: None,
         }],
@@ -163,7 +180,7 @@ fn prepare_voxel_draw_pipeline(mut commands: Commands, render_device: Res<Render
     });
 
     let vertex_buffers = [RawVertexBufferLayout {
-        array_stride: 32, // Accommodating float32x4 mappings
+        array_stride: 32, // Accommodating float32x4 mappings (Pos + Normal)
         step_mode: VertexStepMode::Vertex,
         attributes: &[
             VertexAttribute {
@@ -202,7 +219,8 @@ fn prepare_voxel_draw_pipeline(mut commands: Commands, render_device: Res<Render
             topology: PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: FrontFace::Ccw,
-            cull_mode: Some(Face::Back),
+            //cull_mode: Some(Face::Back),
+            cull_mode: None,
             unclipped_depth: false,
             polygon_mode: PolygonMode::Fill,
             conservative: false,
@@ -227,21 +245,45 @@ fn prepare_voxel_draw_pipeline(mut commands: Commands, render_device: Res<Render
 }
 
 fn render_voxel_chunks_indirect(
-    mut render_context: RenderContext,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
     pipeline: Res<VoxelDrawPipeline>,
     extracted_chunks: Res<ExtractedVoxelChunks>,
     extracted_material: Res<ExtractedVoxelMaterial>,
-    view_query: Query<(&ViewTarget, &ViewDepthTexture, &ExtractedView)>,
+    view_uniforms: Res<ViewUniforms>,
+    view_query: Query<(
+        &ViewTarget,
+        &ViewDepthTexture,
+        &ViewUniformOffset,
+        &ExtractedView,
+    )>,
 ) {
     if extracted_chunks.chunks.is_empty() {
         return;
     }
 
     let Some(material_bind_group) = &extracted_material.material_bind_group else {
-        return; // Guard against unallocated textures
+        return;
     };
 
-    for (view_target, depth_texture, _view) in view_query.iter() {
+    let Some(view_binding) = view_uniforms.uniforms.binding() else {
+        return;
+    };
+
+    let view_bind_group = render_device.create_bind_group(
+        Some("voxel_view_bind_group"),
+        &pipeline.view_bind_group_layout,
+        &[BindGroupEntry {
+            binding: 0,
+            resource: view_binding,
+        }],
+    );
+
+    let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("voxel_indirect_draw_encoder"),
+    });
+
+    for (view_target, depth_texture, view_uniform_offset, _view) in view_query.iter() {
         let render_pass_desc = RenderPassDescriptor {
             label: Some("voxel_indirect_draw_pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -266,21 +308,20 @@ fn render_voxel_chunks_indirect(
             multiview_mask: None,
         };
 
-        let mut render_pass = render_context
-            .command_encoder()
-            .begin_render_pass(&render_pass_desc);
+        let raw_render_pass = command_encoder.begin_render_pass(&render_pass_desc);
+        let mut tracked_pass = TrackedRenderPass::new(&render_device, raw_render_pass);
 
-        render_pass.set_pipeline(&pipeline.pipeline_id);
-
-        // Bind the material textures to Group 1
-        render_pass.set_bind_group(1, material_bind_group, &[]);
+        tracked_pass.set_render_pipeline(&pipeline.pipeline_id);
+        // Pass the dynamic offset here safely
+        tracked_pass.set_bind_group(0, &view_bind_group, &[view_uniform_offset.offset]);
+        tracked_pass.set_bind_group(1, material_bind_group, &[]);
 
         for chunk in &extracted_chunks.chunks {
-            // Note: Ensure Group 0 (View Uniforms) is set outside or wrapped here depending on your view binding strategy
-            render_pass.set_vertex_buffer(0, (*chunk.vertex_buffer).slice(..));
-            render_pass.set_index_buffer((*chunk.index_buffer).slice(..), IndexFormat::Uint32);
-            render_pass.draw_indexed_indirect(&chunk.indirect_args_buffer, 0);
+            tracked_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+            tracked_pass.set_index_buffer(chunk.index_buffer.slice(..), IndexFormat::Uint32);
+            tracked_pass.draw_indexed_indirect(&chunk.indirect_args_buffer, 0);
         }
     }
-}
 
+    render_queue.submit(std::iter::once(command_encoder.finish()));
+}
