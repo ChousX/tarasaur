@@ -31,7 +31,9 @@ impl Plugin for VoxelIndirectDrawPlugin {
             )
             .add_systems(
                 Render,
-                prepare_voxel_draw_pipeline.in_set(RenderSystems::Prepare),
+                prepare_voxel_draw_pipeline
+                    .in_set(RenderSystems::Prepare)
+                    .run_if(resource_exists::<VoxelRasterShader>),
             )
             .add_systems(
                 Core3d,

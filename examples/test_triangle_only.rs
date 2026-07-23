@@ -1,4 +1,5 @@
 use bevy::{
+    asset::RenderAssetUsages,
     prelude::*,
     render::{Render, RenderApp, RenderSystems, render_resource::*, renderer::RenderDevice},
 };
@@ -12,37 +13,64 @@ use tarasaur::{
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct TestVertex {
-    position: [f32; 4], // matches attribute 0 (Float32x4, offset 0)
-    extra: [f32; 4], // matches attribute 1 (Float32x4, offset 16) - color/normal/whatever your shader expects
+    position: [f32; 4],
+    normal: [f32; 4],
 }
 
 fn main() {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins)
-        .insert_resource(Msaa::Off) // rule out the MSAA/sample-count mismatch
-        .add_plugins(VoxelIndirectDrawPlugin)
+        .add_plugins((VoxelIndirectDrawPlugin, TestTrianglePlugin))
         .add_systems(Startup, setup_scene);
-
-    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        render_app
-            .init_resource::<TestTriangleBuffers>()
-            .add_systems(Render, seed_test_triangle.in_set(RenderSystems::Prepare));
-    }
 
     app.run();
 }
 
-fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         Camera3d::default(),
+        Msaa::Off,
         Transform::from_xyz(0.0, 0.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // VoxelIndirectDrawPlugin needs a material bind group before it will draw anything -
-    // point it at any existing image so extract_voxel_material has something to bind.
-    let texture_handle: Handle<Image> = asset_server.load("textures/terrain_albedo.png");
+    let image = Image::new_fill(
+        Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[255, 255, 255, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    let texture_handle = images.add(image);
+
     commands.insert_resource(VoxelMaterialAsset { texture_handle });
+}
+
+// --- The fix lives here: build() vs finish() ---
+
+struct TestTrianglePlugin;
+
+impl Plugin for TestTrianglePlugin {
+    fn build(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        // Safe to register the system here - it doesn't touch RenderDevice
+        // until it actually runs, well after finish() has completed.
+        render_app.add_systems(Render, seed_test_triangle.in_set(RenderSystems::Prepare));
+    }
+
+    fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        // RenderDevice now exists - safe to construct buffers that need it.
+        render_app.init_resource::<TestTriangleBuffers>();
+    }
 }
 
 #[derive(Resource)]
@@ -56,18 +84,19 @@ impl FromWorld for TestTriangleBuffers {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
 
+        let n = [0.0, 0.0, 1.0, 0.0];
         let vertices = [
             TestVertex {
                 position: [-1.5, -1.0, 0.0, 1.0],
-                extra: [1.0, 0.0, 0.0, 1.0],
+                normal: n,
             },
             TestVertex {
                 position: [1.5, -1.0, 0.0, 1.0],
-                extra: [0.0, 1.0, 0.0, 1.0],
+                normal: n,
             },
             TestVertex {
                 position: [0.0, 1.5, 0.0, 1.0],
-                extra: [0.0, 0.0, 1.0, 1.0],
+                normal: n,
             },
         ];
 
@@ -85,7 +114,7 @@ impl FromWorld for TestTriangleBuffers {
         });
 
         let args = DrawIndexedIndirectArgs {
-            index_count: 3, // <- the important part: non-zero, unlike your real pipeline right now
+            index_count: 3,
             instance_count: 1,
             first_index: 0,
             base_vertex: 0,
