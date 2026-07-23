@@ -1,19 +1,18 @@
-use crate::voxel_pipeline::GpuVoxelChunkBuffers;
+use crate::{VoxelRasterShader, voxel_pipeline::GpuVoxelChunkBuffers};
 use bevy::{
+    core_pipeline::{Core3d, Core3dSystems, core_3d::main_opaque_pass_3d},
+    mesh::VertexBufferLayout,
     prelude::*,
     render::{
         ExtractSchedule, Render, RenderApp, RenderSystems,
         render_asset::RenderAssets,
-        render_phase::TrackedRenderPass,
         render_resource::*,
-        renderer::{RenderContext, RenderDevice, RenderQueue},
+        renderer::{RenderContext, RenderDevice, ViewQuery},
         texture::GpuImage,
-        view::{
-            ExtractedView, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset,
-            ViewUniforms,
-        },
+        view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
     },
 };
+use std::borrow::Cow;
 
 pub struct VoxelIndirectDrawPlugin;
 
@@ -32,11 +31,14 @@ impl Plugin for VoxelIndirectDrawPlugin {
             )
             .add_systems(
                 Render,
-                (
-                    prepare_voxel_draw_pipeline.in_set(RenderSystems::Prepare),
-                    render_voxel_chunks_indirect.run_if(resource_exists::<VoxelDrawPipeline>), //in_set(RenderSystems::Render)
-                                                                                               //.run_if(resource_exists::<VoxelDrawPipeline>),
-                ),
+                prepare_voxel_draw_pipeline.in_set(RenderSystems::Prepare),
+            )
+            .add_systems(
+                Core3d,
+                render_voxel_chunks_system
+                    .after(main_opaque_pass_3d)
+                    .in_set(Core3dSystems::MainPass)
+                    .run_if(resource_exists::<VoxelDrawPipeline>),
             );
     }
 }
@@ -57,7 +59,6 @@ pub struct ExtractedVoxelMaterial {
     pub material_bind_group: Option<BindGroup>,
 }
 
-// Handle for a terrain texture asset managed on the Main App side
 #[derive(Resource)]
 pub struct VoxelMaterialAsset {
     pub texture_handle: Handle<Image>,
@@ -77,7 +78,7 @@ fn extract_voxel_chunks(
     }
 }
 
-fn extract_voxel_material(
+pub fn extract_voxel_material(
     render_device: Res<RenderDevice>,
     pipeline: Option<Res<VoxelDrawPipeline>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
@@ -112,27 +113,28 @@ fn extract_voxel_material(
 
 #[derive(Resource)]
 pub struct VoxelDrawPipeline {
-    pub pipeline_id: RenderPipeline,
+    pub pipeline_id: CachedRenderPipelineId,
     pub view_bind_group_layout: BindGroupLayout,
     pub material_bind_group_layout: BindGroupLayout,
 }
 
-fn prepare_voxel_draw_pipeline(
+pub fn prepare_voxel_draw_pipeline(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
+    shader_res: Res<VoxelRasterShader>,
+    mut pipeline_cache: ResMut<PipelineCache>,
     existing_pipeline: Option<Res<VoxelDrawPipeline>>,
 ) {
     if existing_pipeline.is_some() {
         return;
     }
 
-    let shader = unsafe {
-        render_device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("voxel_draw_shader"),
-            source: ShaderSource::Wgsl(include_str!("shaders/voxel_raster.wgsl").into()),
-        })
-    };
-
+    // PipelineCache needs an asset Handle<Shader> (not a raw wgpu::ShaderModule) so it
+    // can build the pipeline lazily and support hot-reload. Requires this file to exist
+    // under your assets root, e.g. `assets/shaders/voxel_raster.wgsl`.
+    let shader: Handle<Shader> = shader_res.0.clone();
+    // These are the *real* layout objects we'll reuse later to build actual bind groups
+    // (in extract_voxel_material and render_voxel_chunks_system).
     let view_bind_group_layout = render_device.create_bind_group_layout(
         Some("voxel_view_layout"),
         &[BindGroupLayoutEntry {
@@ -147,7 +149,6 @@ fn prepare_voxel_draw_pipeline(
         }],
     );
 
-    // Layout configuration for Triplanar Mapping textures
     let material_bind_group_layout = render_device.create_bind_group_layout(
         Some("voxel_material_layout"),
         &[
@@ -170,19 +171,10 @@ fn prepare_voxel_draw_pipeline(
         ],
     );
 
-    let pipeline_layout = render_device.create_pipeline_layout(&PipelineLayoutDescriptor {
-        label: Some("voxel_draw_pipeline_layout"),
-        bind_group_layouts: &[
-            Some(&view_bind_group_layout),
-            Some(&material_bind_group_layout),
-        ],
-        immediate_size: 0,
-    });
-
-    let vertex_buffers = [RawVertexBufferLayout {
-        array_stride: 32, // Accommodating float32x4 mappings (Pos + Normal)
+    let vertex_buffers = vec![VertexBufferLayout {
+        array_stride: 32,
         step_mode: VertexStepMode::Vertex,
-        attributes: &[
+        attributes: vec![
             VertexAttribute {
                 format: VertexFormat::Float32x4,
                 offset: 0,
@@ -196,30 +188,69 @@ fn prepare_voxel_draw_pipeline(
         ],
     }];
 
-    let pipeline_id = render_device.create_render_pipeline(&RawRenderPipelineDescriptor {
-        label: Some("voxel_indirect_draw_pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: RawVertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &vertex_buffers,
-            compilation_options: PipelineCompilationOptions::default(),
+    // PipelineCache wants descriptors of the bind group layouts (so it can build/rebuild
+    // the pipeline layout itself), not a pre-built PipelineLayout object. These must
+    // describe the SAME bindings as the real layouts above, in the same group order.
+    let layout_descriptors = vec![
+        BindGroupLayoutDescriptor {
+            label: Cow::Borrowed("voxel_view_layout"),
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: Some(ViewUniform::min_size()),
+                },
+                count: None,
+            }],
         },
-        fragment: Some(RawFragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(ColorTargetState {
+        BindGroupLayoutDescriptor {
+            label: Cow::Borrowed("voxel_material_layout"),
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        },
+    ];
+
+    let pipeline_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("voxel_indirect_draw_pipeline".into()),
+        layout: layout_descriptors,
+        vertex: VertexState {
+            shader: shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("vs_main".into()),
+            buffers: vertex_buffers,
+        },
+        fragment: Some(FragmentState {
+            shader,
+            shader_defs: vec![],
+            entry_point: Some("fs_main".into()),
+            targets: vec![Some(ColorTargetState {
                 format: TextureFormat::Bgra8UnormSrgb,
                 blend: Some(BlendState::REPLACE),
                 write_mask: ColorWrites::ALL,
             })],
-            compilation_options: PipelineCompilationOptions::default(),
         }),
         primitive: PrimitiveState {
             topology: PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: FrontFace::Ccw,
-            //cull_mode: Some(Face::Back),
             cull_mode: None,
             unclipped_depth: false,
             polygon_mode: PolygonMode::Fill,
@@ -233,8 +264,8 @@ fn prepare_voxel_draw_pipeline(
             bias: DepthBiasState::default(),
         }),
         multisample: MultisampleState::default(),
-        cache: None,
-        multiview_mask: None,
+        immediate_size: 0,
+        zero_initialize_workgroup_memory: false,
     });
 
     commands.insert_resource(VoxelDrawPipeline {
@@ -244,23 +275,22 @@ fn prepare_voxel_draw_pipeline(
     });
 }
 
-fn render_voxel_chunks_indirect(
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
+pub fn render_voxel_chunks_system(
+    view_query: ViewQuery<(&ViewTarget, &ViewDepthTexture, &ViewUniformOffset)>,
+    mut render_context: RenderContext,
     pipeline: Res<VoxelDrawPipeline>,
+    pipeline_cache: Res<PipelineCache>,
     extracted_chunks: Res<ExtractedVoxelChunks>,
     extracted_material: Res<ExtractedVoxelMaterial>,
     view_uniforms: Res<ViewUniforms>,
-    view_query: Query<(
-        &ViewTarget,
-        &ViewDepthTexture,
-        &ViewUniformOffset,
-        &ExtractedView,
-    )>,
 ) {
     if extracted_chunks.chunks.is_empty() {
         return;
     }
+
+    let Some(loaded_pipeline) = pipeline_cache.get_render_pipeline(pipeline.pipeline_id) else {
+        return;
+    };
 
     let Some(material_bind_group) = &extracted_material.material_bind_group else {
         return;
@@ -270,7 +300,7 @@ fn render_voxel_chunks_indirect(
         return;
     };
 
-    let view_bind_group = render_device.create_bind_group(
+    let view_bind_group = render_context.render_device().create_bind_group(
         Some("voxel_view_bind_group"),
         &pipeline.view_bind_group_layout,
         &[BindGroupEntry {
@@ -279,49 +309,41 @@ fn render_voxel_chunks_indirect(
         }],
     );
 
-    let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("voxel_indirect_draw_encoder"),
-    });
+    let (view_target, depth_texture, view_uniform_offset) = view_query.into_inner();
 
-    for (view_target, depth_texture, view_uniform_offset, _view) in view_query.iter() {
-        let render_pass_desc = RenderPassDescriptor {
-            label: Some("voxel_indirect_draw_pass"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: view_target.main_texture_view(),
-                resolve_target: None,
-                ops: Operations {
-                    load: LoadOp::Load,
-                    store: StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: depth_texture.view(),
-                depth_ops: Some(Operations {
-                    load: LoadOp::Load,
-                    store: StoreOp::Store,
-                }),
-                stencil_ops: None,
+    let render_pass_desc = RenderPassDescriptor {
+        label: Some("voxel_indirect_draw_pass"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: view_target.main_texture_view(),
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view: depth_texture.view(),
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
             }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        };
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    };
 
-        let raw_render_pass = command_encoder.begin_render_pass(&render_pass_desc);
-        let mut tracked_pass = TrackedRenderPass::new(&render_device, raw_render_pass);
+    let mut tracked_pass = render_context.begin_tracked_render_pass(render_pass_desc);
 
-        tracked_pass.set_render_pipeline(&pipeline.pipeline_id);
-        // Pass the dynamic offset here safely
-        tracked_pass.set_bind_group(0, &view_bind_group, &[view_uniform_offset.offset]);
-        tracked_pass.set_bind_group(1, material_bind_group, &[]);
+    tracked_pass.set_render_pipeline(loaded_pipeline);
+    tracked_pass.set_bind_group(0, &view_bind_group, &[view_uniform_offset.offset]);
+    tracked_pass.set_bind_group(1, material_bind_group, &[]);
 
-        for chunk in &extracted_chunks.chunks {
-            tracked_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
-            tracked_pass.set_index_buffer(chunk.index_buffer.slice(..), IndexFormat::Uint32);
-            tracked_pass.draw_indexed_indirect(&chunk.indirect_args_buffer, 0);
-        }
+    for chunk in &extracted_chunks.chunks {
+        tracked_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+        tracked_pass.set_index_buffer(chunk.index_buffer.slice(..), IndexFormat::Uint32);
+        tracked_pass.draw_indexed_indirect(&chunk.indirect_args_buffer, 0);
     }
-
-    render_queue.submit(std::iter::once(command_encoder.finish()));
 }

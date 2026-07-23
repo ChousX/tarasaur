@@ -1,10 +1,17 @@
-use crate::SDFField;
+use crate::{
+    SDFField,
+    indirect_draw::{
+        ExtractedVoxelChunks, ExtractedVoxelMaterial, VoxelDrawPipeline, extract_voxel_material,
+        prepare_voxel_draw_pipeline, render_voxel_chunks_system,
+    },
+};
 use bevy::{
+    core_pipeline::{Core3d, Core3dSystems, core_3d::main_opaque_pass_3d},
     prelude::*,
     render::{
         Extract, Render, RenderApp, RenderSystems,
         render_resource::*,
-        renderer::{RenderContext, RenderDevice, RenderQueue},
+        renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
     },
 };
@@ -356,22 +363,36 @@ pub struct VoxelRenderPlugin;
 
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
+        // Register the embedded WGSL as a real asset in the *main* app.
+        let shader_handle = {
+            let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
+            shaders.add(Shader::from_wgsl(
+                include_str!("shaders/voxel_raster.wgsl"),
+                "shaders/voxel_raster.wgsl", // just a debug label, not a real path
+            ))
+        };
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
         render_app
-            .add_systems(ExtractSchedule, extract_voxel_chunks)
+            .insert_resource(VoxelRasterShader(shader_handle))
+            .init_resource::<ExtractedVoxelChunks>()
+            .init_resource::<ExtractedVoxelMaterial>()
+            .add_systems(
+                ExtractSchedule,
+                (extract_voxel_chunks, extract_voxel_material),
+            )
             .add_systems(
                 Render,
-                (
-                    prepare_voxel_chunk_buffers.in_set(RenderSystems::Prepare),
-                    dispatch_voxel_compute_passes
-                        .in_set(RenderSystems::Render)
-                        .run_if(resource_exists::<VoxelComputePipeline>),
-                )
-                    .chain()
-                    .run_if(resource_exists::<VoxelPipelineLayouts>),
+                prepare_voxel_draw_pipeline.in_set(RenderSystems::Prepare),
+            )
+            .add_systems(
+                Core3d,
+                render_voxel_chunks_system
+                    .after(main_opaque_pass_3d)
+                    .in_set(Core3dSystems::MainPass)
+                    .run_if(resource_exists::<VoxelDrawPipeline>),
             );
     }
 
@@ -758,3 +779,5 @@ pub fn dispatch_voxel_compute_passes(
 
     render_queue.submit(std::iter::once(command_encoder.finish()));
 }
+#[derive(Resource, Clone)]
+pub struct VoxelRasterShader(pub(crate) Handle<Shader>);
