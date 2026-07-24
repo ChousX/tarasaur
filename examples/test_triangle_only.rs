@@ -1,9 +1,13 @@
 use bevy::{
     asset::RenderAssetUsages,
     prelude::*,
-    render::{Render, RenderApp, RenderSystems, render_resource::*, renderer::RenderDevice},
+    render::{
+        Render, RenderApp, RenderSystems, render_resource::*, renderer::RenderDevice,
+        view::ViewTarget,
+    },
 };
 use tarasaur::{
+    VoxelRenderPlugin,
     indirect_draw::{
         ExtractedVoxelChunks, GpuChunkDrawData, VoxelIndirectDrawPlugin, VoxelMaterialAsset,
     },
@@ -21,7 +25,11 @@ fn main() {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins)
-        .add_plugins((VoxelIndirectDrawPlugin, TestTrianglePlugin))
+        .add_plugins((
+            VoxelIndirectDrawPlugin,
+            TestTrianglePlugin,
+            VoxelRenderPlugin,
+        ))
         .add_systems(Startup, setup_scene);
 
     app.run();
@@ -62,6 +70,7 @@ impl Plugin for TestTrianglePlugin {
         // Safe to register the system here - it doesn't touch RenderDevice
         // until it actually runs, well after finish() has completed.
         render_app.add_systems(Render, seed_test_triangle.in_set(RenderSystems::Prepare));
+        render_app.add_systems(Render, diagnose_view_format.in_set(RenderSystems::Prepare));
     }
 
     fn finish(&self, app: &mut App) {
@@ -70,6 +79,19 @@ impl Plugin for TestTrianglePlugin {
         };
         // RenderDevice now exists - safe to construct buffers that need it.
         render_app.init_resource::<TestTriangleBuffers>();
+    }
+}
+
+fn diagnose_view_format(views: Query<&ViewTarget>, mut logged: Local<bool>) {
+    if *logged {
+        return;
+    }
+    for view_target in &views {
+        info!(
+            "ACTUAL view target format: {:?} ",
+            view_target.main_texture_format()
+        );
+        *logged = true;
     }
 }
 

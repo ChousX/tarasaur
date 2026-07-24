@@ -9,7 +9,7 @@ use bevy::{
 };
 use std::sync::{Arc, Mutex};
 use tarasaur::{
-    Field, SDFField,
+    Field, SDFField, TarasaurPlugin,
     chunk::ChunkPosition,
     field::LOD,
     index_generation::VoxelIndexGenerationPlugin,
@@ -37,11 +37,7 @@ fn main() {
         }),
         ..default()
     }))
-    .add_plugins((
-        VoxelRenderPlugin,
-        VoxelIndexGenerationPlugin,
-        VoxelIndirectDrawPlugin,
-    ))
+    .add_plugins(TarasaurPlugin)
     .insert_resource(shared_state.clone())
     .add_systems(Startup, setup_scene);
 
@@ -57,25 +53,36 @@ fn main() {
 }
 
 fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
-    // 1. Setup Camera positioned at (30.0, 30.0, 30.0) looking at (16.0, 16.0, 16.0)
+    let chunk_world_size = 10.0;
+    let chunk_world_center = Vec3::splat(chunk_world_size / 2.0); // (5.0, 5.0, 5.0)
+
+    // 1. Setup Camera positioned slightly outside the 10x10x10 chunk, looking at its center
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(15.0, 15.0, 15.0).looking_at(Vec3::new(5.0, 5.0, 5.0), Vec3::Y),
+        Msaa::Off,
+        Transform::from_xyz(12.0, 12.0, 15.0).looking_at(chunk_world_center, Vec3::Y),
     ));
 
-    // 2. Spawn a single sphere SDF chunk at origin (0, 0, 0) with radius 12.0 inside a 32^3 grid
-    let chunk_size = 32;
+    // 2. Spawn a single sphere SDF chunk at origin (0, 0, 0) inside a 10x10x10 world bounds
+    let chunk_resolution = 32; // Number of voxels across one dimension for this LOD
     let lod = LOD::default();
     let mut sdf_field = SDFField::new(lod);
 
-    let center = Vec3::new(16.0, 16.0, 16.0);
-    let radius = 12.0;
+    // Give the sphere a 4.0 unit radius in world space (fits well within the 10.0 chunk)
+    let radius_world = 4.0;
 
-    for z in 0..chunk_size {
-        for y in 0..chunk_size {
-            for x in 0..chunk_size {
-                let pos = Vec3::new(x as f32, y as f32, z as f32);
-                let dist = pos.distance(center) - radius;
+    for z in 0..chunk_resolution {
+        for y in 0..chunk_resolution {
+            for x in 0..chunk_resolution {
+                // Map the voxel index (0..32) into world space (0.0..10.0)
+                let pos_world = Vec3::new(
+                    (x as f32 / chunk_resolution as f32) * chunk_world_size,
+                    (y as f32 / chunk_resolution as f32) * chunk_world_size,
+                    (z as f32 / chunk_resolution as f32) * chunk_world_size,
+                );
+
+                // Calculate the SDF distance using world-space units
+                let dist = pos_world.distance(chunk_world_center) - radius_world;
                 sdf_field.set(x, y, z, dist);
             }
         }
@@ -137,12 +144,15 @@ fn verify_indirect_args_debug(
             let index_count = args[0];
             let instance_count = args[1];
 
-            println!(
-                "🔍 [GPU Readback] Indirect Draw Args -> index_count: {}, instance_count: {}",
-                index_count, instance_count
-            );
+            // Wait until the compute passes have successfully populated the indirect buffer
+            if index_count > 0 {
+                println!(
+                    "🔍 [GPU Readback] Indirect Draw Args -> index_count: {}, instance_count: {}",
+                    index_count, instance_count
+                );
 
-            state.checked = true;
+                state.checked = true;
+            }
         }
 
         staging_indirect.unmap();

@@ -12,16 +12,21 @@ struct IndirectDrawArgs {
     first_instance: u32,
 }
 
-const CHUNK_SIZE: u32 = 32u; // Matches uniform sizing limits
+// Add the uniform structure and binding for chunk_size
+struct Uniforms {
+    chunk_size: u32,
+}
+@group(0) @binding(5) var<uniform> uniforms: Uniforms;
 
 fn get_cell_index(coord: vec3<u32>) -> u32 {
-    return coord.x + (coord.y * CHUNK_SIZE) + (coord.z * CHUNK_SIZE * CHUNK_SIZE);
+    // Update to use uniforms.chunk_size
+    return coord.x + (coord.y * uniforms.chunk_size) + (coord.z * uniforms.chunk_size * uniforms.chunk_size);
 }
 
 @compute @workgroup_size(8, 8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    // Avoid boundary spill on lookups (require 1 extra cell padding for edge calculation)
-    if (id.x >= CHUNK_SIZE - 1u || id.y >= CHUNK_SIZE - 1u || id.z >= CHUNK_SIZE - 1u) {
+    // Update boundary spill check to use uniforms.chunk_size
+    if (id.x >= uniforms.chunk_size - 1u || id.y >= uniforms.chunk_size - 1u || id.z >= uniforms.chunk_size - 1u) {
         return;
     }
 

@@ -4,10 +4,10 @@ use bevy::{
     mesh::VertexBufferLayout,
     prelude::*,
     render::{
-        ExtractSchedule, Render, RenderApp, RenderSystems,
+        Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
         render_asset::RenderAssets,
-        render_resource::*,
-        renderer::{RenderContext, RenderDevice, ViewQuery},
+        render_resource::{binding_types::*, *},
+        renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         texture::GpuImage,
         view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
     },
@@ -31,9 +31,12 @@ impl Plugin for VoxelIndirectDrawPlugin {
             )
             .add_systems(
                 Render,
-                prepare_voxel_draw_pipeline
-                    .in_set(RenderSystems::Prepare)
-                    .run_if(resource_exists::<VoxelRasterShader>),
+                (
+                    setup_debug_vertex_buffer.in_set(RenderSystems::Prepare),
+                    prepare_voxel_draw_pipeline
+                        .in_set(RenderSystems::Prepare)
+                        .run_if(resource_exists::<VoxelRasterShader>),
+                ),
             )
             .add_systems(
                 Core3d,
@@ -43,6 +46,49 @@ impl Plugin for VoxelIndirectDrawPlugin {
                     .run_if(resource_exists::<VoxelDrawPipeline>),
             );
     }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct HardcodedVertex {
+    position: [f32; 4],
+    normal: [f32; 4],
+}
+
+#[derive(Resource)]
+pub struct DebugVertexBuffer(pub Buffer);
+
+fn setup_debug_vertex_buffer(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    existing: Option<Res<DebugVertexBuffer>>,
+) {
+    if existing.is_some() {
+        return;
+    }
+
+    let vertices = [
+        HardcodedVertex {
+            position: [0.0, 0.5, -2.0, 1.0],
+            normal: [0.0, 0.0, 1.0, 0.0],
+        },
+        HardcodedVertex {
+            position: [-0.5, -0.5, -2.0, 1.0],
+            normal: [0.0, 0.0, 1.0, 0.0],
+        },
+        HardcodedVertex {
+            position: [0.5, -0.5, -2.0, 1.0],
+            normal: [0.0, 0.0, 1.0, 0.0],
+        },
+    ];
+
+    let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("Debug Triangle Vertex Buffer"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: BufferUsages::VERTEX,
+    });
+
+    commands.insert_resource(DebugVertexBuffer(buffer));
 }
 
 #[derive(Resource, Default)]
@@ -84,10 +130,10 @@ pub fn extract_voxel_material(
     render_device: Res<RenderDevice>,
     pipeline: Option<Res<VoxelDrawPipeline>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    material_asset: Option<Res<VoxelMaterialAsset>>,
+    material_asset: Extract<Option<Res<VoxelMaterialAsset>>>,
     mut extracted_material: ResMut<ExtractedVoxelMaterial>,
 ) {
-    let (Some(pipeline), Some(material)) = (pipeline, material_asset) else {
+    let (Some(pipeline), Some(material)) = (pipeline, material_asset.as_deref()) else {
         extracted_material.material_bind_group = None;
         return;
     };
@@ -124,19 +170,20 @@ pub fn prepare_voxel_draw_pipeline(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     shader_res: Res<VoxelRasterShader>,
-    mut pipeline_cache: ResMut<PipelineCache>,
+    pipeline_cache: ResMut<PipelineCache>,
     existing_pipeline: Option<Res<VoxelDrawPipeline>>,
+    views: Query<&ViewTarget>,
 ) {
     if existing_pipeline.is_some() {
         return;
     }
 
-    // PipelineCache needs an asset Handle<Shader> (not a raw wgpu::ShaderModule) so it
-    // can build the pipeline lazily and support hot-reload. Requires this file to exist
-    // under your assets root, e.g. `assets/shaders/voxel_raster.wgsl`.
+    let Some(view_target) = views.iter().next() else {
+        return;
+    };
+    let target_format = view_target.main_texture_format();
     let shader: Handle<Shader> = shader_res.0.clone();
-    // These are the *real* layout objects we'll reuse later to build actual bind groups
-    // (in extract_voxel_material and render_voxel_chunks_system).
+
     let view_bind_group_layout = render_device.create_bind_group_layout(
         Some("voxel_view_layout"),
         &[BindGroupLayoutEntry {
@@ -174,7 +221,7 @@ pub fn prepare_voxel_draw_pipeline(
     );
 
     let vertex_buffers = vec![VertexBufferLayout {
-        array_stride: 32,
+        array_stride: std::mem::size_of::<HardcodedVertex>() as u64,
         step_mode: VertexStepMode::Vertex,
         attributes: vec![
             VertexAttribute {
@@ -190,9 +237,6 @@ pub fn prepare_voxel_draw_pipeline(
         ],
     }];
 
-    // PipelineCache wants descriptors of the bind group layouts (so it can build/rebuild
-    // the pipeline layout itself), not a pre-built PipelineLayout object. These must
-    // describe the SAME bindings as the real layouts above, in the same group order.
     let layout_descriptors = vec![
         BindGroupLayoutDescriptor {
             label: Cow::Borrowed("voxel_view_layout"),
@@ -244,7 +288,7 @@ pub fn prepare_voxel_draw_pipeline(
             shader_defs: vec![],
             entry_point: Some("fs_main".into()),
             targets: vec![Some(ColorTargetState {
-                format: TextureFormat::Bgra8UnormSrgb,
+                format: target_format,
                 blend: Some(BlendState::REPLACE),
                 write_mask: ColorWrites::ALL,
             })],
@@ -301,6 +345,8 @@ pub fn render_voxel_chunks_system(
     let Some(view_binding) = view_uniforms.uniforms.binding() else {
         return;
     };
+
+    info!("drawing {} chunk(s)", extracted_chunks.chunks.len());
 
     let view_bind_group = render_context.render_device().create_bind_group(
         Some("voxel_view_bind_group"),

@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use crate::{
     SDFField,
     indirect_draw::{
@@ -198,6 +200,17 @@ impl FromWorld for VoxelPipelineLayouts {
                     },
                     count: None,
                 },
+                // Binding 5: The LOD size
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(NonZeroU64::new(4).unwrap()), // u32 size
+                    },
+                    count: None,
+                },
             ],
         );
 
@@ -363,29 +376,37 @@ pub struct VoxelRenderPlugin;
 
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
-        // Register the embedded WGSL as a real asset in the *main* app.
+        info!("VoxelRenderPlugin start");
         let shader_handle = {
             let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
             shaders.add(Shader::from_wgsl(
                 include_str!("shaders/voxel_raster.wgsl"),
-                "shaders/voxel_raster.wgsl", // just a debug label, not a real path
+                "shaders/voxel_raster.wgsl",
             ))
         };
+        info!("shader_handle init");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
+        info!("render_app init");
         render_app
             .insert_resource(VoxelRasterShader(shader_handle))
-            .init_resource::<ExtractedVoxelChunks>()
-            .init_resource::<ExtractedVoxelMaterial>()
+            .init_resource::<ExtractedVoxelChunks>();
+        info!("ExtractedVoxelChunks init");
+        render_app.init_resource::<ExtractedVoxelMaterial>();
+        info!("ExtractedVoxelMaterial init");
+        render_app
             .add_systems(
                 ExtractSchedule,
                 (extract_voxel_chunks, extract_voxel_material),
             )
             .add_systems(
                 Render,
-                prepare_voxel_draw_pipeline.in_set(RenderSystems::Prepare),
+                (
+                    prepare_voxel_chunk_buffers.in_set(RenderSystems::Prepare),
+                    dispatch_voxel_compute_passes.in_set(RenderSystems::Queue), // Or custom queue/render set depending on pipeline order
+                ),
             )
             .add_systems(
                 Core3d,
@@ -394,6 +415,7 @@ impl Plugin for VoxelRenderPlugin {
                     .in_set(Core3dSystems::MainPass)
                     .run_if(resource_exists::<VoxelDrawPipeline>),
             );
+        info!("VoxelRenderPlugin finished!");
     }
 
     fn finish(&self, app: &mut App) {
@@ -414,10 +436,15 @@ pub fn extract_voxel_chunks(
     query: Extract<Query<(Entity, &crate::chunk::ChunkPosition, &SDFField)>>,
 ) {
     for (entity, pos, sdf) in query.iter() {
-        let size = sdf.lod.size();
+        let size = sdf.lod.size(); // Dynamic LOD size (e.g., 4, 16, 32, 64)
         let raw_slice = sdf.data_slice();
 
-        let mut padded_sdf_data = Vec::with_capacity((PADDED_BYTES_PER_ROW * size * size) as usize);
+        // Calculate 256-byte row alignment dynamically
+        let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
+        let padding_per_row = (padded_bytes_per_row - unpadded_bytes_per_row) as usize;
+
+        let mut padded_sdf_data = Vec::with_capacity((padded_bytes_per_row * size * size) as usize);
 
         for z in 0..size {
             for y in 0..size {
@@ -426,11 +453,7 @@ pub fn extract_voxel_chunks(
                 let row_bytes: &[u8] = bytemuck::cast_slice(&raw_slice[start_idx..end_idx]);
 
                 padded_sdf_data.extend_from_slice(row_bytes);
-                padded_sdf_data.resize(
-                    padded_sdf_data.len()
-                        + (PADDED_BYTES_PER_ROW - UNPADDED_BYTES_PER_ROW) as usize,
-                    0,
-                );
+                padded_sdf_data.resize(padded_sdf_data.len() + padding_per_row, 0);
             }
         }
 
@@ -456,7 +479,8 @@ pub fn prepare_voxel_chunk_buffers(
     for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
         let size = extracted_sdf.size;
         let total_cells = (size * size * size) as usize;
-
+        let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
         let mut found_existing = false;
         for (_, main_entity, gpu_buffers) in existing_buffers.iter_mut() {
             if *main_entity == extracted_sdf.main_entity {
@@ -470,7 +494,7 @@ pub fn prepare_voxel_chunk_buffers(
                     &extracted_sdf.padded_sdf_data,
                     TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(PADDED_BYTES_PER_ROW),
+                        bytes_per_row: Some(padded_bytes_per_row),
                         rows_per_image: Some(size),
                     },
                     Extent3d {
@@ -733,29 +757,47 @@ pub fn dispatch_voxel_compute_passes(
     if chunk_buffers.is_empty() {
         return;
     }
+    // Reset indirect draw counter to 0 before compute pass runs
+    let initial_indirect_args = DrawIndexedIndirectArgs {
+        index_count: 0,
+        instance_count: 1,
+        first_index: 0,
+        base_vertex: 0,
+        first_instance: 0,
+    };
+
+    for chunk in chunk_buffers.iter() {
+        render_queue.write_buffer(
+            &chunk.indirect_args_buffer,
+            0,
+            bytemuck::bytes_of(&initial_indirect_args),
+        );
+    }
 
     let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_compute_encoder"),
     });
 
     for chunk in chunk_buffers.iter() {
+        let size = chunk.lod; // e.g., 4, 16, 32, or 64
         // --- Pass 1: Surface Nets Voxel Classification ---
         {
+            let p1_grid = (size + 3) / 4;
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("surface_nets_pass1"),
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&pipeline.pass1_pipeline);
             compute_pass.set_bind_group(0, &chunk.pass1_surface_bind_group, &[]);
-            compute_pass.dispatch_workgroups(CHUNK_SIZE / 4, CHUNK_SIZE / 4, CHUNK_SIZE / 4);
+            compute_pass.dispatch_workgroups(p1_grid, p1_grid, p1_grid);
         }
 
         // --- Pass 2: Stream Compaction (Prefix Sum Scan) ---
-        let elements_per_workgroup = 512;
-        let total_cells = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-        let dispatch_x = (total_cells + elements_per_workgroup - 1) / elements_per_workgroup;
-
         {
+            const ELEMENTS_PER_WORKGROUP: u32 = 512;
+            let total_cells = size * size * size;
+            let dispatch_x = (total_cells + ELEMENTS_PER_WORKGROUP - 1) / ELEMENTS_PER_WORKGROUP;
+
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("stream_compaction_pass2"),
                 timestamp_writes: None,
@@ -767,13 +809,14 @@ pub fn dispatch_voxel_compute_passes(
 
         // --- Pass 3: Surface Nets Mesh Generation ---
         {
+            let p3_grid = (size + 7) / 8;
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("surface_nets_pass3"),
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&pipeline.pass3_pipeline);
             compute_pass.set_bind_group(0, &chunk.pass3_surface_bind_group, &[]);
-            compute_pass.dispatch_workgroups(CHUNK_SIZE / 8, CHUNK_SIZE / 8, CHUNK_SIZE / 8);
+            compute_pass.dispatch_workgroups(p3_grid, p3_grid, p3_grid);
         }
     }
 

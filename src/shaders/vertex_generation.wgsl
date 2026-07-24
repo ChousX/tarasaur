@@ -105,7 +105,9 @@ fn generate_vertices(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let normal = normalize(vec4<f32>(nx, ny, nz, 0.0));
 
     var generated_vertex: Vertex;
-    generated_vertex.position = vec4<f32>(surface_pos, 1.0);
+    let local_pos = (surface_pos / f32(config.chunk_size)) * 10.0;
+    let world_pos = config.chunk_world_origin + local_pos;
+    generated_vertex.position = vec4<f32>(world_pos, 1.0);
     generated_vertex.normal = normal;
 
     // Cache to uncompacted array for structural topology reference 
