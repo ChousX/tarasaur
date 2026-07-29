@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::{
-    chunk::ChunkPlugin, field::FieldsPlugin, index_generation::VoxelIndexGenerationPlugin,
-    indirect_draw::VoxelIndirectDrawPlugin, voxel_pipeline::VoxelRenderPlugin,
+    chunk::ChunkPlugin, field::FieldsPlugin, indirect_draw::VoxelIndirectDrawPlugin,
+    voxel_pipeline::VoxelRenderPlugin,
 };
 
 pub struct TarasaurPlugin;
@@ -13,7 +13,6 @@ impl Plugin for TarasaurPlugin {
             ChunkPlugin,
             FieldsPlugin,
             VoxelRenderPlugin,
-            VoxelIndexGenerationPlugin,
             VoxelIndirectDrawPlugin,
         ));
     }

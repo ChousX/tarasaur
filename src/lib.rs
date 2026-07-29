@@ -1,6 +1,5 @@
 pub mod chunk;
 pub mod field;
-pub mod index_generation;
 pub mod indirect_draw;
 mod plugin;
 mod steam_compaction;

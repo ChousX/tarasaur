@@ -7,7 +7,7 @@ use bevy::{
     },
 };
 use tarasaur::{
-    VoxelRenderPlugin,
+    TarasaurPlugin, VoxelRenderPlugin,
     indirect_draw::{
         ExtractedVoxelChunks, GpuChunkDrawData, VoxelIndirectDrawPlugin, VoxelMaterialAsset,
     },
@@ -25,11 +25,8 @@ fn main() {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins)
-        .add_plugins((
-            VoxelIndirectDrawPlugin,
-            TestTrianglePlugin,
-            VoxelRenderPlugin,
-        ))
+        .add_plugins(TarasaurPlugin)
+        .add_plugins(TestTrianglePlugin)
         .add_systems(Startup, setup_scene);
 
     app.run();

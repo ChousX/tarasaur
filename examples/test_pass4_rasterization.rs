@@ -9,12 +9,8 @@ use bevy::{
 };
 use std::sync::{Arc, Mutex};
 use tarasaur::{
-    Field, SDFField, TarasaurPlugin,
-    chunk::ChunkPosition,
-    field::LOD,
-    index_generation::VoxelIndexGenerationPlugin,
-    indirect_draw::{VoxelIndirectDrawPlugin, VoxelMaterialAsset},
-    voxel_pipeline::{GpuVoxelChunkBuffers, VoxelRenderPlugin},
+    Field, SDFField, TarasaurPlugin, chunk::ChunkPosition, field::LOD,
+    indirect_draw::VoxelMaterialAsset, voxel_pipeline::GpuVoxelChunkBuffers,
 };
 
 #[derive(Default)]

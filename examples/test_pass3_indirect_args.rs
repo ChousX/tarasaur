@@ -3,7 +3,10 @@ use bevy::{
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
-        render_resource::{BufferDescriptor, BufferUsages, MapMode, PollType},
+        render_resource::{
+            BufferDescriptor, BufferUsages, Extent3d, MapMode, Origin3d, PollType,
+            TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
+        },
         renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
     },
@@ -21,6 +24,7 @@ const CHUNK_SIZE: u32 = 32;
 struct Pass3TestState {
     test_complete: bool,
     index_count: u32,
+    sdf_dumped: bool, // NEW: guard so the texture dump only runs once
 }
 
 #[derive(Resource, Clone, Default)]
@@ -40,7 +44,10 @@ fn main() {
         render_app.insert_resource(shared_state);
         render_app.add_systems(
             Render,
-            verify_pass3_indirect_results.in_set(RenderSystems::Cleanup),
+            (
+                dump_sdf_texture_once.in_set(RenderSystems::Cleanup), // NEW
+                verify_pass3_indirect_results.in_set(RenderSystems::Cleanup),
+            ),
         );
     }
 
@@ -84,6 +91,85 @@ fn pass3_test_controller(
         println!("Dynamic Index Count written by GPU: {}", state.index_count);
         app_exit.write(AppExit::Success);
     }
+}
+
+/// NEW: One-shot readback of the GPU-side SDF texture along a line that should
+/// cross the sphere boundary (center (16,16,16), radius 10 -> crossings near x=6 and x=26).
+fn dump_sdf_texture_once(
+    gpu_buffers_query: Query<(&MainEntity, &GpuVoxelChunkBuffers)>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    shared_state: Res<SharedPass3State>,
+) {
+    let mut state = shared_state.0.lock().unwrap();
+    if state.sdf_dumped {
+        return;
+    }
+
+    let Some((_main_entity, buffers)) = gpu_buffers_query.iter().next() else {
+        return;
+    };
+
+    let size = CHUNK_SIZE;
+    let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32; // 128
+    let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255; // 256
+
+    // Copy a single Z=16, Y=16 row (the whole X line) out of the 3D texture.
+    let staging = render_device.create_buffer(&BufferDescriptor {
+        label: Some("sdf_texture_readback_staging"),
+        size: (padded_bytes_per_row as u64) * 1 * 1,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = render_device.create_command_encoder(&default());
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &buffers.sdf_texture,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 16, z: 16 }, // row y=16, slice z=16
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(1),
+            },
+        },
+        Extent3d {
+            width: size,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    render_queue.submit(Some(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(MapMode::Read, move |res| {
+        sender.send(res).unwrap();
+    });
+    render_device
+        .wgpu_device()
+        .poll(PollType::wait_indefinitely());
+
+    if receiver.recv().unwrap().is_ok() {
+        let data = slice.get_mapped_range();
+        let floats: &[f32] = bytemuck::cast_slice(&data[..unpadded_bytes_per_row as usize]);
+        println!("=== SDF row (y=16, z=16, x=0..32) as seen by the GPU ===");
+        for (x, v) in floats.iter().enumerate() {
+            println!("  x={:2}  sdf={:>8.3}", x, v);
+        }
+        println!("=== end SDF row dump ===");
+    } else {
+        println!("⚠️ Failed to map SDF texture staging buffer");
+    }
+
+    drop(staging.slice(..).get_mapped_range()); // no-op guard, drop happens naturally
+    staging.unmap();
+    state.sdf_dumped = true;
 }
 
 fn verify_pass3_indirect_results(
@@ -132,8 +218,6 @@ fn verify_pass3_indirect_results(
             let data = slice.get_mapped_range();
             let args: &[u32] = bytemuck::cast_slice(&data);
 
-            // WebGPU DrawIndexedIndirect layout:
-            // [0]: index_count, [1]: instance_count, [2]: first_index, [3]: base_vertex, [4]: first_instance
             let index_count = args[0];
             let instance_count = args[1];
 

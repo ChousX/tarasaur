@@ -56,7 +56,9 @@ pub struct GpuVoxelChunkBuffers {
     pub index_buffer: Buffer,              // Pass 4 Index Buffer
     pub indirect_args_buffer: Buffer,      // Pass 4 Indirect Buffer
     pub compaction_uniform_buffer: Buffer, // Pass 2 Uniforms
-    pub block_sums_buffer: Buffer,         // Pass 2 Inter-workgroup block reductions
+
+    pub block_sums_buffer: Buffer, // Pass 2 Inter-workgroup block reductions
+    pub lod_size_buffer: Buffer,
 
     pub pass1_surface_bind_group: BindGroup,
     pub pass3_surface_bind_group: BindGroup,
@@ -627,6 +629,12 @@ pub fn prepare_voxel_chunk_buffers(
                     usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
                 });
 
+            let lod_size_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("chunk_lod_size_buffer"),
+                contents: bytemuck::bytes_of(&size), // size: u32, matches min_binding_size(4) in the layout
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            });
+
             let workgroup_capacity = 512;
             let num_blocks = ((total_cells + workgroup_capacity - 1) / workgroup_capacity) as u64;
             let block_sums_buffer = render_device.create_buffer(&BufferDescriptor {
@@ -693,6 +701,10 @@ pub fn prepare_voxel_chunk_buffers(
                         binding: 4,
                         resource: indirect_args_buffer.as_entire_binding(),
                     },
+                    BindGroupEntry {
+                        binding: 5,
+                        resource: lod_size_buffer.as_entire_binding(),
+                    },
                 ],
             );
 
@@ -735,6 +747,7 @@ pub fn prepare_voxel_chunk_buffers(
                     indirect_args_buffer,
                     compaction_uniform_buffer,
                     block_sums_buffer,
+                    lod_size_buffer,
                     pass1_surface_bind_group,
                     pass3_surface_bind_group,
                     compaction_bind_group,
