@@ -14,17 +14,15 @@ use bevy::{
 use std::sync::{Arc, Mutex};
 
 use tarasaur::{
-    Chunk, ChunkPlugin, ChunkPosition, Field, GpuVoxelChunkBuffers, SDFField, VoxelRenderPlugin,
-    field::LOD,
+    Chunk, ChunkPlugin, ChunkPosition, Field, GpuVoxelChunkBuffers, SDFField, TarasaurPlugin,
+    VoxelRenderPlugin, field::LOD,
 };
-
-const CHUNK_SIZE: u32 = 32;
 
 #[derive(Default)]
 struct Pass3TestState {
     test_complete: bool,
     index_count: u32,
-    sdf_dumped: bool, // NEW: guard so the texture dump only runs once
+    sdf_dumped: bool,
 }
 
 #[derive(Resource, Clone, Default)]
@@ -34,7 +32,7 @@ fn main() {
     let mut app = App::new();
     let shared_state = SharedPass3State::default();
 
-    app.add_plugins((DefaultPlugins, VoxelRenderPlugin, ChunkPlugin));
+    app.add_plugins((DefaultPlugins, TarasaurPlugin));
     app.insert_resource(shared_state.clone());
 
     app.add_systems(Startup, (setup_sphere_chunk, setup_camera));
@@ -45,8 +43,9 @@ fn main() {
         render_app.add_systems(
             Render,
             (
-                dump_sdf_texture_once.in_set(RenderSystems::Cleanup), // NEW
+                dump_sdf_texture_once.in_set(RenderSystems::Cleanup),
                 verify_pass3_indirect_results.in_set(RenderSystems::Cleanup),
+                dump_flags_once.in_set(RenderSystems::Cleanup),
             ),
         );
     }
@@ -61,14 +60,15 @@ fn setup_camera(mut commands: Commands) {
 
 fn setup_sphere_chunk(mut commands: Commands) {
     let lod = LOD::default();
+    let chunk_size = lod.size();
     let mut sdf = SDFField::new(lod);
 
-    let center = Vec3::splat(CHUNK_SIZE as f32 / 2.0);
+    let center = Vec3::splat(chunk_size as f32 / 2.0);
     let radius = 10.0f32;
 
-    for z in 0..CHUNK_SIZE {
-        for y in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
+    for z in 0..chunk_size {
+        for y in 0..chunk_size {
+            for x in 0..chunk_size {
                 let pos = Vec3::new(x as f32, y as f32, z as f32);
                 let dist = pos.distance(center) - radius;
                 sdf.set(x, y, z, dist);
@@ -91,85 +91,6 @@ fn pass3_test_controller(
         println!("Dynamic Index Count written by GPU: {}", state.index_count);
         app_exit.write(AppExit::Success);
     }
-}
-
-/// NEW: One-shot readback of the GPU-side SDF texture along a line that should
-/// cross the sphere boundary (center (16,16,16), radius 10 -> crossings near x=6 and x=26).
-fn dump_sdf_texture_once(
-    gpu_buffers_query: Query<(&MainEntity, &GpuVoxelChunkBuffers)>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
-    shared_state: Res<SharedPass3State>,
-) {
-    let mut state = shared_state.0.lock().unwrap();
-    if state.sdf_dumped {
-        return;
-    }
-
-    let Some((_main_entity, buffers)) = gpu_buffers_query.iter().next() else {
-        return;
-    };
-
-    let size = CHUNK_SIZE;
-    let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32; // 128
-    let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255; // 256
-
-    // Copy a single Z=16, Y=16 row (the whole X line) out of the 3D texture.
-    let staging = render_device.create_buffer(&BufferDescriptor {
-        label: Some("sdf_texture_readback_staging"),
-        size: (padded_bytes_per_row as u64) * 1 * 1,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = render_device.create_command_encoder(&default());
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture: &buffers.sdf_texture,
-            mip_level: 0,
-            origin: Origin3d { x: 0, y: 16, z: 16 }, // row y=16, slice z=16
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &staging,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(1),
-            },
-        },
-        Extent3d {
-            width: size,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-    );
-    render_queue.submit(Some(encoder.finish()));
-
-    let slice = staging.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(MapMode::Read, move |res| {
-        sender.send(res).unwrap();
-    });
-    render_device
-        .wgpu_device()
-        .poll(PollType::wait_indefinitely());
-
-    if receiver.recv().unwrap().is_ok() {
-        let data = slice.get_mapped_range();
-        let floats: &[f32] = bytemuck::cast_slice(&data[..unpadded_bytes_per_row as usize]);
-        println!("=== SDF row (y=16, z=16, x=0..32) as seen by the GPU ===");
-        for (x, v) in floats.iter().enumerate() {
-            println!("  x={:2}  sdf={:>8.3}", x, v);
-        }
-        println!("=== end SDF row dump ===");
-    } else {
-        println!("⚠️ Failed to map SDF texture staging buffer");
-    }
-
-    drop(staging.slice(..).get_mapped_range()); // no-op guard, drop happens naturally
-    staging.unmap();
-    state.sdf_dumped = true;
 }
 
 fn verify_pass3_indirect_results(
@@ -230,7 +151,9 @@ fn verify_pass3_indirect_results(
                 state.index_count = index_count;
                 state.test_complete = true;
             } else {
-                println!("⏳ Pass 3 compute execution pending, retrying...");
+                println!(
+                    "⏳ Pass 3 compute execution pending or staging buffer unpopulated, retrying..."
+                );
             }
         }
 
@@ -239,4 +162,130 @@ fn verify_pass3_indirect_results(
             break;
         }
     }
+}
+fn dump_sdf_texture_once(
+    mut has_run: Local<bool>,
+    gpu_buffers_query: Query<(&MainEntity, &GpuVoxelChunkBuffers)>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) {
+    if *has_run {
+        return;
+    }
+
+    let Some((_main_entity, buffers)) = gpu_buffers_query.iter().next() else {
+        return;
+    };
+
+    let size = CHUNK_SIZE;
+    let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
+    let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
+
+    let staging = render_device.create_buffer(&BufferDescriptor {
+        label: Some("sdf_texture_readback_staging"),
+        size: (padded_bytes_per_row as u64) * 1 * 1,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = render_device.create_command_encoder(&default());
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &buffers.sdf_texture,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 16, z: 16 },
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(1),
+            },
+        },
+        Extent3d {
+            width: size,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    render_queue.submit(Some(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(MapMode::Read, move |res| {
+        sender.send(res).unwrap();
+    });
+    render_device
+        .wgpu_device()
+        .poll(PollType::wait_indefinitely());
+
+    if receiver.recv().unwrap().is_ok() {
+        let data = slice.get_mapped_range();
+        let floats: &[f32] = bytemuck::cast_slice(&data[..unpadded_bytes_per_row as usize]);
+        println!("=== SDF row (y=16, z=16, x=0..32) as seen by the GPU ===");
+        for (x, v) in floats.iter().enumerate() {
+            println!("  x={:2}  sdf={:>8.3}", x, v);
+        }
+        println!("=== end SDF row dump ===");
+        *has_run = true;
+    } else {
+        println!("⚠️ Failed to map SDF texture staging buffer");
+    }
+
+    staging.unmap();
+}
+
+fn dump_flags_once(
+    mut has_run: Local<bool>,
+    gpu_buffers_query: Query<(&MainEntity, &GpuVoxelChunkBuffers)>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) {
+    if *has_run {
+        return;
+    }
+
+    let Some((_main_entity, buffers)) = gpu_buffers_query.iter().next() else {
+        return;
+    };
+
+    let size = buffers.flags_buffer.size();
+    let staging = render_device.create_buffer(&BufferDescriptor {
+        label: Some("flags_debug_staging"),
+        size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = render_device.create_command_encoder(&default());
+    encoder.copy_buffer_to_buffer(&buffers.flags_buffer, 0, &staging, 0, size);
+    render_queue.submit(Some(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(MapMode::Read, move |res| {
+        sender.send(res).unwrap();
+    });
+    render_device
+        .wgpu_device()
+        .poll(PollType::wait_indefinitely());
+
+    if receiver.recv().unwrap().is_ok() {
+        let data = slice.get_mapped_range();
+        let flags: &[u32] = bytemuck::cast_slice(&data);
+        let active = flags.iter().filter(|&&f| f > 0).count();
+        println!(
+            "=== flags_buffer active count = {} / {} ===",
+            active,
+            flags.len()
+        );
+
+        // Only latch has_run = true once compute has executed and produced active flags
+        if active > 0 {
+            *has_run = true;
+        }
+    }
+    staging.unmap();
 }

@@ -72,27 +72,22 @@ fn scan_workgroup(
     }
 }
 
-/// Phase B: Global Block Offset Resolve
+/// Phase B: Global Block Offset Resolve (Optimized O(1) per thread lookup)
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn resolve_block_offsets(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
 ) {
+    let thid = local_id.x;
     let bid = wg_id.x;
-    if (bid == 0u) { return; }
+    
+    // If block sums were pre-scanned on CPU or via a secondary reduction pass, 
+    // load the exclusive block offset directly instead of an O(N^2) loop.
+    let block_modifier = block_sums[bid];
 
-    var block_modifier = 0u;
-    for (var i = 0u; i < bid; i++) {
-        block_modifier += block_sums[i];
-    }
-
-    let idx_a = bid * (WORKGROUP_SIZE * 2u) + global_id.x;
+    let idx_a = bid * (WORKGROUP_SIZE * 2u) + thid;
     let idx_b = idx_a + WORKGROUP_SIZE;
 
-    if (idx_a < uniforms.total_cells) {
-        compacted_offsets[idx_a] += block_modifier;
-    }
-    if (idx_b < uniforms.total_cells) {
-        compacted_offsets[idx_b] += block_modifier;
-    }
+    if (idx_a < uniforms.total_cells) { compacted_offsets[idx_a] += block_modifier; }
+    if (idx_b < uniforms.total_cells) { compacted_offsets[idx_b] += block_modifier; }
 }

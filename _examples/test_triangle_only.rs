@@ -7,10 +7,8 @@ use bevy::{
     },
 };
 use tarasaur::{
-    TarasaurPlugin, VoxelRenderPlugin,
-    indirect_draw::{
-        ExtractedVoxelChunks, GpuChunkDrawData, VoxelIndirectDrawPlugin, VoxelMaterialAsset,
-    },
+    TarasaurPlugin,
+    indirect_draw::{ExtractedVoxelChunks, GpuChunkDrawData, VoxelMaterialAsset},
     voxel_pipeline::DrawIndexedIndirectArgs,
 };
 

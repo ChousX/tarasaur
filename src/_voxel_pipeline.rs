@@ -1,12 +1,6 @@
 use std::num::NonZeroU64;
 
-use crate::{
-    SDFField,
-    indirect_draw::{
-        ExtractedVoxelChunks, ExtractedVoxelMaterial, VoxelDrawPipeline, extract_voxel_material,
-        prepare_voxel_draw_pipeline, render_voxel_chunks_system,
-    },
-};
+use crate::SDFField;
 use bevy::{
     core_pipeline::{Core3d, Core3dSystems, core_3d::main_opaque_pass_3d},
     prelude::*,
@@ -53,8 +47,8 @@ pub struct GpuVoxelChunkBuffers {
     pub compacted_offsets_buffer: Buffer,  // Pass 2 Output
     pub scattered_vertex_buffer: Buffer,   // Pass 3 Temporary
     pub final_vertex_buffer: Buffer,       // Pass 3 Packed Output
-    pub index_buffer: Buffer,              // Pass 4 Index Buffer
-    pub indirect_args_buffer: Buffer,      // Pass 4 Indirect Buffer
+    pub index_buffer: Buffer,              // Pass 3 Index Buffer Output
+    pub indirect_args_buffer: Buffer,      // Pass 3 Indirect Buffer Output
     pub compaction_uniform_buffer: Buffer, // Pass 2 Uniforms
 
     pub block_sums_buffer: Buffer, // Pass 2 Inter-workgroup block reductions
@@ -143,7 +137,7 @@ impl FromWorld for VoxelPipelineLayouts {
             ],
         );
 
-        // Layout for Pass 3 (Index & Indirect Arg Generation)
+        // Layout for Pass 3 (Vertex, Index & Indirect Arg Generation - 7 Bindings)
         let pass3_surface_layout = render_device.create_bind_group_layout(
             Some("voxel_surface_pass3_layout"),
             &[
@@ -180,7 +174,7 @@ impl FromWorld for VoxelPipelineLayouts {
                     },
                     count: None,
                 },
-                // Binding 3: Index Buffer (Read-Write)
+                // Binding 3: Vertex Buffer (Read-Write)
                 BindGroupLayoutEntry {
                     binding: 3,
                     visibility: ShaderStages::COMPUTE,
@@ -191,9 +185,20 @@ impl FromWorld for VoxelPipelineLayouts {
                     },
                     count: None,
                 },
-                // Binding 4: Indirect Draw Args Buffer (Read-Write)
+                // Binding 4: Index Buffer (Read-Write)
                 BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 5: Indirect Draw Args Buffer (Read-Write)
+                BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: ShaderStages::COMPUTE | ShaderStages::VERTEX,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
@@ -202,14 +207,14 @@ impl FromWorld for VoxelPipelineLayouts {
                     },
                     count: None,
                 },
-                // Binding 5: The LOD size
+                // Binding 6: LOD Size Uniform
                 BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 6,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: Some(NonZeroU64::new(4).unwrap()), // u32 size
+                        min_binding_size: Some(NonZeroU64::new(4).unwrap()),
                     },
                     count: None,
                 },
@@ -277,6 +282,7 @@ impl FromWorld for VoxelPipelineLayouts {
 pub struct VoxelComputePipeline {
     pub pass1_pipeline: ComputePipeline,
     pub stream_compaction_pipeline: ComputePipeline,
+    pub stream_compaction_resolve_pipeline: ComputePipeline,
     pub pass3_pipeline: ComputePipeline,
 }
 
@@ -306,7 +312,6 @@ impl FromWorld for VoxelComputePipeline {
                 immediate_size: 0,
             });
 
-        // Load shader modules
         let shader_pass1 = unsafe {
             render_device.create_shader_module(ShaderModuleDescriptor {
                 label: Some("surface_nets_pass1_shader"),
@@ -321,6 +326,16 @@ impl FromWorld for VoxelComputePipeline {
             })
         };
 
+        let stream_compaction_resolve_pipeline =
+            render_device.create_compute_pipeline(&RawComputePipelineDescriptor {
+                label: Some("stream_compaction_resolve_pipeline"),
+                layout: Some(&compaction_pipeline_layout),
+                module: &shader_compaction,
+                entry_point: Some("resolve_block_offsets"),
+                compilation_options: PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
         let shader_pass3 = unsafe {
             render_device.create_shader_module(ShaderModuleDescriptor {
                 label: Some("surface_nets_pass3_shader"),
@@ -328,7 +343,6 @@ impl FromWorld for VoxelComputePipeline {
             })
         };
 
-        // Compute Pipelines
         let pass1_pipeline = render_device.create_compute_pipeline(&RawComputePipelineDescriptor {
             label: Some("surface_nets_pass1_pipeline"),
             layout: Some(&pass1_pipeline_layout),
@@ -360,12 +374,12 @@ impl FromWorld for VoxelComputePipeline {
         Self {
             pass1_pipeline,
             stream_compaction_pipeline,
+            stream_compaction_resolve_pipeline,
             pass3_pipeline,
         }
     }
 }
 
-/// Extracted SDF data copied during `ExtractSchedule` to prepare GPU buffers.
 #[derive(Component)]
 pub struct ExtractedChunkSdf {
     pub main_entity: MainEntity,
@@ -407,7 +421,7 @@ impl Plugin for VoxelRenderPlugin {
                 Render,
                 (
                     prepare_voxel_chunk_buffers.in_set(RenderSystems::Prepare),
-                    dispatch_voxel_compute_passes.in_set(RenderSystems::Queue), // Or custom queue/render set depending on pipeline order
+                    dispatch_voxel_compute_passes.in_set(RenderSystems::Queue),
                 ),
             )
             .add_systems(
@@ -438,10 +452,9 @@ pub fn extract_voxel_chunks(
     query: Extract<Query<(Entity, &crate::chunk::ChunkPosition, &SDFField)>>,
 ) {
     for (entity, pos, sdf) in query.iter() {
-        let size = sdf.lod.size(); // Dynamic LOD size (e.g., 4, 16, 32, 64)
+        let size = sdf.lod.size();
         let raw_slice = sdf.data_slice();
 
-        // Calculate 256-byte row alignment dynamically
         let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
         let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
         let padding_per_row = (padded_bytes_per_row - unpadded_bytes_per_row) as usize;
@@ -536,7 +549,9 @@ pub fn prepare_voxel_chunk_buffers(
                 sample_count: 1,
                 dimension: TextureDimension::D3,
                 format: TextureFormat::R32Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST,
+                usage: TextureUsages::STORAGE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
 
@@ -631,7 +646,7 @@ pub fn prepare_voxel_chunk_buffers(
 
             let lod_size_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("chunk_lod_size_buffer"),
-                contents: bytemuck::bytes_of(&size), // size: u32, matches min_binding_size(4) in the layout
+                contents: bytemuck::bytes_of(&size),
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             });
 
@@ -676,7 +691,7 @@ pub fn prepare_voxel_chunk_buffers(
                 ],
             );
 
-            // Bind Group for Pass 3 (Read-Only layout)
+            // Bind Group for Pass 3 (7 Bindings matching updated WGSL)
             let pass3_surface_bind_group = render_device.create_bind_group(
                 Some("chunk_pass3_surface_bind_group"),
                 &layouts.pass3_surface_layout,
@@ -695,14 +710,18 @@ pub fn prepare_voxel_chunk_buffers(
                     },
                     BindGroupEntry {
                         binding: 3,
-                        resource: index_buffer.as_entire_binding(),
+                        resource: final_vertex_buffer.as_entire_binding(),
                     },
                     BindGroupEntry {
                         binding: 4,
-                        resource: indirect_args_buffer.as_entire_binding(),
+                        resource: index_buffer.as_entire_binding(),
                     },
                     BindGroupEntry {
                         binding: 5,
+                        resource: indirect_args_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 6,
                         resource: lod_size_buffer.as_entire_binding(),
                     },
                 ],
@@ -770,7 +789,7 @@ pub fn dispatch_voxel_compute_passes(
     if chunk_buffers.is_empty() {
         return;
     }
-    // Reset indirect draw counter to 0 before compute pass runs
+
     let initial_indirect_args = DrawIndexedIndirectArgs {
         index_count: 0,
         instance_count: 1,
@@ -792,7 +811,8 @@ pub fn dispatch_voxel_compute_passes(
     });
 
     for chunk in chunk_buffers.iter() {
-        let size = chunk.lod; // e.g., 4, 16, 32, or 64
+        let size = chunk.lod;
+
         // --- Pass 1: Surface Nets Voxel Classification ---
         {
             let p1_grid = (size + 3) / 4;
@@ -805,22 +825,35 @@ pub fn dispatch_voxel_compute_passes(
             compute_pass.dispatch_workgroups(p1_grid, p1_grid, p1_grid);
         }
 
-        // --- Pass 2: Stream Compaction (Prefix Sum Scan) ---
+        // --- Pass 2: Stream Compaction (Split across 2 passes for GPU memory barrier) ---
         {
             const ELEMENTS_PER_WORKGROUP: u32 = 512;
             let total_cells = size * size * size;
             let dispatch_x = (total_cells + ELEMENTS_PER_WORKGROUP - 1) / ELEMENTS_PER_WORKGROUP;
 
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_pass2"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&pipeline.stream_compaction_pipeline);
-            compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
-            compute_pass.dispatch_workgroups(dispatch_x, 1, 1);
+            // Phase A: Local workgroup scan
+            {
+                let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("stream_compaction_scan"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(&pipeline.stream_compaction_pipeline);
+                compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
+                compute_pass.dispatch_workgroups(dispatch_x, 1, 1);
+            }
+
+            {
+                let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("stream_compaction_resolve"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(&pipeline.stream_compaction_resolve_pipeline);
+                compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
+                compute_pass.dispatch_workgroups(dispatch_x, 1, 1);
+            }
         }
 
-        // --- Pass 3: Surface Nets Mesh Generation ---
+        // --- Pass 3: Surface Nets Mesh & Index Generation ---
         {
             let p3_grid = (size + 7) / 8;
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -835,5 +868,6 @@ pub fn dispatch_voxel_compute_passes(
 
     render_queue.submit(std::iter::once(command_encoder.finish()));
 }
+
 #[derive(Resource, Clone)]
 pub struct VoxelRasterShader(pub(crate) Handle<Shader>);

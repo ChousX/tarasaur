@@ -11,11 +11,8 @@ use bevy::{
 use std::sync::{Arc, Mutex};
 
 use tarasaur::{
-    Chunk, ChunkPlugin, ChunkPosition, Field, GpuVoxelChunkBuffers, SDFField, VoxelRenderPlugin,
-    field::LOD,
+    Chunk, ChunkPosition, Field, GpuVoxelChunkBuffers, SDFField, TarasaurPlugin, field::LOD,
 };
-
-const CHUNK_SIZE: u32 = 32;
 
 #[derive(Default)]
 struct Pass1TestState {
@@ -31,7 +28,7 @@ fn main() {
     let mut app = App::new();
     let shared_state = SharedPass1State::default();
 
-    app.add_plugins((DefaultPlugins, VoxelRenderPlugin, ChunkPlugin));
+    app.add_plugins((DefaultPlugins, TarasaurPlugin));
     app.insert_resource(shared_state.clone());
 
     app.add_systems(Startup, (setup_sphere_chunk, setup_camera));
@@ -49,19 +46,21 @@ fn main() {
     app.run();
 }
 fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera3d::default());
+    commands.spawn((Camera3d::default(), Transform::from_xyz(-15.0, 10.0, 10.0)));
 }
+
 /// Spawns a chunk populated with a sphere SDF so surface intersections exist
 fn setup_sphere_chunk(mut commands: Commands) {
     let lod = LOD::default();
     let mut sdf = SDFField::new(lod);
+    let chunk_size = lod.size();
 
-    let center = Vec3::splat(CHUNK_SIZE as f32 / 2.0);
+    let center = Vec3::splat(chunk_size as f32 / 2.0);
     let radius = 10.0f32;
 
-    for z in 0..CHUNK_SIZE {
-        for y in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
+    for z in 0..chunk_size {
+        for y in 0..chunk_size {
+            for x in 0..chunk_size {
                 let pos = Vec3::new(x as f32, y as f32, z as f32);
                 let dist = pos.distance(center) - radius;
                 sdf.set(x, y, z, dist);

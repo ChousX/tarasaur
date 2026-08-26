@@ -23,7 +23,7 @@ impl Plugin for ChunkPlugin {
     }
 }
 
-pub const CHUNK_SIZE: Vec3 = vec3(10., 10., 10.);
+pub const CHUNK_SIZE: f32 = 10.;
 
 #[derive(Resource, Clone, Default)]
 pub struct ChunkManager {
@@ -59,7 +59,7 @@ impl ChunkManager {
     ChunkPosition,
     Visibility,
     LOD,
-    Aabb::from_min_max(Vec3::ZERO, CHUNK_SIZE)
+    Aabb::from_min_max(Vec3::ZERO, Vec3::splat(CHUNK_SIZE))
 )]
 #[component(
     immutable,
@@ -204,21 +204,19 @@ pub struct ShowChunkBounds;
 
 /// Shows all existing chunk boundaries using gizmos
 fn chunk_boundry_visualizer(chunks: Query<&ChunkPosition>, mut gizmos: Gizmos) {
-    let chunk_size = CHUNK_SIZE;
-
     for ChunkPosition(chunk_pos) in chunks.iter() {
-        let origin = chunk_pos.as_vec3() * chunk_size;
+        let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
 
         // 8 corners of the box
         let p000 = origin;
-        let p100 = origin + Vec3::new(chunk_size.x, 0.0, 0.0);
-        let p010 = origin + Vec3::new(0.0, chunk_size.y, 0.0);
-        let p110 = origin + Vec3::new(chunk_size.x, chunk_size.y, 0.0);
+        let p100 = origin + Vec3::new(CHUNK_SIZE, 0.0, 0.0);
+        let p010 = origin + Vec3::new(0.0, CHUNK_SIZE, 0.0);
+        let p110 = origin + Vec3::new(CHUNK_SIZE, CHUNK_SIZE, 0.0);
 
-        let p001 = origin + Vec3::new(0.0, 0.0, chunk_size.z);
-        let p101 = origin + Vec3::new(chunk_size.x, 0.0, chunk_size.z);
-        let p011 = origin + Vec3::new(0.0, chunk_size.y, chunk_size.z);
-        let p111 = origin + Vec3::new(chunk_size.x, chunk_size.y, chunk_size.z);
+        let p001 = origin + Vec3::new(0.0, 0.0, CHUNK_SIZE);
+        let p101 = origin + Vec3::new(CHUNK_SIZE, 0.0, CHUNK_SIZE);
+        let p011 = origin + Vec3::new(0.0, CHUNK_SIZE, CHUNK_SIZE);
+        let p111 = origin + Vec3::new(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE);
 
         let color = bevy::color::palettes::tailwind::GREEN_500;
 
