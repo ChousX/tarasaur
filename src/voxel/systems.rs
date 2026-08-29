@@ -12,7 +12,10 @@ use bevy::{
 
 use crate::{
     CHUNK_SIZE, DirtyField, SDFField,
-    voxel::{pipeline::VoxelRasterPipeline, types::Pass3Uniforms},
+    voxel::{
+        pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
+        types::Pass3Uniforms,
+    },
 };
 
 use super::{
@@ -485,6 +488,7 @@ pub fn voxel_raster_pass(
     chunk_buffers: Query<&GpuVoxelChunkBuffers>,
     pipeline_cache: Res<PipelineCache>,
     raster_pipeline: Res<VoxelRasterPipeline>,
+    voxel_material: Res<VoxelDummyMaterial>,
     mut ctx: RenderContext,
 ) {
     let Some(pipeline) = pipeline_cache.get_render_pipeline(raster_pipeline.pipeline_id) else {
@@ -506,68 +510,7 @@ pub fn voxel_raster_pass(
         }],
     );
 
-    let dummy_texture = ctx.render_device().create_texture(&TextureDescriptor {
-        label: Some("voxel_dummy_material_texture"),
-        size: Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba8UnormSrgb,
-        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-
-    // Fill with opaque white so triplanar sampling multiplies against 1.0,
-    // not 0.0 — placeholder until real materials are wired up. Using the
-    // RenderQueue system param here rather than pulling a queue off
-    // RenderContext, since this Bevy version doesn't expose one that way.
-    render_queue.write_texture(
-        TexelCopyTextureInfo {
-            texture: &dummy_texture,
-            mip_level: 0,
-            origin: Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        &[255u8, 255, 255, 255],
-        TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4),
-            rows_per_image: Some(1),
-        },
-        Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-    );
-
-    let dummy_texture_view = dummy_texture.create_view(&TextureViewDescriptor::default());
-
-    let dummy_sampler = ctx.render_device().create_sampler(&SamplerDescriptor {
-        label: Some("voxel_dummy_sampler"),
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        ..default()
-    });
-
-    let material_bind_group = ctx.render_device().create_bind_group(
-        Some("voxel_dummy_material_bind_group"),
-        &raster_pipeline.material_layout,
-        &[
-            BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::TextureView(&dummy_texture_view),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: BindingResource::Sampler(&dummy_sampler),
-            },
-        ],
-    );
+    let material_bind_group = &voxel_material.bind_group;
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),

@@ -13,7 +13,10 @@ use bevy::{
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 use systems::{dispatch_voxel_compute_passes, extract_voxel_chunks, prepare_voxel_chunk_buffers};
 
-use crate::voxel::{pipeline::VoxelRasterPipeline, systems::voxel_raster_pass};
+use crate::voxel::{
+    pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
+    systems::voxel_raster_pass,
+};
 
 pub const SURFACE_NETS_PASS1_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("9f3a1b2c-4d5e-6f70-8192-a3b4c5d6e7f8"); // any valid UUIDv4
@@ -76,8 +79,9 @@ impl Plugin for VoxelRenderPlugin {
         };
 
         render_app
+            .init_resource::<VoxelRasterPipeline>()
+            .init_resource::<VoxelDummyMaterial>()
             .init_resource::<VoxelPipelineLayouts>()
-            .init_resource::<VoxelComputePipeline>()
-            .init_resource::<VoxelRasterPipeline>();
+            .init_resource::<VoxelComputePipeline>();
     }
 }

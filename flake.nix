@@ -57,10 +57,10 @@
                                                 libxkbcommon
                                                 vulkan-loader
                                                 wayland
-                                                xorg.libX11
-                                                xorg.libXcursor
-                                                xorg.libXrandr
-                                                xorg.libXi
+                                                libX11
+                                                libXcursor
+                                                libXrandr
+                                                libXi
                                         ];
                                 in
                                 {

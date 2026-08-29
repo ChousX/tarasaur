@@ -1,7 +1,10 @@
 use bevy::{
     mesh::VertexBufferLayout,
     prelude::*,
-    render::{render_resource::*, renderer::RenderDevice},
+    render::{
+        render_resource::*,
+        renderer::{RenderDevice, RenderQueue},
+    },
 };
 use std::{borrow::Cow, num::NonZeroU64};
 
@@ -583,7 +586,84 @@ impl FromWorld for VoxelComputePipeline {
         }
     }
 }
+#[derive(Resource)]
+pub struct VoxelDummyMaterial {
+    pub texture_view: TextureView,
+    pub sampler: Sampler,
+    pub bind_group: BindGroup,
+}
 
+impl FromWorld for VoxelDummyMaterial {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+        let render_queue = world.resource::<RenderQueue>();
+        let raster_pipeline = world.resource::<VoxelRasterPipeline>();
+
+        let dummy_texture = render_device.create_texture(&TextureDescriptor {
+            label: Some("voxel_dummy_material_texture"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        render_queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &dummy_texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            &[255u8, 255, 255, 255],
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let texture_view = dummy_texture.create_view(&TextureViewDescriptor::default());
+        let sampler = render_device.create_sampler(&SamplerDescriptor {
+            label: Some("voxel_dummy_sampler"),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            ..default()
+        });
+
+        let bind_group = render_device.create_bind_group(
+            Some("voxel_dummy_material_bind_group"),
+            &raster_pipeline.material_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&texture_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        );
+
+        Self {
+            texture_view,
+            sampler,
+            bind_group,
+        }
+    }
+}
 #[derive(Resource)]
 pub struct VoxelRasterPipeline {
     pub pipeline_id: CachedRenderPipelineId,
