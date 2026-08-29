@@ -38,7 +38,6 @@ pub struct SDFField {
     seeds: Box<[PackedCoord]>,
     /// Reusable scratch space to prevent runtime allocations during the JFA pass
     scratch: Vec<PackedCoord>,
-    is_dirty: bool,
 }
 
 impl SDFField {
@@ -49,7 +48,6 @@ impl SDFField {
             data: vec![f32::MAX; volume].into_boxed_slice(),
             seeds: vec![PackedCoord::EMPTY; volume].into_boxed_slice(),
             scratch: vec![PackedCoord::EMPTY; volume],
-            is_dirty: false,
         }
     }
 
@@ -69,10 +67,6 @@ impl SDFField {
     #[inline]
     pub fn seeds_slice(&self) -> &[PackedCoord] {
         &self.seeds
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.is_dirty
     }
 
     pub fn reinit(&mut self) {
@@ -214,8 +208,6 @@ impl SDFField {
                 }
             }
         }
-
-        self.is_dirty = false;
     }
 
     #[inline]
@@ -279,7 +271,6 @@ impl Field<f32> for SDFField {
         let i = self.flatten(x, y, z);
         if self.data[i] != value {
             self.data[i] = value;
-            self.is_dirty = true;
         }
     }
 }

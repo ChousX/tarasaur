@@ -15,11 +15,12 @@ impl Plugin for ChunkPlugin {
             .add_observer(new_chunk_spawned)
             .add_systems(Update, chunk_loader_boundry_checker)
             .add_observer(update_chunk_loaded);
-        app.add_systems(
-            Update,
-            chunk_boundry_visualizer.run_if(resource_exists::<ShowChunkBounds>),
-        )
-        .init_resource::<ShowChunkBounds>();
+        app.add_systems(Startup, configure_gizmo_depth_bias)
+            .add_systems(
+                Update,
+                chunk_boundry_visualizer.run_if(resource_exists::<ShowChunkBounds>),
+            )
+            .init_resource::<ShowChunkBounds>();
     }
 }
 
@@ -201,6 +202,11 @@ fn update_chunk_loaded(
 
 #[derive(Resource, Default)]
 pub struct ShowChunkBounds;
+
+fn configure_gizmo_depth_bias(mut config_store: ResMut<GizmoConfigStore>) {
+    let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
+    config.depth_bias = -0.001; // negative pulls lines toward the camera, wins depth test reliably
+}
 
 /// Shows all existing chunk boundaries using gizmos
 fn chunk_boundry_visualizer(chunks: Query<&ChunkPosition>, mut gizmos: Gizmos) {

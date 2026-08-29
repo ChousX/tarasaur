@@ -5,7 +5,7 @@ use super::{
     ops::{AccumulateExt, BlendExt, FieldBoxOps, FieldSphereOps},
 };
 use crate::{
-    CHUNK_SIZE,
+    CHUNK_SIZE, DirtyField,
     chunk::{ChunkManager, world_pos_to_chunk_pos},
 };
 use bevy::{
@@ -16,8 +16,9 @@ use bevy::{
 
 /// Generic system to process spherical edits for any component matching `Field<V>`.
 pub fn process_sphere_edits<F, V>(
+    mut commands: Commands,
     mut events: MessageReader<EditFieldMessage<F, Sphere, V>>,
-    mut query: Query<&mut F>,
+    mut query: Query<(Entity, &mut F)>,
     chunk_manager: Res<ChunkManager>,
 ) where
     F: Field<V> + Component<Mutability = Mutable>,
@@ -33,7 +34,7 @@ pub fn process_sphere_edits<F, V>(
         } = event;
         let chunk_pos = world_pos_to_chunk_pos(center);
         if let Some(chunk_id) = chunk_manager.get_chunk(&chunk_pos) {
-            let Ok(mut field) = query.get_mut(chunk_id) else {
+            let Ok((entity, mut field)) = query.get_mut(chunk_id) else {
                 return;
             };
             // Transform center from world space to chunk-local space
@@ -51,6 +52,9 @@ pub fn process_sphere_edits<F, V>(
                     field.blend_sphere(local_center, *shape, *val, *rate);
                 }
             }
+            commands
+                .entity(entity)
+                .insert(DirtyField::<F, V>::default());
         }
     }
 }
@@ -95,10 +99,14 @@ pub fn process_box_edits<F, V>(
 }
 
 /// Runs in `FieldSet::Reinit` to cleanup dirty SDF fields after edits have landed.
-pub fn reinit_dirty_sdf(mut query: Query<&mut SDFField>) {
-    for mut sdf_field in query.iter_mut() {
-        if sdf_field.is_dirty() {
-            sdf_field.reinit();
-        }
+pub fn reinit_dirty_sdf(
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut SDFField), With<DirtyField<SDFField, f32>>>,
+) {
+    for (entity, mut sdf) in query.iter_mut() {
+        sdf.reinit();
+        commands
+            .entity(entity)
+            .remove::<DirtyField<SDFField, f32>>();
     }
 }

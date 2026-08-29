@@ -1,4 +1,4 @@
-use crate::{LOD, field::consts::flatten_with_size};
+use crate::{LOD, flatten_with_size};
 // fields/visibility.rs
 use super::Field;
 use bevy::prelude::*;

@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 use bevy::render::{Render, RenderApp, RenderSystems};
+use tarasaur::DirtyField;
 use tarasaur::{
     Field, LOD, SDFField, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
@@ -66,7 +67,13 @@ fn spawn_sphere_chunks(mut commands: Commands) {
                     100.0 * stats.surface_voxels as f32 / stats.total_voxels as f32,
                 );
 
-                commands.spawn((Chunk, ChunkPosition(chunk_pos), lod, sdf));
+                commands.spawn((
+                    Chunk,
+                    ChunkPosition(chunk_pos),
+                    lod,
+                    sdf,
+                    DirtyField::<SDFField, f32>::default(),
+                ));
                 spawned.push(chunk_pos);
             }
         }

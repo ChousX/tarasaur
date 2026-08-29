@@ -1,6 +1,7 @@
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 
-mod consts;
 pub mod editor;
 mod lod;
 mod material;
@@ -17,6 +18,21 @@ pub use plugin::{FieldSet, FieldsPlugin};
 pub use sdf::SDFField;
 pub use visibility::VisibilityField;
 
+#[derive(Component, Clone, Copy)]
+pub struct DirtyField<F, V>(PhantomData<(F, V)>)
+where
+    F: Field<V>,
+    V: Copy + Default;
+
+impl<F, V> Default for DirtyField<F, V>
+where
+    F: Field<V>,
+    V: Copy + Default,
+{
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
 /// Core trait representing a 3D grid of data.
 pub trait Field<T: Copy + Default>: Component {
     /// Returns the dimensions of this specific field.
@@ -29,4 +45,10 @@ pub trait Field<T: Copy + Default>: Component {
 
 pub trait FieldGen<T: Copy + Default>: Field<T> {
     fn build(&mut self, pos: UVec3) -> T;
+}
+
+#[inline]
+pub fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> u32 {
+    // Index = z * (width * height) + y * width + x
+    z * (size.x * size.y) + y * size.x + x
 }

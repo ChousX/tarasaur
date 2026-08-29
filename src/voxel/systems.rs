@@ -11,7 +11,7 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE,
+    CHUNK_SIZE, DirtyField, SDFField,
     voxel::{pipeline::VoxelRasterPipeline, types::Pass3Uniforms},
 };
 
@@ -23,17 +23,11 @@ use super::{
 
 pub fn extract_voxel_chunks(
     mut commands: Commands,
-    query: Extract<Query<(Entity, &crate::chunk::ChunkPosition, &crate::SDFField)>>,
+    query: Extract<
+        Query<(Entity, &crate::chunk::ChunkPosition, &crate::SDFField), Changed<SDFField>>,
+    >,
 ) {
     for (entity, pos, sdf) in query.iter() {
-        {
-            let count = sdf
-                .data_slice()
-                .iter()
-                .filter(|v| v.is_sign_negative())
-                .count();
-            info!("count:{}", count);
-        }
         let size = sdf.lod.size();
         let raw_slice = sdf.data_slice();
         let expected_len = (size * size * size) as usize;
