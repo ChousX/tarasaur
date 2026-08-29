@@ -98,7 +98,7 @@ pub fn process_box_edits<F, V>(
 pub fn reinit_dirty_sdf(mut query: Query<&mut SDFField>) {
     for mut sdf_field in query.iter_mut() {
         if sdf_field.is_dirty() {
-            sdf_field.reinit_if_dirty();
+            sdf_field.reinit();
         }
     }
 }

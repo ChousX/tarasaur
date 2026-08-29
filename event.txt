@@ -1,0 +1,421 @@
+/tmp/nix-shell.IFOJvY/RenderDoc/sphere_test_2026.08.29_17.33.31_frame4.rdc - Frame #4
+
+ EID  | Event                                                                                                  | Action #
+-------------------------------------------------------------------------------------------------------------------------
+8     | - => vkQueueSubmit(82)[0]: vkBeginCommandBuffer(Baked Command Buffer 1974)                             | 1     
+10    | - vkCmdCopyBuffer((wgpu internal) Staging, LineGizmo Position Buffer)                                  | 1     
+12    | - vkCmdCopyBuffer((wgpu internal) Staging, LineGizmo Color Buffer)                                     | 2     
+14    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 320)                                                 | 3     
+16    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 318)                                                 | 4     
+18    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 5     
+20    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 6     
+22    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 7     
+24    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 8     
+26    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 9     
+28    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 10    
+30    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 11    
+32    | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 12    
+33    | - => vkQueueSubmit(82)[0]: vkEndCommandBuffer(Baked Command Buffer 1974)                               | 13    
+34    | - => vkQueueSubmit(82)[1]: vkBeginCommandBuffer(Baked Command Buffer 2233)                             | 13    
+37    | - => vkQueueSubmit(82)[1]: vkEndCommandBuffer(Baked Command Buffer 2233)                               | 13    
+38    | - => vkQueueSubmit(82)[2]: vkBeginCommandBuffer(Baked Command Buffer 1994)                             | 13    
+39    | - => vkQueueSubmit(82)[2]: vkEndCommandBuffer(Baked Command Buffer 1994)                               | 13    
+40    | - => vkQueueSubmit(82)[3]: vkBeginCommandBuffer(Baked Command Buffer 1993)                             | 13    
+41    | - surface_nets_pass1                                                                                   |       
+44    |  \- vkCmdDispatch(8, 8, 8)                                                                             | 13    
+46    | - => vkQueueSubmit(82)[3]: vkEndCommandBuffer(Baked Command Buffer 1993)                               | 14    
+47    | - => vkQueueSubmit(82)[4]: vkBeginCommandBuffer(Baked Command Buffer 1996)                             | 14    
+49    | - => vkQueueSubmit(82)[4]: vkEndCommandBuffer(Baked Command Buffer 1996)                               | 14    
+50    | - => vkQueueSubmit(82)[5]: vkBeginCommandBuffer(Baked Command Buffer 1995)                             | 14    
+51    | - stream_compaction_scan                                                                               |       
+54    |  \- vkCmdDispatch(64, 1, 1)                                                                            | 14    
+56    | - => vkQueueSubmit(82)[5]: vkEndCommandBuffer(Baked Command Buffer 1995)                               | 15    
+57    | - => vkQueueSubmit(82)[6]: vkBeginCommandBuffer(Baked Command Buffer 1998)                             | 15    
+59    | - => vkQueueSubmit(82)[6]: vkEndCommandBuffer(Baked Command Buffer 1998)                               | 15    
+60    | - => vkQueueSubmit(82)[7]: vkBeginCommandBuffer(Baked Command Buffer 1997)                             | 15    
+61    | - stream_compaction_scan_block_sums                                                                    |       
+64    |  \- vkCmdDispatch(1, 1, 1)                                                                             | 15    
+66    | - => vkQueueSubmit(82)[7]: vkEndCommandBuffer(Baked Command Buffer 1997)                               | 16    
+67    | - => vkQueueSubmit(82)[8]: vkBeginCommandBuffer(Baked Command Buffer 2000)                             | 16    
+69    | - => vkQueueSubmit(82)[8]: vkEndCommandBuffer(Baked Command Buffer 2000)                               | 16    
+70    | - => vkQueueSubmit(82)[9]: vkBeginCommandBuffer(Baked Command Buffer 1999)                             | 16    
+71    | - stream_compaction_resolve                                                                            |       
+74    |  \- vkCmdDispatch(64, 1, 1)                                                                            | 16    
+76    | - => vkQueueSubmit(82)[9]: vkEndCommandBuffer(Baked Command Buffer 1999)                               | 17    
+77    | - => vkQueueSubmit(82)[10]: vkBeginCommandBuffer(Baked Command Buffer 2002)                            | 17    
+79    | - => vkQueueSubmit(82)[10]: vkEndCommandBuffer(Baked Command Buffer 2002)                              | 17    
+80    | - => vkQueueSubmit(82)[11]: vkBeginCommandBuffer(Baked Command Buffer 2001)                            | 17    
+81    | - surface_nets_pass3                                                                                   |       
+84    |  \- vkCmdDispatch(4, 4, 4)                                                                             | 17    
+86    | - => vkQueueSubmit(82)[11]: vkEndCommandBuffer(Baked Command Buffer 2001)                              | 18    
+87    | - => vkQueueSubmit(82)[12]: vkBeginCommandBuffer(Baked Command Buffer 2004)                            | 18    
+88    | - => vkQueueSubmit(82)[12]: vkEndCommandBuffer(Baked Command Buffer 2004)                              | 18    
+89    | - => vkQueueSubmit(82)[13]: vkBeginCommandBuffer(Baked Command Buffer 2003)                            | 18    
+90    | - surface_nets_pass1                                                                                   |       
+93    |  \- vkCmdDispatch(8, 8, 8)                                                                             | 18    
+95    | - => vkQueueSubmit(82)[13]: vkEndCommandBuffer(Baked Command Buffer 2003)                              | 19    
+96    | - => vkQueueSubmit(82)[14]: vkBeginCommandBuffer(Baked Command Buffer 2006)                            | 19    
+98    | - => vkQueueSubmit(82)[14]: vkEndCommandBuffer(Baked Command Buffer 2006)                              | 19    
+99    | - => vkQueueSubmit(82)[15]: vkBeginCommandBuffer(Baked Command Buffer 2005)                            | 19    
+100   | - stream_compaction_scan                                                                               |       
+103   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 19    
+105   | - => vkQueueSubmit(82)[15]: vkEndCommandBuffer(Baked Command Buffer 2005)                              | 20    
+106   | - => vkQueueSubmit(82)[16]: vkBeginCommandBuffer(Baked Command Buffer 2008)                            | 20    
+108   | - => vkQueueSubmit(82)[16]: vkEndCommandBuffer(Baked Command Buffer 2008)                              | 20    
+109   | - => vkQueueSubmit(82)[17]: vkBeginCommandBuffer(Baked Command Buffer 2007)                            | 20    
+110   | - stream_compaction_scan_block_sums                                                                    |       
+113   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 20    
+115   | - => vkQueueSubmit(82)[17]: vkEndCommandBuffer(Baked Command Buffer 2007)                              | 21    
+116   | - => vkQueueSubmit(82)[18]: vkBeginCommandBuffer(Baked Command Buffer 2042)                            | 21    
+118   | - => vkQueueSubmit(82)[18]: vkEndCommandBuffer(Baked Command Buffer 2042)                              | 21    
+119   | - => vkQueueSubmit(82)[19]: vkBeginCommandBuffer(Baked Command Buffer 2041)                            | 21    
+120   | - stream_compaction_resolve                                                                            |       
+123   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 21    
+125   | - => vkQueueSubmit(82)[19]: vkEndCommandBuffer(Baked Command Buffer 2041)                              | 22    
+126   | - => vkQueueSubmit(82)[20]: vkBeginCommandBuffer(Baked Command Buffer 2044)                            | 22    
+128   | - => vkQueueSubmit(82)[20]: vkEndCommandBuffer(Baked Command Buffer 2044)                              | 22    
+129   | - => vkQueueSubmit(82)[21]: vkBeginCommandBuffer(Baked Command Buffer 2043)                            | 22    
+130   | - surface_nets_pass3                                                                                   |       
+133   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 22    
+135   | - => vkQueueSubmit(82)[21]: vkEndCommandBuffer(Baked Command Buffer 2043)                              | 23    
+136   | - => vkQueueSubmit(82)[22]: vkBeginCommandBuffer(Baked Command Buffer 2046)                            | 23    
+137   | - => vkQueueSubmit(82)[22]: vkEndCommandBuffer(Baked Command Buffer 2046)                              | 23    
+138   | - => vkQueueSubmit(82)[23]: vkBeginCommandBuffer(Baked Command Buffer 2045)                            | 23    
+139   | - surface_nets_pass1                                                                                   |       
+142   |  \- vkCmdDispatch(8, 8, 8)                                                                             | 23    
+144   | - => vkQueueSubmit(82)[23]: vkEndCommandBuffer(Baked Command Buffer 2045)                              | 24    
+145   | - => vkQueueSubmit(82)[24]: vkBeginCommandBuffer(Baked Command Buffer 2048)                            | 24    
+147   | - => vkQueueSubmit(82)[24]: vkEndCommandBuffer(Baked Command Buffer 2048)                              | 24    
+148   | - => vkQueueSubmit(82)[25]: vkBeginCommandBuffer(Baked Command Buffer 2047)                            | 24    
+149   | - stream_compaction_scan                                                                               |       
+152   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 24    
+154   | - => vkQueueSubmit(82)[25]: vkEndCommandBuffer(Baked Command Buffer 2047)                              | 25    
+155   | - => vkQueueSubmit(82)[26]: vkBeginCommandBuffer(Baked Command Buffer 2050)                            | 25    
+157   | - => vkQueueSubmit(82)[26]: vkEndCommandBuffer(Baked Command Buffer 2050)                              | 25    
+158   | - => vkQueueSubmit(82)[27]: vkBeginCommandBuffer(Baked Command Buffer 2049)                            | 25    
+159   | - stream_compaction_scan_block_sums                                                                    |       
+162   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 25    
+164   | - => vkQueueSubmit(82)[27]: vkEndCommandBuffer(Baked Command Buffer 2049)                              | 26    
+165   | - => vkQueueSubmit(82)[28]: vkBeginCommandBuffer(Baked Command Buffer 2052)                            | 26    
+167   | - => vkQueueSubmit(82)[28]: vkEndCommandBuffer(Baked Command Buffer 2052)                              | 26    
+168   | - => vkQueueSubmit(82)[29]: vkBeginCommandBuffer(Baked Command Buffer 2051)                            | 26    
+169   | - stream_compaction_resolve                                                                            |       
+172   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 26    
+174   | - => vkQueueSubmit(82)[29]: vkEndCommandBuffer(Baked Command Buffer 2051)                              | 27    
+175   | - => vkQueueSubmit(82)[30]: vkBeginCommandBuffer(Baked Command Buffer 2054)                            | 27    
+177   | - => vkQueueSubmit(82)[30]: vkEndCommandBuffer(Baked Command Buffer 2054)                              | 27    
+178   | - => vkQueueSubmit(82)[31]: vkBeginCommandBuffer(Baked Command Buffer 2053)                            | 27    
+179   | - surface_nets_pass3                                                                                   |       
+182   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 27    
+184   | - => vkQueueSubmit(82)[31]: vkEndCommandBuffer(Baked Command Buffer 2053)                              | 28    
+185   | - => vkQueueSubmit(82)[32]: vkBeginCommandBuffer(Baked Command Buffer 2056)                            | 28    
+186   | - => vkQueueSubmit(82)[32]: vkEndCommandBuffer(Baked Command Buffer 2056)                              | 28    
+187   | - => vkQueueSubmit(82)[33]: vkBeginCommandBuffer(Baked Command Buffer 2055)                            | 28    
+188   | - surface_nets_pass1                                                                                   |       
+191   |  \- vkCmdDispatch(8, 8, 8)                                                                             | 28    
+193   | - => vkQueueSubmit(82)[33]: vkEndCommandBuffer(Baked Command Buffer 2055)                              | 29    
+194   | - => vkQueueSubmit(82)[34]: vkBeginCommandBuffer(Baked Command Buffer 2090)                            | 29    
+196   | - => vkQueueSubmit(82)[34]: vkEndCommandBuffer(Baked Command Buffer 2090)                              | 29    
+197   | - => vkQueueSubmit(82)[35]: vkBeginCommandBuffer(Baked Command Buffer 2089)                            | 29    
+198   | - stream_compaction_scan                                                                               |       
+201   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 29    
+203   | - => vkQueueSubmit(82)[35]: vkEndCommandBuffer(Baked Command Buffer 2089)                              | 30    
+204   | - => vkQueueSubmit(82)[36]: vkBeginCommandBuffer(Baked Command Buffer 2092)                            | 30    
+206   | - => vkQueueSubmit(82)[36]: vkEndCommandBuffer(Baked Command Buffer 2092)                              | 30    
+207   | - => vkQueueSubmit(82)[37]: vkBeginCommandBuffer(Baked Command Buffer 2091)                            | 30    
+208   | - stream_compaction_scan_block_sums                                                                    |       
+211   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 30    
+213   | - => vkQueueSubmit(82)[37]: vkEndCommandBuffer(Baked Command Buffer 2091)                              | 31    
+214   | - => vkQueueSubmit(82)[38]: vkBeginCommandBuffer(Baked Command Buffer 2094)                            | 31    
+216   | - => vkQueueSubmit(82)[38]: vkEndCommandBuffer(Baked Command Buffer 2094)                              | 31    
+217   | - => vkQueueSubmit(82)[39]: vkBeginCommandBuffer(Baked Command Buffer 2093)                            | 31    
+218   | - stream_compaction_resolve                                                                            |       
+221   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 31    
+223   | - => vkQueueSubmit(82)[39]: vkEndCommandBuffer(Baked Command Buffer 2093)                              | 32    
+224   | - => vkQueueSubmit(82)[40]: vkBeginCommandBuffer(Baked Command Buffer 2096)                            | 32    
+226   | - => vkQueueSubmit(82)[40]: vkEndCommandBuffer(Baked Command Buffer 2096)                              | 32    
+227   | - => vkQueueSubmit(82)[41]: vkBeginCommandBuffer(Baked Command Buffer 2095)                            | 32    
+228   | - surface_nets_pass3                                                                                   |       
+231   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 32    
+233   | - => vkQueueSubmit(82)[41]: vkEndCommandBuffer(Baked Command Buffer 2095)                              | 33    
+234   | - => vkQueueSubmit(82)[42]: vkBeginCommandBuffer(Baked Command Buffer 2098)                            | 33    
+235   | - => vkQueueSubmit(82)[42]: vkEndCommandBuffer(Baked Command Buffer 2098)                              | 33    
+236   | - => vkQueueSubmit(82)[43]: vkBeginCommandBuffer(Baked Command Buffer 2097)                            | 33    
+237   | - surface_nets_pass1                                                                                   |       
+240   |  \- vkCmdDispatch(8, 8, 8)                                                                             | 33    
+242   | - => vkQueueSubmit(82)[43]: vkEndCommandBuffer(Baked Command Buffer 2097)                              | 34    
+243   | - => vkQueueSubmit(82)[44]: vkBeginCommandBuffer(Baked Command Buffer 2100)                            | 34    
+245   | - => vkQueueSubmit(82)[44]: vkEndCommandBuffer(Baked Command Buffer 2100)                              | 34    
+246   | - => vkQueueSubmit(82)[45]: vkBeginCommandBuffer(Baked Command Buffer 2099)                            | 34    
+247   | - stream_compaction_scan                                                                               |       
+250   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 34    
+252   | - => vkQueueSubmit(82)[45]: vkEndCommandBuffer(Baked Command Buffer 2099)                              | 35    
+253   | - => vkQueueSubmit(82)[46]: vkBeginCommandBuffer(Baked Command Buffer 2102)                            | 35    
+255   | - => vkQueueSubmit(82)[46]: vkEndCommandBuffer(Baked Command Buffer 2102)                              | 35    
+256   | - => vkQueueSubmit(82)[47]: vkBeginCommandBuffer(Baked Command Buffer 2101)                            | 35    
+257   | - stream_compaction_scan_block_sums                                                                    |       
+260   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 35    
+262   | - => vkQueueSubmit(82)[47]: vkEndCommandBuffer(Baked Command Buffer 2101)                              | 36    
+263   | - => vkQueueSubmit(82)[48]: vkBeginCommandBuffer(Baked Command Buffer 2104)                            | 36    
+265   | - => vkQueueSubmit(82)[48]: vkEndCommandBuffer(Baked Command Buffer 2104)                              | 36    
+266   | - => vkQueueSubmit(82)[49]: vkBeginCommandBuffer(Baked Command Buffer 2103)                            | 36    
+267   | - stream_compaction_resolve                                                                            |       
+270   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 36    
+272   | - => vkQueueSubmit(82)[49]: vkEndCommandBuffer(Baked Command Buffer 2103)                              | 37    
+273   | - => vkQueueSubmit(82)[50]: vkBeginCommandBuffer(Baked Command Buffer 2138)                            | 37    
+275   | - => vkQueueSubmit(82)[50]: vkEndCommandBuffer(Baked Command Buffer 2138)                              | 37    
+276   | - => vkQueueSubmit(82)[51]: vkBeginCommandBuffer(Baked Command Buffer 2137)                            | 37    
+277   | - surface_nets_pass3                                                                                   |       
+280   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 37    
+282   | - => vkQueueSubmit(82)[51]: vkEndCommandBuffer(Baked Command Buffer 2137)                              | 38    
+283   | - => vkQueueSubmit(82)[52]: vkBeginCommandBuffer(Baked Command Buffer 2140)                            | 38    
+284   | - => vkQueueSubmit(82)[52]: vkEndCommandBuffer(Baked Command Buffer 2140)                              | 38    
+285   | - => vkQueueSubmit(82)[53]: vkBeginCommandBuffer(Baked Command Buffer 2139)                            | 38    
+286   | - surface_nets_pass1                                                                                   |       
+289   |  \- vkCmdDispatch(8, 8, 8)                                                                             | 38    
+291   | - => vkQueueSubmit(82)[53]: vkEndCommandBuffer(Baked Command Buffer 2139)                              | 39    
+292   | - => vkQueueSubmit(82)[54]: vkBeginCommandBuffer(Baked Command Buffer 2142)                            | 39    
+294   | - => vkQueueSubmit(82)[54]: vkEndCommandBuffer(Baked Command Buffer 2142)                              | 39    
+295   | - => vkQueueSubmit(82)[55]: vkBeginCommandBuffer(Baked Command Buffer 2141)                            | 39    
+296   | - stream_compaction_scan                                                                               |       
+299   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 39    
+301   | - => vkQueueSubmit(82)[55]: vkEndCommandBuffer(Baked Command Buffer 2141)                              | 40    
+302   | - => vkQueueSubmit(82)[56]: vkBeginCommandBuffer(Baked Command Buffer 2144)                            | 40    
+304   | - => vkQueueSubmit(82)[56]: vkEndCommandBuffer(Baked Command Buffer 2144)                              | 40    
+305   | - => vkQueueSubmit(82)[57]: vkBeginCommandBuffer(Baked Command Buffer 2143)                            | 40    
+306   | - stream_compaction_scan_block_sums                                                                    |       
+309   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 40    
+311   | - => vkQueueSubmit(82)[57]: vkEndCommandBuffer(Baked Command Buffer 2143)                              | 41    
+312   | - => vkQueueSubmit(82)[58]: vkBeginCommandBuffer(Baked Command Buffer 2146)                            | 41    
+314   | - => vkQueueSubmit(82)[58]: vkEndCommandBuffer(Baked Command Buffer 2146)                              | 41    
+315   | - => vkQueueSubmit(82)[59]: vkBeginCommandBuffer(Baked Command Buffer 2145)                            | 41    
+316   | - stream_compaction_resolve                                                                            |       
+319   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 41    
+321   | - => vkQueueSubmit(82)[59]: vkEndCommandBuffer(Baked Command Buffer 2145)                              | 42    
+322   | - => vkQueueSubmit(82)[60]: vkBeginCommandBuffer(Baked Command Buffer 2148)                            | 42    
+324   | - => vkQueueSubmit(82)[60]: vkEndCommandBuffer(Baked Command Buffer 2148)                              | 42    
+325   | - => vkQueueSubmit(82)[61]: vkBeginCommandBuffer(Baked Command Buffer 2147)                            | 42    
+326   | - surface_nets_pass3                                                                                   |       
+329   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 42    
+331   | - => vkQueueSubmit(82)[61]: vkEndCommandBuffer(Baked Command Buffer 2147)                              | 43    
+332   | - => vkQueueSubmit(82)[62]: vkBeginCommandBuffer(Baked Command Buffer 2150)                            | 43    
+333   | - => vkQueueSubmit(82)[62]: vkEndCommandBuffer(Baked Command Buffer 2150)                              | 43    
+334   | - => vkQueueSubmit(82)[63]: vkBeginCommandBuffer(Baked Command Buffer 2149)                            | 43    
+335   | - surface_nets_pass1                                                                                   |       
+338   |  \- vkCmdDispatch(8, 8, 8)                                                                             | 43    
+340   | - => vkQueueSubmit(82)[63]: vkEndCommandBuffer(Baked Command Buffer 2149)                              | 44    
+341   | - => vkQueueSubmit(82)[64]: vkBeginCommandBuffer(Baked Command Buffer 2152)                            | 44    
+343   | - => vkQueueSubmit(82)[64]: vkEndCommandBuffer(Baked Command Buffer 2152)                              | 44    
+344   | - => vkQueueSubmit(82)[65]: vkBeginCommandBuffer(Baked Command Buffer 2151)                            | 44    
+345   | - stream_compaction_scan                                                                               |       
+348   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 44    
+350   | - => vkQueueSubmit(82)[65]: vkEndCommandBuffer(Baked Command Buffer 2151)                              | 45    
+351   | - => vkQueueSubmit(82)[66]: vkBeginCommandBuffer(Baked Command Buffer 2186)                            | 45    
+353   | - => vkQueueSubmit(82)[66]: vkEndCommandBuffer(Baked Command Buffer 2186)                              | 45    
+354   | - => vkQueueSubmit(82)[67]: vkBeginCommandBuffer(Baked Command Buffer 2185)                            | 45    
+355   | - stream_compaction_scan_block_sums                                                                    |       
+358   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 45    
+360   | - => vkQueueSubmit(82)[67]: vkEndCommandBuffer(Baked Command Buffer 2185)                              | 46    
+361   | - => vkQueueSubmit(82)[68]: vkBeginCommandBuffer(Baked Command Buffer 2188)                            | 46    
+363   | - => vkQueueSubmit(82)[68]: vkEndCommandBuffer(Baked Command Buffer 2188)                              | 46    
+364   | - => vkQueueSubmit(82)[69]: vkBeginCommandBuffer(Baked Command Buffer 2187)                            | 46    
+365   | - stream_compaction_resolve                                                                            |       
+368   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 46    
+370   | - => vkQueueSubmit(82)[69]: vkEndCommandBuffer(Baked Command Buffer 2187)                              | 47    
+371   | - => vkQueueSubmit(82)[70]: vkBeginCommandBuffer(Baked Command Buffer 2190)                            | 47    
+373   | - => vkQueueSubmit(82)[70]: vkEndCommandBuffer(Baked Command Buffer 2190)                              | 47    
+374   | - => vkQueueSubmit(82)[71]: vkBeginCommandBuffer(Baked Command Buffer 2189)                            | 47    
+375   | - surface_nets_pass3                                                                                   |       
+378   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 47    
+380   | - => vkQueueSubmit(82)[71]: vkEndCommandBuffer(Baked Command Buffer 2189)                              | 48    
+381   | - => vkQueueSubmit(82)[72]: vkBeginCommandBuffer(Baked Command Buffer 2192)                            | 48    
+382   | - => vkQueueSubmit(82)[72]: vkEndCommandBuffer(Baked Command Buffer 2192)                              | 48    
+383   | - => vkQueueSubmit(82)[73]: vkBeginCommandBuffer(Baked Command Buffer 2191)                            | 48    
+384   | - surface_nets_pass1                                                                                   |       
+387   |  \- vkCmdDispatch(8, 8, 8)                                                                             | 48    
+389   | - => vkQueueSubmit(82)[73]: vkEndCommandBuffer(Baked Command Buffer 2191)                              | 49    
+390   | - => vkQueueSubmit(82)[74]: vkBeginCommandBuffer(Baked Command Buffer 2194)                            | 49    
+392   | - => vkQueueSubmit(82)[74]: vkEndCommandBuffer(Baked Command Buffer 2194)                              | 49    
+393   | - => vkQueueSubmit(82)[75]: vkBeginCommandBuffer(Baked Command Buffer 2193)                            | 49    
+394   | - stream_compaction_scan                                                                               |       
+397   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 49    
+399   | - => vkQueueSubmit(82)[75]: vkEndCommandBuffer(Baked Command Buffer 2193)                              | 50    
+400   | - => vkQueueSubmit(82)[76]: vkBeginCommandBuffer(Baked Command Buffer 2196)                            | 50    
+402   | - => vkQueueSubmit(82)[76]: vkEndCommandBuffer(Baked Command Buffer 2196)                              | 50    
+403   | - => vkQueueSubmit(82)[77]: vkBeginCommandBuffer(Baked Command Buffer 2195)                            | 50    
+404   | - stream_compaction_scan_block_sums                                                                    |       
+407   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 50    
+409   | - => vkQueueSubmit(82)[77]: vkEndCommandBuffer(Baked Command Buffer 2195)                              | 51    
+410   | - => vkQueueSubmit(82)[78]: vkBeginCommandBuffer(Baked Command Buffer 2198)                            | 51    
+412   | - => vkQueueSubmit(82)[78]: vkEndCommandBuffer(Baked Command Buffer 2198)                              | 51    
+413   | - => vkQueueSubmit(82)[79]: vkBeginCommandBuffer(Baked Command Buffer 2197)                            | 51    
+414   | - stream_compaction_resolve                                                                            |       
+417   |  \- vkCmdDispatch(64, 1, 1)                                                                            | 51    
+419   | - => vkQueueSubmit(82)[79]: vkEndCommandBuffer(Baked Command Buffer 2197)                              | 52    
+420   | - => vkQueueSubmit(82)[80]: vkBeginCommandBuffer(Baked Command Buffer 2200)                            | 52    
+422   | - => vkQueueSubmit(82)[80]: vkEndCommandBuffer(Baked Command Buffer 2200)                              | 52    
+423   | - => vkQueueSubmit(82)[81]: vkBeginCommandBuffer(Baked Command Buffer 2199)                            | 52    
+424   | - surface_nets_pass3                                                                                   |       
+427   |  \- vkCmdDispatch(4, 4, 4)                                                                             | 52    
+429   | - => vkQueueSubmit(82)[81]: vkEndCommandBuffer(Baked Command Buffer 2199)                              | 53    
+458   | - => vkQueueSubmit(33)[0]: vkBeginCommandBuffer(Baked Command Buffer 2234)                             | 53    
+461   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 53    
+463   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 54    
+466   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 55    
+468   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 56    
+471   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 57    
+473   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 58    
+476   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 59    
+478   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 60    
+481   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 61    
+483   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 62    
+486   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 63    
+488   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 64    
+491   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 65    
+493   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 66    
+496   | - vkCmdCopyBufferToImage((wgpu internal) Staging, chunk_sdf_texture)                                   | 67    
+498   | - vkCmdCopyBuffer((wgpu internal) Staging, chunk_indirect_args_buffer)                                 | 68    
+500   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 583)                                                 | 69    
+502   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 586)                                                 | 70    
+504   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 585)                                                 | 71    
+506   | - vkCmdCopyBuffer((wgpu internal) Staging, view_uniforms_buffer)                                       | 72    
+508   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 589)                                                 | 73    
+510   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 591)                                                 | 74    
+512   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 2257)                                                | 75    
+514   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 2259)                                                | 76    
+516   | - vkCmdCopyBuffer((wgpu internal) Staging, clustering Z slicing metadata buffer)                       | 77    
+518   | - vkCmdCopyBuffer((wgpu internal) Staging, previous instance input uniform buffer)                     | 78    
+519   | - => vkQueueSubmit(33)[0]: vkEndCommandBuffer(Baked Command Buffer 2234)                               | 79    
+520   | - => vkQueueSubmit(33)[1]: vkBeginCommandBuffer(Baked Command Buffer 2328)                             | 79    
+522   | - vkCmdFillBuffer(Buffer 2261, 0)                                                                      | 79    
+524   | - vkCmdFillBuffer(Buffer 2266, 0)                                                                      | 80    
+527   | - => vkQueueSubmit(33)[1]: vkEndCommandBuffer(Baked Command Buffer 2328)                               | 81    
+528   | - => vkQueueSubmit(33)[2]: vkBeginCommandBuffer(Baked Command Buffer 2291)                             | 81    
+529   | - clustering                                                                                           | 81-90 
+530   |  \- => vkQueueSubmit(33)[2]: vkEndCommandBuffer(Baked Command Buffer 2291)                             | 81    
+531   |   - => vkQueueSubmit(33)[3]: vkBeginCommandBuffer(Baked Command Buffer 2293)                           | 81    
+532   |   - => vkQueueSubmit(33)[3]: vkEndCommandBuffer(Baked Command Buffer 2293)                             | 81    
+533   |   - => vkQueueSubmit(33)[4]: vkBeginCommandBuffer(Baked Command Buffer 2292)                           | 81    
+534   |   - clustering Z slicing pass                                                                          |       
+537   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 81    
+539   |   - => vkQueueSubmit(33)[4]: vkEndCommandBuffer(Baked Command Buffer 2292)                             | 82    
+540   |   - => vkQueueSubmit(33)[5]: vkBeginCommandBuffer(Baked Command Buffer 2297)                           | 82    
+543   |   - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer) | 82    
+545   |   - (wgpu internal) Indirect draw validation pass                                                      |       
+551   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 83    
+554   |   - => vkQueueSubmit(33)[5]: vkEndCommandBuffer(Baked Command Buffer 2297)                             | 84    
+555   |   - => vkQueueSubmit(33)[6]: vkBeginCommandBuffer(Baked Command Buffer 2294)                           | 84    
+556   |   - clustering count pass                                                                              | 84-85 
+559   |    \- vkCmdBeginRenderPass(Clear)                                                                      | 84    
+566   |     - vkCmdDrawIndexedIndirect(1) => <6, 1>                                                            | 84    
+567   |     - vkCmdEndRenderPass(Don't Care)                                                                   | 85    
+569   |   - => vkQueueSubmit(33)[6]: vkEndCommandBuffer(Baked Command Buffer 2294)                             | 85    
+570   |   - => vkQueueSubmit(33)[7]: vkBeginCommandBuffer(Baked Command Buffer 2300)                           | 85    
+572   |   - => vkQueueSubmit(33)[7]: vkEndCommandBuffer(Baked Command Buffer 2300)                             | 85    
+573   |   - => vkQueueSubmit(33)[8]: vkBeginCommandBuffer(Baked Command Buffer 2299)                           | 85    
+574   |   - clustering allocation local pass                                                                   |       
+577   |    \- vkCmdDispatch(15, 1, 1)                                                                          | 85    
+579   |   - => vkQueueSubmit(33)[8]: vkEndCommandBuffer(Baked Command Buffer 2299)                             | 86    
+580   |   - => vkQueueSubmit(33)[9]: vkBeginCommandBuffer(Baked Command Buffer 2302)                           | 86    
+582   |   - => vkQueueSubmit(33)[9]: vkEndCommandBuffer(Baked Command Buffer 2302)                             | 86    
+583   |   - => vkQueueSubmit(33)[10]: vkBeginCommandBuffer(Baked Command Buffer 2301)                          | 86    
+584   |   - clustering allocation global pass                                                                  |       
+587   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 86    
+589   |   - => vkQueueSubmit(33)[10]: vkEndCommandBuffer(Baked Command Buffer 2301)                            | 87    
+590   |   - => vkQueueSubmit(33)[11]: vkBeginCommandBuffer(Baked Command Buffer 2304)                          | 87    
+594   |   - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer) | 87    
+596   |   - (wgpu internal) Indirect draw validation pass                                                      |       
+602   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 88    
+605   |   - => vkQueueSubmit(33)[11]: vkEndCommandBuffer(Baked Command Buffer 2304)                            | 89    
+606   |   - => vkQueueSubmit(33)[12]: vkBeginCommandBuffer(Baked Command Buffer 2303)                          | 89    
+607   |   - clustering populate pass                                                                           | 89-90 
+610   |    \- vkCmdBeginRenderPass(Clear)                                                                      | 89    
+617   |     - vkCmdDrawIndexedIndirect(1) => <6, 1>                                                            | 89    
+618   |     - vkCmdEndRenderPass(Don't Care)                                                                   | 90    
+620   |   - => vkQueueSubmit(33)[12]: vkEndCommandBuffer(Baked Command Buffer 2303)                            | 90    
+621   |   - => vkQueueSubmit(33)[13]: vkBeginCommandBuffer(Baked Command Buffer 2306)                          | 90    
+623   |   - vkCmdCopyBuffer(clustering Z slicing metadata buffer, clustering metadata staging buffer)          | 90    
+625   | - => vkQueueSubmit(33)[13]: vkEndCommandBuffer(Baked Command Buffer 2306)                              | 91    
+626   | - => vkQueueSubmit(33)[14]: vkBeginCommandBuffer(Baked Command Buffer 2329)                            | 91    
+627   | - => vkQueueSubmit(33)[14]: vkEndCommandBuffer(Baked Command Buffer 2329)                              | 91    
+628   | - => vkQueueSubmit(33)[15]: vkBeginCommandBuffer(Baked Command Buffer 2308)                            | 91    
+629   | - => vkQueueSubmit(33)[15]: vkEndCommandBuffer(Baked Command Buffer 2308)                              | 91    
+630   | - => vkQueueSubmit(33)[16]: vkBeginCommandBuffer(Baked Command Buffer 2307)                            | 91    
+631   | - bin unpacking                                                                                        |       
+634   | - => vkQueueSubmit(33)[16]: vkEndCommandBuffer(Baked Command Buffer 2307)                              | 91    
+635   | - => vkQueueSubmit(33)[17]: vkBeginCommandBuffer(Baked Command Buffer 2330)                            | 91    
+636   | - => vkQueueSubmit(33)[17]: vkEndCommandBuffer(Baked Command Buffer 2330)                              | 91    
+637   | - => vkQueueSubmit(33)[18]: vkBeginCommandBuffer(Baked Command Buffer 2310)                            | 91    
+638   | - => vkQueueSubmit(33)[18]: vkEndCommandBuffer(Baked Command Buffer 2310)                              | 91    
+639   | - => vkQueueSubmit(33)[19]: vkBeginCommandBuffer(Baked Command Buffer 2309)                            | 91    
+640   | - early_mesh_preprocessing                                                                             |       
+642   | - => vkQueueSubmit(33)[19]: vkEndCommandBuffer(Baked Command Buffer 2309)                              | 91    
+643   | - => vkQueueSubmit(33)[20]: vkBeginCommandBuffer(Baked Command Buffer 2331)                            | 91    
+645   | - => vkQueueSubmit(33)[20]: vkEndCommandBuffer(Baked Command Buffer 2331)                              | 91    
+646   | - => vkQueueSubmit(33)[21]: vkBeginCommandBuffer(Baked Command Buffer 2313)                            | 91    
+647   | - => vkQueueSubmit(33)[21]: vkEndCommandBuffer(Baked Command Buffer 2313)                              | 91    
+648   | - => vkQueueSubmit(33)[22]: vkBeginCommandBuffer(Baked Command Buffer 2311)                            | 91    
+649   | - main_opaque_pass_3d                                                                                  |       
+652   |  \- vkCmdBeginRenderPass(C=Clear, D=Clear)                                                             | 91    
+653   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 91    
+655   | - => vkQueueSubmit(33)[22]: vkEndCommandBuffer(Baked Command Buffer 2311)                              | 91    
+656   | - => vkQueueSubmit(33)[23]: vkBeginCommandBuffer(Baked Command Buffer 2332)                            | 91    
+659   | - => vkQueueSubmit(33)[23]: vkEndCommandBuffer(Baked Command Buffer 2332)                              | 91    
+660   | - => vkQueueSubmit(33)[24]: vkBeginCommandBuffer(Baked Command Buffer 2316)                            | 91    
+661   | - => vkQueueSubmit(33)[24]: vkEndCommandBuffer(Baked Command Buffer 2316)                              | 91    
+662   | - => vkQueueSubmit(33)[25]: vkBeginCommandBuffer(Baked Command Buffer 2314)                            | 91    
+663   | - main_transparent_pass_3d                                                                             | 91-92 
+666   |  \- vkCmdBeginRenderPass(C=Load, D=Load)                                                               | 91    
+672   |   - vkCmdDraw(6, 96)                                                                                   | 91    
+673   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 92    
+675   | - => vkQueueSubmit(33)[25]: vkEndCommandBuffer(Baked Command Buffer 2314)                              | 92    
+676   | - => vkQueueSubmit(33)[26]: vkBeginCommandBuffer(Baked Command Buffer 2333)                            | 92    
+678   | - vkCmdCopyBufferToImage((wgpu internal) zero init buffer, voxel_dummy_material_texture)               | 92    
+681   | - => vkQueueSubmit(33)[26]: vkEndCommandBuffer(Baked Command Buffer 2333)                              | 93    
+682   | - => vkQueueSubmit(33)[27]: vkBeginCommandBuffer(Baked Command Buffer 2321)                            | 93    
+684   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 93    
+685   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 94    
+686   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 95    
+687   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 96    
+688   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 97    
+689   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 98    
+690   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 99    
+691   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 100   
+693   | - (wgpu internal) Indirect draw validation pass                                                        | 101-108
+699   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 101   
+704   |   - vkCmdDispatch(1, 1, 1)                                                                             | 102   
+709   |   - vkCmdDispatch(1, 1, 1)                                                                             | 103   
+714   |   - vkCmdDispatch(1, 1, 1)                                                                             | 104   
+719   |   - vkCmdDispatch(1, 1, 1)                                                                             | 105   
+724   |   - vkCmdDispatch(1, 1, 1)                                                                             | 106   
+729   |   - vkCmdDispatch(1, 1, 1)                                                                             | 107   
+734   |   - vkCmdDispatch(1, 1, 1)                                                                             | 108   
+737   | - => vkQueueSubmit(33)[27]: vkEndCommandBuffer(Baked Command Buffer 2321)                              | 109   
+738   | - => vkQueueSubmit(33)[28]: vkBeginCommandBuffer(Baked Command Buffer 2317)                            | 109   
+739   | - voxel_raster_pass                                                                                    | 109-117
+742   |  \- vkCmdBeginRenderPass(C=Load, D=Load)                                                               | 109   
+749   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 109   
+753   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 110   
+757   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 111   
+761   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 112   
+765   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 113   
+769   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 114   
+773   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 115   
+777   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 116   
+778   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 117   
+780   | - => vkQueueSubmit(33)[28]: vkEndCommandBuffer(Baked Command Buffer 2317)                              | 117   
+781   | - => vkQueueSubmit(33)[29]: vkBeginCommandBuffer(Baked Command Buffer 2334)                            | 117   
+783   | - => vkQueueSubmit(33)[29]: vkEndCommandBuffer(Baked Command Buffer 2334)                              | 117   
+784   | - => vkQueueSubmit(33)[30]: vkBeginCommandBuffer(Baked Command Buffer 2327)                            | 117   
+785   | - => vkQueueSubmit(33)[30]: vkEndCommandBuffer(Baked Command Buffer 2327)                              | 117   
+786   | - => vkQueueSubmit(33)[31]: vkBeginCommandBuffer(Baked Command Buffer 2325)                            | 117   
+787   | - upscaling                                                                                            | 117-118
+790   |  \- vkCmdBeginRenderPass(Clear)                                                                        | 117   
+793   |   - vkCmdDraw(3, 1)                                                                                    | 117   
+794   |   - vkCmdEndRenderPass(Store)                                                                          | 118   
+796   | - => vkQueueSubmit(33)[31]: vkEndCommandBuffer(Baked Command Buffer 2325)                              | 118   
+797   | - => vkQueueSubmit(33)[32]: vkBeginCommandBuffer(Baked Command Buffer 2335)                            | 118   
+799   | - => vkQueueSubmit(33)[32]: vkEndCommandBuffer(Baked Command Buffer 2335)                              | 118   
+806   | - => vkQueueSubmit(1)[0]: vkBeginCommandBuffer(Baked Command Buffer 2338)                              | 118   
+807   | - => vkQueueSubmit(1)[0]: vkEndCommandBuffer(Baked Command Buffer 2338)                                | 118   
+809   | - vkQueuePresentKHR(Swapchain Image 340)                                                               | 118   

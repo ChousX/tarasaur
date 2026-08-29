@@ -237,6 +237,7 @@ impl FromWorld for VoxelPipelineLayouts {
 pub struct VoxelComputePipeline {
     pub pass1_pipeline_id: CachedComputePipelineId,
     pub stream_compaction_pipeline_id: CachedComputePipelineId,
+    pub scan_block_sums_pipeline_id: CachedComputePipelineId,
     pub stream_compaction_resolve_pipeline_id: CachedComputePipelineId,
     pub pass3_pipeline_id: CachedComputePipelineId,
 }
@@ -371,6 +372,62 @@ impl FromWorld for VoxelComputePipeline {
                 }],
                 shader: STREAM_COMPACTION_SHADER_HANDLE.clone(),
                 entry_point: Some(Cow::Borrowed("scan_workgroup")),
+                shader_defs: vec![],
+                immediate_size: 0,
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 2.5
+        let scan_block_sums_pipeline_id =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some(Cow::Borrowed("scan_block_sums")),
+                layout: vec![BindGroupLayoutDescriptor {
+                    label: Cow::Borrowed("voxel_compaction_pipeline_layout"),
+                    entries: vec![
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                }],
+                shader: STREAM_COMPACTION_SHADER_HANDLE.clone(),
+                entry_point: Some(Cow::Borrowed("scan_block_sums")),
                 shader_defs: vec![],
                 immediate_size: 0,
                 zero_initialize_workgroup_memory: false,
@@ -520,6 +577,7 @@ impl FromWorld for VoxelComputePipeline {
         Self {
             pass1_pipeline_id,
             stream_compaction_pipeline_id,
+            scan_block_sums_pipeline_id,
             stream_compaction_resolve_pipeline_id,
             pass3_pipeline_id,
         }
@@ -630,8 +688,8 @@ impl FromWorld for VoxelRasterPipeline {
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
                 depth_write_enabled: Some(true),
-                //depth_compare: Some(CompareFunction::GreaterEqual),
-                depth_compare: Some(CompareFunction::LessEqual),
+                depth_compare: Some(CompareFunction::GreaterEqual),
+                //depth_compare: Some(CompareFunction::LessEqual),
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),

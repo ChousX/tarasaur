@@ -6,6 +6,12 @@ pub struct MaterialField {
     lod: LOD,
     data: Box<[u8]>,
 }
+impl Default for MaterialField {
+    fn default() -> Self {
+        let lod: LOD = LOD::default();
+        Self::new(lod)
+    }
+}
 
 impl MaterialField {
     pub fn new(lod: LOD) -> Self {

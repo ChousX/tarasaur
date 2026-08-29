@@ -75,11 +75,7 @@ impl SDFField {
         self.is_dirty
     }
 
-    pub fn reinit_if_dirty(&mut self) {
-        if !self.is_dirty {
-            return;
-        }
-
+    pub fn reinit(&mut self) {
         let size = self.lod.size();
         let volume = self.lod.volume();
 

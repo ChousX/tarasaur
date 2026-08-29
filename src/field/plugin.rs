@@ -4,6 +4,7 @@ use bevy::ecs::system::command::trigger;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
 
+use crate::LOD;
 use crate::chunk::NewChunkSpawned;
 use crate::field::{MaterialField, SDFField, VisibilityField};
 
@@ -70,51 +71,37 @@ impl AppFieldExt for App {
 fn sdf_build_on_chunk_spawn(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
+    lod_q: Query<&LOD>,
     chunk_q: Query<(), With<SDFField>>,
 ) {
-    let NewChunkSpawned {
-        entity,
-        ..
-        //world_position,
-        //chunk_position,
-    } = trigger.event();
+    let NewChunkSpawned { entity, .. } = trigger.event();
     if chunk_q.get(*entity).is_ok() {
         return;
     }
-    let new_sdf = SDFField::default();
-    commands.entity(*entity).insert(new_sdf);
+    let lod = lod_q.get(*entity).copied().unwrap_or_default();
+    commands.entity(*entity).insert(SDFField::new(lod));
 }
+
 fn visibility_build_on_chunk_spawn(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
     chunk_q: Query<(), With<VisibilityField>>,
 ) {
-    let NewChunkSpawned {
-        entity,
-        ..
-        //world_position,
-        //chunk_position,
-    } = trigger.event();
+    let NewChunkSpawned { entity, .. } = trigger.event();
     if chunk_q.get(*entity).is_ok() {
         return;
     }
-    let new_visibility = SDFField::default();
-    commands.entity(*entity).insert(new_visibility);
+    commands.entity(*entity).insert(VisibilityField::default());
 }
+
 fn material_build_on_chunk_spawn(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
     chunk_q: Query<(), With<MaterialField>>,
 ) {
-    let NewChunkSpawned {
-        entity,
-        ..
-        //world_position,
-        //chunk_position,
-    } = trigger.event();
+    let NewChunkSpawned { entity, .. } = trigger.event();
     if chunk_q.get(*entity).is_ok() {
         return;
     }
-    let new_material = SDFField::default();
-    commands.entity(*entity).insert(new_material);
+    commands.entity(*entity).insert(MaterialField::default());
 }

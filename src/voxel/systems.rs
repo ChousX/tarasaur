@@ -26,11 +26,26 @@ pub fn extract_voxel_chunks(
     query: Extract<Query<(Entity, &crate::chunk::ChunkPosition, &crate::SDFField)>>,
 ) {
     for (entity, pos, sdf) in query.iter() {
+        {
+            let count = sdf
+                .data_slice()
+                .iter()
+                .filter(|v| v.is_sign_negative())
+                .count();
+            info!("count:{}", count);
+        }
         let size = sdf.lod.size();
         let raw_slice = sdf.data_slice();
         let expected_len = (size * size * size) as usize;
         if raw_slice.len() != expected_len {
             // SDF data not yet populated for this chunk (e.g. still generating async) — skip this frame.
+            warn!(
+                "[extract_voxel_chunks] chunk {:?} skipped: data_slice len={} expected={} (size={})",
+                pos.0,
+                raw_slice.len(),
+                expected_len,
+                size
+            );
             continue;
         }
 
@@ -97,18 +112,12 @@ pub fn prepare_voxel_chunk_buffers(
                     },
                 );
 
-                let initial_indirect_args = DrawIndexedIndirectArgs {
-                    index_count: 0,
-                    instance_count: 1,
-                    first_index: 0,
-                    base_vertex: 0,
-                    first_instance: 0,
-                };
-                render_queue.write_buffer(
-                    &gpu_buffers.indirect_args_buffer,
-                    0,
-                    bytemuck::bytes_of(&initial_indirect_args),
-                );
+                // NOTE: indirect_args_buffer reset removed from here. It was racing
+                // against dispatch_voxel_compute_passes's own reset + Pass 3's atomic
+                // increments, since both used queued render_queue.write_buffer calls
+                // with no ordering guarantee relative to each other. The reset now
+                // lives exclusively in dispatch_voxel_compute_passes, recorded into
+                // the same command encoder as the compute passes that follow it.
 
                 found_existing = true;
                 break;
@@ -368,7 +377,7 @@ pub fn prepare_voxel_chunk_buffers(
 pub fn dispatch_voxel_compute_passes(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    pipeline_cache: Res<PipelineCache>, // 1. Added PipelineCache resource
+    pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
     chunk_buffers: Query<&GpuVoxelChunkBuffers>,
 ) {
@@ -376,95 +385,92 @@ pub fn dispatch_voxel_compute_passes(
         return;
     }
 
-    // 2. Resolve cached pipeline IDs into actual compiled ComputePipelines
     let (
         Some(pass1_pipeline),
         Some(stream_compaction_pipeline),
+        Some(scan_block_sums_pipeline),
         Some(stream_compaction_resolve_pipeline),
         Some(pass3_pipeline),
     ) = (
         pipeline_cache.get_compute_pipeline(pipeline.pass1_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.scan_block_sums_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_resolve_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
     )
     else {
-        // Shaders are still compiling on a background thread; safely skip this frame
+        warn!(
+            "[dispatch_voxel_compute_passes] one or more pipelines not yet compiled, skipping dispatch"
+        );
         return;
     };
-
-    let initial_indirect_args = DrawIndexedIndirectArgs {
-        index_count: 0,
-        instance_count: 1,
-        first_index: 0,
-        base_vertex: 0,
-        first_instance: 0,
-    };
-
-    for chunk in chunk_buffers.iter() {
-        render_queue.write_buffer(
-            &chunk.indirect_args_buffer,
-            0,
-            bytemuck::bytes_of(&initial_indirect_args),
-        );
-    }
 
     let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_compute_encoder"),
     });
 
+    // Reset index_count to 0 for every chunk, recorded into this same command
+    // encoder so it's strictly ordered before the compute passes below.
+    for chunk in chunk_buffers.iter() {
+        command_encoder.clear_buffer(&chunk.indirect_args_buffer, 0, Some(4));
+    }
+
     for chunk in chunk_buffers.iter() {
         let size = chunk.lod;
         let total_cells = size * size * size;
 
-        // Pass 1: Surface Nets Classification
         {
             let p1_grid = (size + 3) / 4;
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("surface_nets_pass1"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(pass1_pipeline); // Updated reference
+            compute_pass.set_pipeline(pass1_pipeline);
             compute_pass.set_bind_group(0, &chunk.pass1_surface_bind_group, &[]);
             compute_pass.dispatch_workgroups(p1_grid, p1_grid, p1_grid);
         }
 
-        // Pass 2: Stream Compaction
         {
             let workgroup_size = 512;
             let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
-
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("stream_compaction_scan"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(stream_compaction_pipeline); // Updated reference
+            compute_pass.set_pipeline(stream_compaction_pipeline);
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(num_blocks, 1, 1);
+        }
+
+        {
+            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("stream_compaction_scan_block_sums"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(scan_block_sums_pipeline);
+            compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
         }
 
         {
             let workgroup_size = 512;
             let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
-
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("stream_compaction_resolve"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(stream_compaction_resolve_pipeline); // Updated reference
+            compute_pass.set_pipeline(stream_compaction_resolve_pipeline);
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(num_blocks, 1, 1);
         }
 
-        // Pass 3: Vertex and Index Generation
         {
-            //let p3_grid = (size + 3) / 4;
-            let p3_grid = (size + 7) / 8; // Resolves to 4 workgroups (4 * 8 = 32 threads)[cite: 5, 9]
+            let p3_grid = (size + 7) / 8;
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("surface_nets_pass3"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(pass3_pipeline); // Updated reference
+            compute_pass.set_pipeline(pass3_pipeline);
             compute_pass.set_bind_group(0, &chunk.pass3_surface_bind_group, &[]);
             compute_pass.dispatch_workgroups(p3_grid, p3_grid, p3_grid);
         }
@@ -481,6 +487,7 @@ pub fn voxel_raster_pass(
         &ViewUniformOffset,
     )>,
     view_uniforms: Res<ViewUniforms>,
+    render_queue: Res<RenderQueue>,
     chunk_buffers: Query<&GpuVoxelChunkBuffers>,
     pipeline_cache: Res<PipelineCache>,
     raster_pipeline: Res<VoxelRasterPipeline>,
@@ -496,7 +503,6 @@ pub fn voxel_raster_pass(
 
     let (_camera, target, depth_texture, view_offset) = view.into_inner();
 
-    // Group 0: View
     let view_bind_group = ctx.render_device().create_bind_group(
         Some("voxel_view_bind_group"),
         &raster_pipeline.view_layout,
@@ -506,7 +512,6 @@ pub fn voxel_raster_pass(
         }],
     );
 
-    // 1. Create dummy 1x1 texture
     let dummy_texture = ctx.render_device().create_texture(&TextureDescriptor {
         label: Some("voxel_dummy_material_texture"),
         size: Extent3d {
@@ -522,9 +527,32 @@ pub fn voxel_raster_pass(
         view_formats: &[],
     });
 
+    // Fill with opaque white so triplanar sampling multiplies against 1.0,
+    // not 0.0 — placeholder until real materials are wired up. Using the
+    // RenderQueue system param here rather than pulling a queue off
+    // RenderContext, since this Bevy version doesn't expose one that way.
+    render_queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &dummy_texture,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        &[255u8, 255, 255, 255],
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+
     let dummy_texture_view = dummy_texture.create_view(&TextureViewDescriptor::default());
 
-    // 2. Create dummy sampler
     let dummy_sampler = ctx.render_device().create_sampler(&SamplerDescriptor {
         label: Some("voxel_dummy_sampler"),
         mag_filter: FilterMode::Linear,
@@ -532,7 +560,6 @@ pub fn voxel_raster_pass(
         ..default()
     });
 
-    // 3. Create Group 1 bind group with both entries
     let material_bind_group = ctx.render_device().create_bind_group(
         Some("voxel_dummy_material_bind_group"),
         &raster_pipeline.material_layout,
@@ -547,6 +574,7 @@ pub fn voxel_raster_pass(
             },
         ],
     );
+
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),
         color_attachments: &[Some(target.get_color_attachment())],
@@ -557,8 +585,6 @@ pub fn voxel_raster_pass(
     });
 
     render_pass.set_render_pipeline(pipeline);
-
-    // Bind both groups
     render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
     render_pass.set_bind_group(1, &material_bind_group, &[]);
 

@@ -91,3 +91,17 @@ fn resolve_block_offsets(
     if (idx_a < uniforms.total_cells) { compacted_offsets[idx_a] += block_modifier; }
     if (idx_b < uniforms.total_cells) { compacted_offsets[idx_b] += block_modifier; }
 }
+
+/// Phase A.5: Turns per-block totals into exclusive prefix sums across blocks.
+/// Single workgroup, single thread — num_blocks is small enough that a serial
+/// scan here is effectively free, and it removes any cross-workgroup sync hazard.
+@compute @workgroup_size(1, 1, 1)
+fn scan_block_sums() {
+    let num_blocks = arrayLength(&block_sums);
+    var running_total = 0u;
+    for (var i = 0u; i < num_blocks; i = i + 1u) {
+        let block_total = block_sums[i];
+        block_sums[i] = running_total;
+        running_total += block_total;
+    }
+}
