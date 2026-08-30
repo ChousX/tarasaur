@@ -412,62 +412,76 @@ pub fn dispatch_voxel_compute_passes(
         command_encoder.clear_buffer(&chunk.indirect_args_buffer, 0, Some(4));
     }
 
-    for chunk in chunk_buffers.iter() {
-        let size = chunk.lod;
-        let total_cells = size * size * size;
-
-        {
-            let p1_grid = (size + 3) / 4;
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("surface_nets_pass1"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(pass1_pipeline);
+    // --- Pass 1: surface_nets_pass1, all chunks in one compute pass ---
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("surface_nets_pass1_all_chunks"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(pass1_pipeline);
+        for chunk in chunk_buffers.iter() {
+            let p1_grid = (chunk.lod + 3) / 4;
             compute_pass.set_bind_group(0, &chunk.pass1_surface_bind_group, &[]);
             compute_pass.dispatch_workgroups(p1_grid, p1_grid, p1_grid);
         }
+    }
 
-        {
+    // --- Pass 2: stream_compaction_scan, all chunks ---
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_scan_all_chunks"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(stream_compaction_pipeline);
+        for chunk in chunk_buffers.iter() {
+            let size = chunk.lod;
+            let total_cells = size * size * size;
             let workgroup_size = 512;
             let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_scan"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(stream_compaction_pipeline);
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(num_blocks, 1, 1);
         }
+    }
 
-        {
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_scan_block_sums"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(scan_block_sums_pipeline);
+    // --- Pass 2.5: scan_block_sums, all chunks ---
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_scan_block_sums_all_chunks"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(scan_block_sums_pipeline);
+        for chunk in chunk_buffers.iter() {
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(1, 1, 1);
         }
+    }
 
-        {
+    // --- Pass 3: stream_compaction_resolve, all chunks ---
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_resolve_all_chunks"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(stream_compaction_resolve_pipeline);
+        for chunk in chunk_buffers.iter() {
+            let size = chunk.lod;
+            let total_cells = size * size * size;
             let workgroup_size = 512;
             let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_resolve"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(stream_compaction_resolve_pipeline);
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(num_blocks, 1, 1);
         }
+    }
 
-        {
-            let p3_grid = (size + 7) / 8;
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("surface_nets_pass3"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(pass3_pipeline);
+    // --- Pass 4: surface_nets_pass3, all chunks ---
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("surface_nets_pass3_all_chunks"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(pass3_pipeline);
+        for chunk in chunk_buffers.iter() {
+            let p3_grid = (chunk.lod + 7) / 8;
             compute_pass.set_bind_group(0, &chunk.pass3_surface_bind_group, &[]);
             compute_pass.dispatch_workgroups(p3_grid, p3_grid, p3_grid);
         }

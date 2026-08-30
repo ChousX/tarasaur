@@ -761,8 +761,8 @@ impl FromWorld for VoxelRasterPipeline {
             }),
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
-                //cull_mode: Some(Face::Back),
-                cull_mode: None,
+                cull_mode: Some(Face::Back),
+                //cull_mode: None,
                 ..default()
             },
             depth_stencil: Some(DepthStencilState {
