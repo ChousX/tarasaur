@@ -4858,6 +4858,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bytemuck",
+ "crossbeam-channel",
 ]
 
 [[package]]

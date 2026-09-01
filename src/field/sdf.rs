@@ -34,10 +34,9 @@ impl PackedCoord {
 pub struct SDFField {
     pub lod: LOD,
     data: Box<[f32]>,
-    /// Persistent state: Tracks the exact source feature voxel commanding every coordinate.
     seeds: Box<[PackedCoord]>,
-    /// Reusable scratch space to prevent runtime allocations during the JFA pass
     scratch: Vec<PackedCoord>,
+    pub version: u64,
 }
 
 impl SDFField {
@@ -48,6 +47,7 @@ impl SDFField {
             data: vec![f32::MAX; volume].into_boxed_slice(),
             seeds: vec![PackedCoord::EMPTY; volume].into_boxed_slice(),
             scratch: vec![PackedCoord::EMPTY; volume],
+            version: 0,
         }
     }
 
@@ -70,6 +70,7 @@ impl SDFField {
     }
 
     pub fn reinit(&mut self) {
+        self.version += 1;
         let size = self.lod.size();
         let volume = self.lod.volume();
 
@@ -271,6 +272,7 @@ impl Field<f32> for SDFField {
         let i = self.flatten(x, y, z);
         if self.data[i] != value {
             self.data[i] = value;
+            self.version += 1;
         }
     }
 }

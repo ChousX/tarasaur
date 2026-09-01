@@ -12,7 +12,8 @@ struct IndirectDrawArgs {
 }
 
 struct Uniforms {
-    chunk_size: u32,
+    cell_count: u32,
+    texture_size: u32,
     voxel_size: f32,
     chunk_world_origin: vec3<f32>,
 }
@@ -26,11 +27,11 @@ struct Uniforms {
 @group(0) @binding(6) var<uniform> uniforms: Uniforms;
 
 fn get_cell_index(coord: vec3<u32>) -> u32 {
-    return coord.x + (coord.y * uniforms.chunk_size) + (coord.z * uniforms.chunk_size * uniforms.chunk_size);
+    return coord.x + (coord.y * uniforms.cell_count) + (coord.z * uniforms.cell_count * uniforms.cell_count);
 }
 
 fn sample_sdf(coord: vec3<i32>) -> f32 {
-    let max_coord = i32(uniforms.chunk_size) - 1;
+    let max_coord = i32(uniforms.texture_size) - 1;
     let clamped = clamp(coord, vec3<i32>(0), vec3<i32>(max_coord));
     return textureLoad(sdf_volume, clamped).x;
 }
@@ -53,9 +54,9 @@ fn compute_normal(pos: vec3<f32>) -> vec3<f32> {
 @compute @workgroup_size(8, 8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // 1. GRID BOUNDS
-    if (id.x >= uniforms.chunk_size - 1u || id.y >= uniforms.chunk_size - 1u || id.z >= uniforms.chunk_size - 1u) {
-        return;
-    }
+    if (id.x >= uniforms.cell_count || id.y >= uniforms.cell_count || id.z >= uniforms.cell_count) {
+    return;
+}
 
     let cell_idx = get_cell_index(id);
 

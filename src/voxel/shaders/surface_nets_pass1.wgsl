@@ -1,24 +1,25 @@
 @group(0) @binding(0) var sdf_texture: texture_storage_3d<r32float, read>;
 @group(0) @binding(1) var<storage, read_write> flags_buffer: array<u32>;
+struct Pass1Uniforms {
+    cell_count: u32,
+    texture_size: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+@group(0) @binding(6) var<uniform> uniforms: Pass1Uniforms;
 
-fn flatten_cell_idx(coord: vec3<u32>, size: u32) -> u32 {
-    return coord.z * size * size + coord.y * size + coord.x;
+fn flatten_cell_idx(coord: vec3<u32>, cell_count: u32) -> u32 {
+    return coord.z * cell_count * cell_count + coord.y * cell_count + coord.x;
 }
 
 @compute @workgroup_size(4, 4, 4)
-fn cs_main(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
-    @builtin(num_workgroups) num_workgroups: vec3<u32>
-) {
-    let size = num_workgroups.x * 4u; // Grid extent (e.g., 32)
+fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let cell_count = uniforms.cell_count;
 
-    if (global_id.x >= size - 1u || global_id.y >= size - 1u || global_id.z >= size - 1u) {
-        let flat_idx = flatten_cell_idx(global_id, size);
-        flags_buffer[flat_idx] = 0u;
-        return;
+    if (global_id.x >= cell_count || global_id.y >= cell_count || global_id.z >= cell_count) {
+        return; 
     }
 
-    // 8 Corners of the local dual cell
     let offsets = array<vec3<u32>, 8>(
         vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
         vec3<u32>(0u, 1u, 0u), vec3<u32>(1u, 1u, 0u),
@@ -35,12 +36,6 @@ fn cs_main(
         }
     }
 
-    let flat_idx = flatten_cell_idx(global_id, size);
-
-    // Flag cell as active (1) if it straddles the surface boundary
-    if (inside_count > 0u && inside_count < 8u) {
-        flags_buffer[flat_idx] = 1u;
-    } else {
-        flags_buffer[flat_idx] = 0u;
-    }
+    let flat_idx = flatten_cell_idx(global_id, cell_count);
+    flags_buffer[flat_idx] = select(0u, 1u, inside_count > 0u && inside_count < 8u);
 }

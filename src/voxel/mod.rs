@@ -15,7 +15,8 @@ use systems::{dispatch_voxel_compute_passes, extract_voxel_chunks, prepare_voxel
 
 use crate::voxel::{
     pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
-    systems::voxel_raster_pass,
+    systems::{queue_mesh_readback_maps, voxel_raster_pass},
+    types::{MeshReadbackChannel, MeshReadbackChannelReceiver},
 };
 
 pub const SURFACE_NETS_PASS1_SHADER_HANDLE: Handle<Shader> =
@@ -57,9 +58,12 @@ impl Plugin for VoxelRenderPlugin {
             Shader::from_wgsl
         );
 
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(MeshReadbackChannelReceiver { receiver: rx });
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        render_app.insert_resource(MeshReadbackChannel { sender: tx });
 
         render_app
             .add_systems(ExtractSchedule, extract_voxel_chunks)
@@ -68,6 +72,7 @@ impl Plugin for VoxelRenderPlugin {
                 (
                     prepare_voxel_chunk_buffers.in_set(RenderSystems::Prepare),
                     dispatch_voxel_compute_passes.in_set(RenderSystems::Queue),
+                    queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
                 ),
             )
             .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass));

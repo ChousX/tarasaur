@@ -11,10 +11,13 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE, DirtyField, SDFField,
+    CHUNK_SIZE, ChunkManager, ChunkPosition, SDFField,
     voxel::{
         pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
-        types::Pass3Uniforms,
+        types::{
+            CollisionMeshData, MeshReadbackChannel, Pass1Uniforms, Pass3Uniforms,
+            PendingMeshReadback,
+        },
     },
 };
 
@@ -23,55 +26,6 @@ use super::{
     pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
     types::{CompactionUniforms, DrawIndexedIndirectArgs},
 };
-
-pub fn extract_voxel_chunks(
-    mut commands: Commands,
-    query: Extract<
-        Query<(Entity, &crate::chunk::ChunkPosition, &crate::SDFField), Changed<SDFField>>,
-    >,
-) {
-    for (entity, pos, sdf) in query.iter() {
-        let size = sdf.lod.size();
-        let raw_slice = sdf.data_slice();
-        let expected_len = (size * size * size) as usize;
-        if raw_slice.len() != expected_len {
-            // SDF data not yet populated for this chunk (e.g. still generating async) — skip this frame.
-            warn!(
-                "[extract_voxel_chunks] chunk {:?} skipped: data_slice len={} expected={} (size={})",
-                pos.0,
-                raw_slice.len(),
-                expected_len,
-                size
-            );
-            continue;
-        }
-
-        let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
-        let padding_per_row = (padded_bytes_per_row - unpadded_bytes_per_row) as usize;
-
-        let mut padded_sdf_data = Vec::with_capacity((padded_bytes_per_row * size * size) as usize);
-
-        for z in 0..size {
-            for y in 0..size {
-                let start_idx = ((z * size + y) * size) as usize;
-                let end_idx = start_idx + size as usize;
-                let row_bytes: &[u8] = bytemuck::cast_slice(&raw_slice[start_idx..end_idx]);
-
-                padded_sdf_data.extend_from_slice(row_bytes);
-                padded_sdf_data.resize(padded_sdf_data.len() + padding_per_row, 0);
-            }
-        }
-
-        commands.spawn(ExtractedChunkSdf {
-            main_entity: entity.into(),
-            chunk_pos: pos.0,
-            padded_sdf_data,
-            size,
-        });
-    }
-}
-
 pub fn prepare_voxel_chunk_buffers(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -82,12 +36,14 @@ pub fn prepare_voxel_chunk_buffers(
 ) {
     for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
         let size = extracted_sdf.size;
-        let total_cells = (size * size * size) as usize;
+        let chunk_voxels = size - 2;
+        let cell_count = chunk_voxels + 1;
+        let total_cells = (cell_count * cell_count * cell_count) as usize;
         let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
         let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
         let mut found_existing = false;
 
-        for (_, main_entity, gpu_buffers) in existing_buffers.iter_mut() {
+        for (buf_entity, main_entity, mut gpu_buffers) in existing_buffers.iter_mut() {
             if *main_entity == extracted_sdf.main_entity {
                 render_queue.write_texture(
                     TexelCopyTextureInfo {
@@ -108,14 +64,10 @@ pub fn prepare_voxel_chunk_buffers(
                         depth_or_array_layers: size,
                     },
                 );
-
-                // NOTE: indirect_args_buffer reset removed from here. It was racing
-                // against dispatch_voxel_compute_passes's own reset + Pass 3's atomic
-                // increments, since both used queued render_queue.write_buffer calls
-                // with no ordering guarantee relative to each other. The reset now
-                // lives exclusively in dispatch_voxel_compute_passes, recorded into
-                // the same command encoder as the compute passes that follow it.
-
+                gpu_buffers.mesh_generation += 1;
+                commands
+                    .entity(buf_entity)
+                    .insert(PendingMeshReadback::new(gpu_buffers.mesh_generation));
                 found_existing = true;
                 break;
             }
@@ -185,14 +137,14 @@ pub fn prepare_voxel_chunk_buffers(
             let final_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
                 label: Some("chunk_final_vertex_buffer"),
                 size: (total_cells * 32) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::VERTEX,
+                usage: BufferUsages::STORAGE | BufferUsages::VERTEX | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
 
             let index_buffer = render_device.create_buffer(&BufferDescriptor {
                 label: Some("chunk_index_buffer"),
                 size: (total_cells * 18 * std::mem::size_of::<u32>()) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::INDEX,
+                usage: BufferUsages::STORAGE | BufferUsages::INDEX | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
 
@@ -215,7 +167,7 @@ pub fn prepare_voxel_chunk_buffers(
                 });
 
             let compaction_uniforms = CompactionUniforms {
-                chunk_size: size,
+                chunk_size: cell_count,
                 total_cells: total_cells as u32,
                 _pad0: 0,
                 _pad1: 0,
@@ -228,13 +180,14 @@ pub fn prepare_voxel_chunk_buffers(
                     usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
                 });
 
-            let voxel_size = CHUNK_SIZE / size as f32;
+            let voxel_size = CHUNK_SIZE / chunk_voxels as f32;
             let chunk_world_origin = extracted_sdf.chunk_pos.as_vec3() * CHUNK_SIZE;
 
             let pass3_uniforms = Pass3Uniforms {
-                chunk_size: size,
+                cell_count,
+                texture_size: size,
                 voxel_size,
-                _pad0: [0; 2],
+                _pad0: [0; 1],
                 chunk_world_origin: chunk_world_origin.into(),
                 _pad1: 0,
             };
@@ -254,6 +207,19 @@ pub fn prepare_voxel_chunk_buffers(
                 usage: BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
+
+            let pass1_uniforms = Pass1Uniforms {
+                cell_count,
+                texture_size: size,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            let pass1_uniform_buffer =
+                render_device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("chunk_pass1_uniform_buffer"),
+                    contents: bytemuck::bytes_of(&pass1_uniforms),
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                });
 
             let pass1_surface_bind_group = render_device.create_bind_group(
                 Some("chunk_pass1_surface_bind_group"),
@@ -282,6 +248,10 @@ pub fn prepare_voxel_chunk_buffers(
                     BindGroupEntry {
                         binding: 5,
                         resource: indirect_args_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 6,
+                        resource: pass1_uniform_buffer.as_entire_binding(),
                     },
                 ],
             );
@@ -343,12 +313,34 @@ pub fn prepare_voxel_chunk_buffers(
                     },
                 ],
             );
+            // systems.rs, inside prepare_voxel_chunk_buffers, alongside the other buffer creation
+            let readback_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
+                label: Some("chunk_readback_vertex_buffer"),
+                size: (total_cells * 32) as u64,
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            let readback_index_buffer = render_device.create_buffer(&BufferDescriptor {
+                label: Some("chunk_readback_index_buffer"),
+                size: (total_cells * 18 * std::mem::size_of::<u32>()) as u64,
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            let readback_indirect_buffer = render_device.create_buffer(&BufferDescriptor {
+                label: Some("chunk_readback_indirect_buffer"),
+                size: 4, // just index_count
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
 
             commands.spawn((
                 extracted_sdf.main_entity,
                 GpuVoxelChunkBuffers {
                     chunk_coord: extracted_sdf.chunk_pos,
                     lod: size,
+                    chunk_voxels,
                     sdf_texture,
                     sdf_view,
                     flags_buffer,
@@ -363,7 +355,12 @@ pub fn prepare_voxel_chunk_buffers(
                     pass1_surface_bind_group,
                     pass3_surface_bind_group,
                     compaction_bind_group,
+                    readback_vertex_buffer,
+                    readback_index_buffer,
+                    readback_indirect_buffer,
+                    mesh_generation: 0,
                 },
+                PendingMeshReadback::new(0),
             ));
         }
 
@@ -377,6 +374,7 @@ pub fn dispatch_voxel_compute_passes(
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
     chunk_buffers: Query<&GpuVoxelChunkBuffers>,
+    pending_readback: Query<&GpuVoxelChunkBuffers, With<PendingMeshReadback>>,
 ) {
     if chunk_buffers.is_empty() {
         return;
@@ -420,7 +418,8 @@ pub fn dispatch_voxel_compute_passes(
         });
         compute_pass.set_pipeline(pass1_pipeline);
         for chunk in chunk_buffers.iter() {
-            let p1_grid = (chunk.lod + 3) / 4;
+            let cell_count = chunk.chunk_voxels + 1;
+            let p1_grid = (cell_count + 3) / 4;
             compute_pass.set_bind_group(0, &chunk.pass1_surface_bind_group, &[]);
             compute_pass.dispatch_workgroups(p1_grid, p1_grid, p1_grid);
         }
@@ -434,9 +433,10 @@ pub fn dispatch_voxel_compute_passes(
         });
         compute_pass.set_pipeline(stream_compaction_pipeline);
         for chunk in chunk_buffers.iter() {
-            let size = chunk.lod;
-            let total_cells = size * size * size;
+            // Pass 2 (stream_compaction_scan)
             let workgroup_size = 512;
+            let cell_count = chunk.chunk_voxels + 1;
+            let total_cells = cell_count * cell_count * cell_count;
             let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(num_blocks, 1, 1);
@@ -464,9 +464,9 @@ pub fn dispatch_voxel_compute_passes(
         });
         compute_pass.set_pipeline(stream_compaction_resolve_pipeline);
         for chunk in chunk_buffers.iter() {
-            let size = chunk.lod;
-            let total_cells = size * size * size;
             let workgroup_size = 512;
+            let cell_count = chunk.chunk_voxels + 1;
+            let total_cells = cell_count * cell_count * cell_count;
             let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
             compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
             compute_pass.dispatch_workgroups(num_blocks, 1, 1);
@@ -481,10 +481,34 @@ pub fn dispatch_voxel_compute_passes(
         });
         compute_pass.set_pipeline(pass3_pipeline);
         for chunk in chunk_buffers.iter() {
-            let p3_grid = (chunk.lod + 7) / 8;
+            let cell_count = chunk.chunk_voxels + 1;
+            let p3_grid = (cell_count + 7) / 8;
             compute_pass.set_bind_group(0, &chunk.pass3_surface_bind_group, &[]);
             compute_pass.dispatch_workgroups(p3_grid, p3_grid, p3_grid);
         }
+    }
+    for chunk in pending_readback.iter() {
+        command_encoder.copy_buffer_to_buffer(
+            &chunk.indirect_args_buffer,
+            0,
+            &chunk.readback_indirect_buffer,
+            0,
+            4,
+        );
+        command_encoder.copy_buffer_to_buffer(
+            &chunk.final_vertex_buffer,
+            0,
+            &chunk.readback_vertex_buffer,
+            0,
+            chunk.final_vertex_buffer.size(),
+        );
+        command_encoder.copy_buffer_to_buffer(
+            &chunk.index_buffer,
+            0,
+            &chunk.readback_index_buffer,
+            0,
+            chunk.index_buffer.size(),
+        );
     }
 
     render_queue.submit(std::iter::once(command_encoder.finish()));
@@ -543,5 +567,320 @@ pub fn voxel_raster_pass(
         render_pass.set_vertex_buffer(0, chunk.final_vertex_buffer.slice(..));
         render_pass.set_index_buffer(chunk.index_buffer.slice(..), IndexFormat::Uint32);
         render_pass.draw_indexed_indirect(&chunk.indirect_args_buffer, 0);
+    }
+}
+
+pub fn queue_mesh_readback_maps(
+    mut commands: Commands,
+    chunk_buffers: Query<(
+        Entity,
+        &GpuVoxelChunkBuffers,
+        &PendingMeshReadback,
+        &crate::chunk::ChunkPosition,
+    )>,
+    channel: Res<MeshReadbackChannel>,
+) {
+    for (entity, chunk, pending, pos) in chunk_buffers.iter() {
+        let sender = channel.sender.clone();
+        let chunk_pos = pos.0;
+        let generation = pending.get_val();
+
+        let vb = chunk.readback_vertex_buffer.clone();
+        let ib = chunk.readback_index_buffer.clone();
+        let cb = chunk.readback_indirect_buffer.clone();
+
+        let cb_for_slice = cb.clone();
+        cb_for_slice
+            .slice(..)
+            .map_async(MapMode::Read, move |result| {
+                if result.is_err() {
+                    return;
+                }
+                let index_count = {
+                    let data = cb.slice(..).get_mapped_range();
+                    u32::from_ne_bytes(data[0..4].try_into().unwrap())
+                };
+                cb.unmap();
+
+                let vb2 = vb.clone();
+                let ib2 = ib.clone();
+                let sender2 = sender.clone();
+
+                let ib2_for_slice = ib2.clone();
+                ib2_for_slice.slice(..(index_count as u64 * 4)).map_async(
+                    MapMode::Read,
+                    move |r| {
+                        if r.is_err() {
+                            return;
+                        }
+                        let indices: Vec<u32> = {
+                            let data = ib2.slice(..(index_count as u64 * 4)).get_mapped_range();
+                            bytemuck::cast_slice(&data).to_vec()
+                        };
+                        ib2.unmap();
+
+                        let max_vert = indices.iter().copied().max().unwrap_or(0) as u64 + 1;
+                        let vb3 = vb2.clone();
+                        let sender3 = sender2.clone();
+
+                        let vb3_for_slice = vb3.clone();
+                        vb3_for_slice
+                            .slice(..(max_vert * 32))
+                            .map_async(MapMode::Read, move |r| {
+                                if r.is_err() {
+                                    return;
+                                }
+                                let vertices: Vec<[f32; 3]> = {
+                                    let data = vb3.slice(..(max_vert * 32)).get_mapped_range();
+                                    data.chunks_exact(32)
+                                        .map(|v| {
+                                            let x = f32::from_ne_bytes(v[0..4].try_into().unwrap());
+                                            let y = f32::from_ne_bytes(v[4..8].try_into().unwrap());
+                                            let z =
+                                                f32::from_ne_bytes(v[8..12].try_into().unwrap());
+                                            [x, y, z]
+                                        })
+                                        .collect()
+                                };
+                                vb3.unmap();
+
+                                let _ = sender3.send(CollisionMeshData {
+                                    chunk_pos,
+                                    generation,
+                                    vertices,
+                                    indices: indices.clone(),
+                                });
+                            });
+                    },
+                );
+            });
+
+        commands.entity(entity).remove::<PendingMeshReadback>();
+    }
+}
+
+const NEIGHBORS_MASK: [IVec3; 7] = [
+    ivec3(1, 0, 0),
+    ivec3(0, 1, 0),
+    ivec3(0, 0, 1),
+    ivec3(1, 1, 0),
+    ivec3(1, 0, 1),
+    ivec3(0, 1, 1),
+    ivec3(1, 1, 1),
+];
+
+pub fn extract_voxel_chunks(
+    mut commands: Commands,
+    chunk_manager: Extract<Res<ChunkManager>>,
+    query: Extract<Query<(Entity, &ChunkPosition, &SDFField)>>,
+    mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
+) {
+    for (entity, pos, sdf) in query.iter() {
+        let size = sdf.lod.size();
+
+        let mut versions = [0u64; 8];
+        versions[0] = sdf.version;
+        for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
+            if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
+                if let Ok((_, _, n_sdf)) = query.get(n_entity) {
+                    versions[i + 1] = n_sdf.version;
+                }
+            }
+            // else: leave as 0 — "no neighbor loaded yet" is itself a state,
+            // so when that neighbor later appears with version >= 1, the
+            // mismatch against our cached `last_versions` entry will
+            // correctly trigger a re-extraction.
+        }
+
+        if last_versions.get(&pos.0) == Some(&versions) {
+            continue;
+        }
+        last_versions.insert(pos.0, versions);
+
+        let padded_size = size + 2;
+        let mut vol = vec![0.0f32; (padded_size * padded_size * padded_size) as usize];
+
+        let raw = sdf.data_slice();
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let src = ((z * size + y) * size + x) as usize;
+                    let dst = ((z * padded_size + y) * padded_size + x) as usize;
+                    vol[dst] = raw[src];
+                }
+            }
+        }
+
+        fill_apron(&mut vol, size, padded_size, pos.0, &chunk_manager, &query);
+
+        let unpadded_bytes_per_row = padded_size * 4;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
+        let padding_per_row = (padded_bytes_per_row - unpadded_bytes_per_row) as usize;
+        let mut padded_sdf_data =
+            Vec::with_capacity((padded_bytes_per_row * padded_size * padded_size) as usize);
+        for z in 0..padded_size {
+            for y in 0..padded_size {
+                let start = ((z * padded_size + y) * padded_size) as usize;
+                let end = start + padded_size as usize;
+                padded_sdf_data.extend_from_slice(bytemuck::cast_slice(&vol[start..end]));
+                padded_sdf_data.resize(padded_sdf_data.len() + padding_per_row, 0);
+            }
+        }
+
+        commands.spawn(ExtractedChunkSdf {
+            main_entity: entity.into(),
+            chunk_pos: pos.0,
+            padded_sdf_data,
+            size: padded_size,
+        });
+    }
+}
+
+fn fill_apron(
+    vol: &mut [f32],
+    size: u32,
+    padded_size: u32,
+    chunk_pos: IVec3,
+    chunk_manager: &ChunkManager,
+    query: &Query<(Entity, &ChunkPosition, &SDFField)>,
+) {
+    let idx =
+        |x: u32, y: u32, z: u32| -> usize { ((z * padded_size + y) * padded_size + x) as usize };
+    let n_idx = |x: u32, y: u32, z: u32| -> usize { ((z * size + y) * size + x) as usize };
+
+    let neighbor_raw = |offset: IVec3| -> Option<Box<[f32]>> {
+        let n_entity = chunk_manager.get_chunk(&(chunk_pos + offset))?;
+        let (_, _, n_sdf) = query.get(n_entity).ok()?;
+        Some(n_sdf.data_slice().to_vec().into_boxed_slice())
+    };
+
+    // --- Faces: +x, +y, +z, 2 layers deep ---
+    if let Some(nx) = neighbor_raw(IVec3::new(1, 0, 0)) {
+        for d in 0..2u32 {
+            for z in 0..size {
+                for y in 0..size {
+                    vol[idx(size + d, y, z)] = nx[n_idx(d, y, z)];
+                }
+            }
+        }
+    } else {
+        for d in 0..2u32 {
+            for z in 0..size {
+                for y in 0..size {
+                    vol[idx(size + d, y, z)] = vol[idx(size - 1, y, z)];
+                }
+            }
+        }
+    }
+
+    if let Some(ny) = neighbor_raw(IVec3::new(0, 1, 0)) {
+        for d in 0..2u32 {
+            for z in 0..size {
+                for x in 0..size {
+                    vol[idx(x, size + d, z)] = ny[n_idx(x, d, z)];
+                }
+            }
+        }
+    } else {
+        for d in 0..2u32 {
+            for z in 0..size {
+                for x in 0..size {
+                    vol[idx(x, size + d, z)] = vol[idx(x, size - 1, z)];
+                }
+            }
+        }
+    }
+
+    if let Some(nz) = neighbor_raw(IVec3::new(0, 0, 1)) {
+        for d in 0..2u32 {
+            for y in 0..size {
+                for x in 0..size {
+                    vol[idx(x, y, size + d)] = nz[n_idx(x, y, d)];
+                }
+            }
+        }
+    } else {
+        for d in 0..2u32 {
+            for y in 0..size {
+                for x in 0..size {
+                    vol[idx(x, y, size + d)] = vol[idx(x, y, size - 1)];
+                }
+            }
+        }
+    }
+
+    // --- Edges: +x+y, +x+z, +y+z — 2x2 block, 2 layers on each of the two axes ---
+    if let Some(nxy) = neighbor_raw(IVec3::new(1, 1, 0)) {
+        for dx in 0..2u32 {
+            for dy in 0..2u32 {
+                for z in 0..size {
+                    vol[idx(size + dx, size + dy, z)] = nxy[n_idx(dx, dy, z)];
+                }
+            }
+        }
+    } else {
+        for dx in 0..2u32 {
+            for dy in 0..2u32 {
+                for z in 0..size {
+                    vol[idx(size + dx, size + dy, z)] = vol[idx(size - 1, size - 1, z)];
+                }
+            }
+        }
+    }
+
+    if let Some(nxz) = neighbor_raw(IVec3::new(1, 0, 1)) {
+        for dx in 0..2u32 {
+            for dz in 0..2u32 {
+                for y in 0..size {
+                    vol[idx(size + dx, y, size + dz)] = nxz[n_idx(dx, y, dz)];
+                }
+            }
+        }
+    } else {
+        for dx in 0..2u32 {
+            for dz in 0..2u32 {
+                for y in 0..size {
+                    vol[idx(size + dx, y, size + dz)] = vol[idx(size - 1, y, size - 1)];
+                }
+            }
+        }
+    }
+
+    if let Some(nyz) = neighbor_raw(IVec3::new(0, 1, 1)) {
+        for dy in 0..2u32 {
+            for dz in 0..2u32 {
+                for x in 0..size {
+                    vol[idx(x, size + dy, size + dz)] = nyz[n_idx(x, dy, dz)];
+                }
+            }
+        }
+    } else {
+        for dy in 0..2u32 {
+            for dz in 0..2u32 {
+                for x in 0..size {
+                    vol[idx(x, size + dy, size + dz)] = vol[idx(x, size - 1, size - 1)];
+                }
+            }
+        }
+    }
+
+    // --- Corner: +x+y+z — full 2x2x2 block ---
+    if let Some(nxyz) = neighbor_raw(IVec3::new(1, 1, 1)) {
+        for dx in 0..2u32 {
+            for dy in 0..2u32 {
+                for dz in 0..2u32 {
+                    vol[idx(size + dx, size + dy, size + dz)] = nxyz[n_idx(dx, dy, dz)];
+                }
+            }
+        }
+    } else {
+        for dx in 0..2u32 {
+            for dy in 0..2u32 {
+                for dz in 0..2u32 {
+                    vol[idx(size + dx, size + dy, size + dz)] =
+                        vol[idx(size - 1, size - 1, size - 1)];
+                }
+            }
+        }
     }
 }

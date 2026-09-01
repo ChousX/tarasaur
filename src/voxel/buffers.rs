@@ -8,6 +8,7 @@ pub struct GpuVoxelChunkBuffers {
     pub chunk_coord: IVec3,
     pub lod: u32,
     pub sdf_texture: Texture,
+    pub chunk_voxels: u32,
     pub sdf_view: TextureView,
 
     pub flags_buffer: Buffer,
@@ -23,6 +24,12 @@ pub struct GpuVoxelChunkBuffers {
     pub pass1_surface_bind_group: BindGroup,
     pub pass3_surface_bind_group: BindGroup,
     pub compaction_bind_group: BindGroup,
+
+    pub readback_vertex_buffer: Buffer,
+    pub readback_index_buffer: Buffer,
+    pub readback_indirect_buffer: Buffer,
+
+    pub mesh_generation: u64,
 }
 
 #[derive(Component)]
