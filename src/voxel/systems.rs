@@ -11,7 +11,7 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE, ChunkManager, ChunkPosition, SDFField,
+    CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, SDFField,
     voxel::{
         pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
         types::{
@@ -26,6 +26,7 @@ use super::{
     pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
     types::{CompactionUniforms, DrawIndexedIndirectArgs},
 };
+
 pub fn prepare_voxel_chunk_buffers(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -672,24 +673,20 @@ const NEIGHBORS_MASK: [IVec3; 7] = [
 pub fn extract_voxel_chunks(
     mut commands: Commands,
     chunk_manager: Extract<Res<ChunkManager>>,
-    query: Extract<Query<(Entity, &ChunkPosition, &SDFField)>>,
+    query: Extract<Query<(Entity, &ChunkPosition, &SDFField, &LOD)>>,
     mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
 ) {
-    for (entity, pos, sdf) in query.iter() {
-        let size = sdf.lod.size();
+    for (entity, pos, sdf, lod) in query.iter() {
+        let size = lod.size();
 
         let mut versions = [0u64; 8];
         versions[0] = sdf.version;
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
-                if let Ok((_, _, n_sdf)) = query.get(n_entity) {
+                if let Ok((_, _, n_sdf, _)) = query.get(n_entity) {
                     versions[i + 1] = n_sdf.version;
                 }
             }
-            // else: leave as 0 — "no neighbor loaded yet" is itself a state,
-            // so when that neighbor later appears with version >= 1, the
-            // mismatch against our cached `last_versions` entry will
-            // correctly trigger a re-extraction.
         }
 
         if last_versions.get(&pos.0) == Some(&versions) {
@@ -697,7 +694,7 @@ pub fn extract_voxel_chunks(
         }
         last_versions.insert(pos.0, versions);
 
-        let padded_size = size + 2;
+        let padded_size = size + PADDING;
         let mut vol = vec![0.0f32; (padded_size * padded_size * padded_size) as usize];
 
         let raw = sdf.data_slice();
@@ -711,7 +708,7 @@ pub fn extract_voxel_chunks(
             }
         }
 
-        fill_apron(&mut vol, size, padded_size, pos.0, &chunk_manager, &query);
+        fill_apron(&mut vol, pos.0, &chunk_manager, &query);
 
         let unpadded_bytes_per_row = padded_size * 4;
         let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
@@ -736,151 +733,252 @@ pub fn extract_voxel_chunks(
     }
 }
 
-fn fill_apron(
+const PADDING: u32 = 2;
+
+pub fn fill_apron(
     vol: &mut [f32],
-    size: u32,
-    padded_size: u32,
     chunk_pos: IVec3,
     chunk_manager: &ChunkManager,
-    query: &Query<(Entity, &ChunkPosition, &SDFField)>,
+    query: &Query<(Entity, &ChunkPosition, &SDFField, &LOD)>,
 ) {
-    let idx =
-        |x: u32, y: u32, z: u32| -> usize { ((z * padded_size + y) * padded_size + x) as usize };
-    let n_idx = |x: u32, y: u32, z: u32| -> usize { ((z * size + y) * size + x) as usize };
-
-    let neighbor_raw = |offset: IVec3| -> Option<Box<[f32]>> {
-        let n_entity = chunk_manager.get_chunk(&(chunk_pos + offset))?;
-        let (_, _, n_sdf) = query.get(n_entity).ok()?;
-        Some(n_sdf.data_slice().to_vec().into_boxed_slice())
+    let Some(current_entity) = chunk_manager.get_chunk(&chunk_pos) else {
+        return;
+    };
+    let Ok((_, _, _, current_lod)) = query.get(current_entity) else {
+        return;
     };
 
-    // --- Faces: +x, +y, +z, 2 layers deep ---
-    if let Some(nx) = neighbor_raw(IVec3::new(1, 0, 0)) {
-        for d in 0..2u32 {
-            for z in 0..size {
-                for y in 0..size {
-                    vol[idx(size + d, y, z)] = nx[n_idx(d, y, z)];
-                }
+    let chunk_size = current_lod.size();
+    let padded_size = chunk_size + PADDING;
+
+    let idx =
+        |x: u32, y: u32, z: u32| -> usize { ((z * padded_size + y) * padded_size + x) as usize };
+
+    let neighbor_info = |offset: IVec3| -> Option<(Box<[f32]>, u32)> {
+        let n_entity = chunk_manager.get_chunk(&(chunk_pos + offset))?;
+        let Ok((_, _, n_sdf, n_lod)) = query.get(n_entity) else {
+            return None;
+        };
+        let data = n_sdf.data_slice().to_vec().into_boxed_slice();
+        Some((data, n_lod.size()))
+    };
+
+    // --- Faces: +x, +y, +z ---
+    for d in 0..PADDING {
+        let x_target = chunk_size + d;
+        let mut coords = Vec::new();
+        for z in 0..chunk_size {
+            for y in 0..chunk_size {
+                coords.push((x_target, y, z));
             }
         }
-    } else {
-        for d in 0..2u32 {
-            for z in 0..size {
-                for y in 0..size {
-                    vol[idx(size + d, y, z)] = vol[idx(size - 1, y, z)];
-                }
+        fill_region(
+            vol,
+            chunk_size,
+            IVec3::new(1, 0, 0),
+            &coords,
+            |_, cy, cz| idx(chunk_size - 1, cy, cz),
+            &neighbor_info,
+            &idx,
+        );
+    }
+
+    for d in 0..PADDING {
+        let y_target = chunk_size + d;
+        let mut coords = Vec::new();
+        for z in 0..chunk_size {
+            for x in 0..chunk_size {
+                coords.push((x, y_target, z));
             }
+        }
+        fill_region(
+            vol,
+            chunk_size,
+            IVec3::new(0, 1, 0),
+            &coords,
+            |cx, _, cz| idx(cx, chunk_size - 1, cz),
+            &neighbor_info,
+            &idx,
+        );
+    }
+
+    for d in 0..PADDING {
+        let z_target = chunk_size + d;
+        let mut coords = Vec::new();
+        for y in 0..chunk_size {
+            for x in 0..chunk_size {
+                coords.push((x, y, z_target));
+            }
+        }
+        fill_region(
+            vol,
+            chunk_size,
+            IVec3::new(0, 0, 1),
+            &coords,
+            |cx, cy, _| idx(cx, cy, chunk_size - 1),
+            &neighbor_info,
+            &idx,
+        );
+    }
+
+    // --- Edges ---
+    for dx in 0..PADDING {
+        for dy in 0..PADDING {
+            let mut coords = Vec::new();
+            for z in 0..chunk_size {
+                coords.push((chunk_size + dx, chunk_size + dy, z));
+            }
+            fill_region(
+                vol,
+                chunk_size,
+                IVec3::new(1, 1, 0),
+                &coords,
+                |_, _, cz| idx(chunk_size - 1, chunk_size - 1, cz),
+                &neighbor_info,
+                &idx,
+            );
         }
     }
 
-    if let Some(ny) = neighbor_raw(IVec3::new(0, 1, 0)) {
-        for d in 0..2u32 {
-            for z in 0..size {
-                for x in 0..size {
-                    vol[idx(x, size + d, z)] = ny[n_idx(x, d, z)];
-                }
+    for dx in 0..PADDING {
+        for dz in 0..PADDING {
+            let mut coords = Vec::new();
+            for y in 0..chunk_size {
+                coords.push((chunk_size + dx, y, chunk_size + dz));
             }
-        }
-    } else {
-        for d in 0..2u32 {
-            for z in 0..size {
-                for x in 0..size {
-                    vol[idx(x, size + d, z)] = vol[idx(x, size - 1, z)];
-                }
-            }
-        }
-    }
-
-    if let Some(nz) = neighbor_raw(IVec3::new(0, 0, 1)) {
-        for d in 0..2u32 {
-            for y in 0..size {
-                for x in 0..size {
-                    vol[idx(x, y, size + d)] = nz[n_idx(x, y, d)];
-                }
-            }
-        }
-    } else {
-        for d in 0..2u32 {
-            for y in 0..size {
-                for x in 0..size {
-                    vol[idx(x, y, size + d)] = vol[idx(x, y, size - 1)];
-                }
-            }
+            fill_region(
+                vol,
+                chunk_size,
+                IVec3::new(1, 0, 1),
+                &coords,
+                |_, cy, _| idx(chunk_size - 1, cy, chunk_size - 1),
+                &neighbor_info,
+                &idx,
+            );
         }
     }
 
-    // --- Edges: +x+y, +x+z, +y+z — 2x2 block, 2 layers on each of the two axes ---
-    if let Some(nxy) = neighbor_raw(IVec3::new(1, 1, 0)) {
-        for dx in 0..2u32 {
-            for dy in 0..2u32 {
-                for z in 0..size {
-                    vol[idx(size + dx, size + dy, z)] = nxy[n_idx(dx, dy, z)];
-                }
+    for dy in 0..PADDING {
+        for dz in 0..PADDING {
+            let mut coords = Vec::new();
+            for x in 0..chunk_size {
+                coords.push((x, chunk_size + dy, chunk_size + dz));
             }
-        }
-    } else {
-        for dx in 0..2u32 {
-            for dy in 0..2u32 {
-                for z in 0..size {
-                    vol[idx(size + dx, size + dy, z)] = vol[idx(size - 1, size - 1, z)];
-                }
-            }
-        }
-    }
-
-    if let Some(nxz) = neighbor_raw(IVec3::new(1, 0, 1)) {
-        for dx in 0..2u32 {
-            for dz in 0..2u32 {
-                for y in 0..size {
-                    vol[idx(size + dx, y, size + dz)] = nxz[n_idx(dx, y, dz)];
-                }
-            }
-        }
-    } else {
-        for dx in 0..2u32 {
-            for dz in 0..2u32 {
-                for y in 0..size {
-                    vol[idx(size + dx, y, size + dz)] = vol[idx(size - 1, y, size - 1)];
-                }
-            }
+            fill_region(
+                vol,
+                chunk_size,
+                IVec3::new(0, 1, 1),
+                &coords,
+                |cx, _, _| idx(cx, chunk_size - 1, chunk_size - 1),
+                &neighbor_info,
+                &idx,
+            );
         }
     }
 
-    if let Some(nyz) = neighbor_raw(IVec3::new(0, 1, 1)) {
-        for dy in 0..2u32 {
-            for dz in 0..2u32 {
-                for x in 0..size {
-                    vol[idx(x, size + dy, size + dz)] = nyz[n_idx(x, dy, dz)];
-                }
-            }
-        }
-    } else {
-        for dy in 0..2u32 {
-            for dz in 0..2u32 {
-                for x in 0..size {
-                    vol[idx(x, size + dy, size + dz)] = vol[idx(x, size - 1, size - 1)];
-                }
+    // --- Corner ---
+    for dx in 0..PADDING {
+        for dy in 0..PADDING {
+            for dz in 0..PADDING {
+                let coords = vec![(chunk_size + dx, chunk_size + dy, chunk_size + dz)];
+                fill_region(
+                    vol,
+                    chunk_size,
+                    IVec3::new(1, 1, 1),
+                    &coords,
+                    |_, _, _| idx(chunk_size - 1, chunk_size - 1, chunk_size - 1),
+                    &neighbor_info,
+                    &idx,
+                );
             }
         }
     }
+}
 
-    // --- Corner: +x+y+z — full 2x2x2 block ---
-    if let Some(nxyz) = neighbor_raw(IVec3::new(1, 1, 1)) {
-        for dx in 0..2u32 {
-            for dy in 0..2u32 {
-                for dz in 0..2u32 {
-                    vol[idx(size + dx, size + dy, size + dz)] = nxyz[n_idx(dx, dy, dz)];
-                }
-            }
+fn fill_region(
+    vol: &mut [f32],
+    chunk_size: u32,
+    offset: IVec3,
+    iter_ranges: &[(u32, u32, u32)],
+    fallback_idx: impl Fn(u32, u32, u32) -> usize,
+    neighbor_info: &impl Fn(IVec3) -> Option<(Box<[f32]>, u32)>,
+    idx: &impl Fn(u32, u32, u32) -> usize,
+) {
+    if let Some((nx_data, n_size)) = neighbor_info(offset) {
+        //let scale_ratio = chunk_size as f32 / n_size as f32;
+        let scale_ratio = n_size as f32 / chunk_size as f32;
+
+        for &(cx, cy, cz) in iter_ranges {
+            let local_x = if cx >= chunk_size {
+                (cx - chunk_size) as f32
+            } else {
+                cx as f32
+            };
+            let local_y = if cy >= chunk_size {
+                (cy - chunk_size) as f32
+            } else {
+                cy as f32
+            };
+            let local_z = if cz >= chunk_size {
+                (cz - chunk_size) as f32
+            } else {
+                cz as f32
+            };
+
+            let nx_coord = local_x * scale_ratio;
+            let ny_coord = local_y * scale_ratio;
+            let nz_coord = local_z * scale_ratio;
+
+            let val = sample_neighbor(&nx_data, n_size, nx_coord, ny_coord, nz_coord);
+            vol[idx(cx, cy, cz)] = val;
         }
     } else {
-        for dx in 0..2u32 {
-            for dy in 0..2u32 {
-                for dz in 0..2u32 {
-                    vol[idx(size + dx, size + dy, size + dz)] =
-                        vol[idx(size - 1, size - 1, size - 1)];
-                }
-            }
+        for &(cx, cy, cz) in iter_ranges {
+            let src = fallback_idx(cx, cy, cz);
+            let val = vol[src];
+            let dst = idx(cx, cy, cz);
+            vol[dst] = val;
         }
     }
+}
+
+fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
+    let max_coord = (size - 1) as f32;
+    let x = x.clamp(0.0, max_coord);
+    let y = y.clamp(0.0, max_coord);
+    let z = z.clamp(0.0, max_coord);
+
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let z0 = z.floor() as usize;
+    let x1 = (x0 + 1).min(size as usize - 1);
+    let y1 = (y0 + 1).min(size as usize - 1);
+    let z1 = (z0 + 1).min(size as usize - 1);
+
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let tz = z - z0 as f32;
+
+    let s = size as usize;
+    let sample = |ix: usize, iy: usize, iz: usize| -> f32 { data[(iz * s + iy) * s + ix] };
+
+    // Trilinear interpolation over the 8 surrounding neighbor voxels.
+    let c000 = sample(x0, y0, z0);
+    let c100 = sample(x1, y0, z0);
+    let c010 = sample(x0, y1, z0);
+    let c110 = sample(x1, y1, z0);
+    let c001 = sample(x0, y0, z1);
+    let c101 = sample(x1, y0, z1);
+    let c011 = sample(x0, y1, z1);
+    let c111 = sample(x1, y1, z1);
+
+    let c00 = c000 * (1.0 - tx) + c100 * tx;
+    let c10 = c010 * (1.0 - tx) + c110 * tx;
+    let c01 = c001 * (1.0 - tx) + c101 * tx;
+    let c11 = c011 * (1.0 - tx) + c111 * tx;
+
+    let c0 = c00 * (1.0 - ty) + c10 * ty;
+    let c1 = c01 * (1.0 - ty) + c11 * ty;
+
+    c0 * (1.0 - tz) + c1 * tz
 }

@@ -1,4 +1,5 @@
 use super::{Field, *};
+
 use bevy::math::primitives::{Cuboid, Sphere};
 
 /// Trait to handle adding small amounts or deltas to generic field values safely.
@@ -185,3 +186,50 @@ pub trait FieldBoxOps<T: Copy + Default>: Field<T> {
 // Blanket implementations for all Field types, accounting for dynamically sized types (?Sized)
 impl<T: Copy + Default, F: Field<T> + ?Sized> FieldSphereOps<T> for F {}
 impl<T: Copy + Default, F: Field<T> + ?Sized> FieldBoxOps<T> for F {}
+
+/// Gives the world-space half-extent (bounding-box radius) of a brush shape.
+/// Used to figure out which chunks a world-space edit could touch, without
+/// the caller having to know how the shape is represented.
+pub trait ShapeBounds {
+    fn half_extent(&self) -> Vec3;
+}
+
+impl ShapeBounds for Sphere {
+    #[inline]
+    fn half_extent(&self) -> Vec3 {
+        Vec3::splat(self.radius)
+    }
+}
+
+impl ShapeBounds for Cuboid {
+    #[inline]
+    fn half_extent(&self) -> Vec3 {
+        self.half_size
+    }
+}
+
+/// Produces a copy of this shape scaled by `factor` — used to convert a
+/// world-space brush shape into voxel/grid space before it reaches
+/// `FieldSphereOps`/`FieldBoxOps`, which only ever operate on raw grid
+/// indices and know nothing about world units.
+pub trait ShapeScale: Sized {
+    fn scaled_by(&self, factor: f32) -> Self;
+}
+
+impl ShapeScale for Sphere {
+    #[inline]
+    fn scaled_by(&self, factor: f32) -> Self {
+        Sphere {
+            radius: self.radius * factor,
+        }
+    }
+}
+
+impl ShapeScale for Cuboid {
+    #[inline]
+    fn scaled_by(&self, factor: f32) -> Self {
+        Cuboid {
+            half_size: self.half_size * factor,
+        }
+    }
+}

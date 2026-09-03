@@ -1,5 +1,3 @@
-// examples/sphere_test.rs
-//
 // Spawns a radius-7.0 SDF sphere at the origin, straddling the 8 chunks
 // {-1,0}^3, and logs diagnostics at every stage: CPU sampling stats,
 // chunk spawn confirmation, and GPU buffer readiness.
