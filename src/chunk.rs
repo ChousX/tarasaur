@@ -3,10 +3,9 @@ use bevy::{
     ecs::{lifecycle::HookContext, world::DeferredWorld},
     platform::collections::HashMap,
     prelude::*,
-    render::Extract,
 };
 
-use crate::{LOD, SDFField};
+use crate::LOD;
 
 pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {

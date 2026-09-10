@@ -531,7 +531,6 @@ pub fn voxel_raster_pass(
         &ViewUniformOffset,
     )>,
     view_uniforms: Res<ViewUniforms>,
-    render_queue: Res<RenderQueue>,
     chunk_buffers: Query<&GpuVoxelChunkBuffers>,
     pipeline_cache: Res<PipelineCache>,
     raster_pipeline: Res<VoxelRasterPipeline>,

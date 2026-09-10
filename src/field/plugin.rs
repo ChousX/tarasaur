@@ -1,6 +1,4 @@
-// fields/plugin.rs
 use bevy::ecs::component::Mutable;
-use bevy::ecs::system::command::trigger;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
 

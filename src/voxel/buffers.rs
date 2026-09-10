@@ -1,9 +1,4 @@
-use std::marker::PhantomData;
-
-use bevy::{
-    prelude::*,
-    render::{render_resource::*, sync_world::MainEntity},
-};
+use bevy::{prelude::*, render::render_resource::*};
 
 #[derive(Component)]
 pub struct GpuVoxelChunkBuffers {
