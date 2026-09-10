@@ -380,6 +380,30 @@ pub fn prepare_voxel_chunk_buffers<T: Send + Sync + 'static>(
     }
 }
 
+/// Runs one GPU compute pass across every chunk in `chunks`, reusing the
+/// same pipeline for all of them. `bind_group_of` and `workgroups_of` let
+/// each of the five voxel passes plug in its own per-chunk bind group and
+/// dispatch size while sharing the begin/set-pipeline/loop/dispatch shape.
+fn run_compute_pass<'a>(
+    command_encoder: &mut CommandEncoder,
+    label: &'static str,
+    pipeline: &ComputePipeline,
+    chunks: impl Iterator<Item = &'a GpuVoxelChunkBuffers>,
+    bind_group_of: impl Fn(&'a GpuVoxelChunkBuffers) -> &'a BindGroup,
+    workgroups_of: impl Fn(&'a GpuVoxelChunkBuffers) -> (u32, u32, u32),
+) {
+    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    compute_pass.set_pipeline(pipeline);
+    for chunk in chunks {
+        let (x, y, z) = workgroups_of(chunk);
+        compute_pass.set_bind_group(0, bind_group_of(chunk), &[]);
+        compute_pass.dispatch_workgroups(x, y, z);
+    }
+}
+
 pub fn dispatch_voxel_compute_passes(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -422,83 +446,56 @@ pub fn dispatch_voxel_compute_passes(
         command_encoder.clear_buffer(&chunk.indirect_args_buffer, 0, Some(4));
     }
 
-    // --- Pass 1: surface_nets_pass1, all chunks in one compute pass ---
-    {
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("surface_nets_pass1_all_chunks"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(pass1_pipeline);
-        for chunk in chunk_buffers.iter() {
-            let cell_count = chunk.chunk_voxels + 1;
-            let p1_grid = (cell_count + 3) / 4;
-            compute_pass.set_bind_group(0, &chunk.pass1_surface_bind_group, &[]);
-            compute_pass.dispatch_workgroups(p1_grid, p1_grid, p1_grid);
-        }
-    }
+    // --- Pass 1: surface_nets_pass1, all chunks ---
+    run_compute_pass(
+        &mut command_encoder,
+        "surface_nets_pass1_all_chunks",
+        pass1_pipeline,
+        chunk_buffers.iter(),
+        |c| &c.pass1_surface_bind_group,
+        |c| c.dispatch_grid_3d(4).into(),
+    );
 
     // --- Pass 2: stream_compaction_scan, all chunks ---
-    {
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_scan_all_chunks"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(stream_compaction_pipeline);
-        for chunk in chunk_buffers.iter() {
-            // Pass 2 (stream_compaction_scan)
-            let workgroup_size = 512;
-            let cell_count = chunk.chunk_voxels + 1;
-            let total_cells = cell_count * cell_count * cell_count;
-            let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
-            compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
-            compute_pass.dispatch_workgroups(num_blocks, 1, 1);
-        }
-    }
+    run_compute_pass(
+        &mut command_encoder,
+        "stream_compaction_scan_all_chunks",
+        stream_compaction_pipeline,
+        chunk_buffers.iter(),
+        |c| &c.compaction_bind_group,
+        |c| (c.dispatch_blocks_1d(512), 1, 1),
+    );
 
     // --- Pass 2.5: scan_block_sums, all chunks ---
-    {
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_scan_block_sums_all_chunks"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(scan_block_sums_pipeline);
-        for chunk in chunk_buffers.iter() {
-            compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
-            compute_pass.dispatch_workgroups(1, 1, 1);
-        }
-    }
+    run_compute_pass(
+        &mut command_encoder,
+        "stream_compaction_scan_block_sums_all_chunks",
+        scan_block_sums_pipeline,
+        chunk_buffers.iter(),
+        |c| &c.compaction_bind_group,
+        |_| (1, 1, 1),
+    );
 
     // --- Pass 3: stream_compaction_resolve, all chunks ---
-    {
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_resolve_all_chunks"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(stream_compaction_resolve_pipeline);
-        for chunk in chunk_buffers.iter() {
-            let workgroup_size = 512;
-            let cell_count = chunk.chunk_voxels + 1;
-            let total_cells = cell_count * cell_count * cell_count;
-            let num_blocks = (total_cells + workgroup_size - 1) / workgroup_size;
-            compute_pass.set_bind_group(0, &chunk.compaction_bind_group, &[]);
-            compute_pass.dispatch_workgroups(num_blocks, 1, 1);
-        }
-    }
+    run_compute_pass(
+        &mut command_encoder,
+        "stream_compaction_resolve_all_chunks",
+        stream_compaction_resolve_pipeline,
+        chunk_buffers.iter(),
+        |c| &c.compaction_bind_group,
+        |c| (c.dispatch_blocks_1d(512), 1, 1),
+    );
 
     // --- Pass 4: surface_nets_pass3, all chunks ---
-    {
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("surface_nets_pass3_all_chunks"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(pass3_pipeline);
-        for chunk in chunk_buffers.iter() {
-            let cell_count = chunk.chunk_voxels + 1;
-            let p3_grid = (cell_count + 7) / 8;
-            compute_pass.set_bind_group(0, &chunk.pass3_surface_bind_group, &[]);
-            compute_pass.dispatch_workgroups(p3_grid, p3_grid, p3_grid);
-        }
-    }
+    run_compute_pass(
+        &mut command_encoder,
+        "surface_nets_pass3_all_chunks",
+        pass3_pipeline,
+        chunk_buffers.iter(),
+        |c| &c.pass3_surface_bind_group,
+        |c| c.dispatch_grid_3d(8).into(),
+    );
+
     for chunk in pending_readback.iter() {
         command_encoder.copy_buffer_to_buffer(
             &chunk.indirect_args_buffer,
