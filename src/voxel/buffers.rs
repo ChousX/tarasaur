@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use bevy::{
     prelude::*,
     render::{render_resource::*, sync_world::MainEntity},
@@ -30,12 +32,4 @@ pub struct GpuVoxelChunkBuffers {
     pub readback_indirect_buffer: Buffer,
 
     pub mesh_generation: u64,
-}
-
-#[derive(Component)]
-pub struct ExtractedChunkSdf {
-    pub main_entity: MainEntity,
-    pub chunk_pos: IVec3,
-    pub padded_sdf_data: Vec<u8>,
-    pub size: u32,
 }

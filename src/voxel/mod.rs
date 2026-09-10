@@ -13,10 +13,13 @@ use bevy::{
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 use systems::{dispatch_voxel_compute_passes, extract_voxel_chunks, prepare_voxel_chunk_buffers};
 
-use crate::voxel::{
-    pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
-    systems::{queue_mesh_readback_maps, voxel_raster_pass},
-    types::{MeshReadbackChannel, MeshReadbackChannelReceiver},
+use crate::{
+    SDFField,
+    voxel::{
+        pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
+        systems::{queue_mesh_readback_maps, voxel_raster_pass},
+        types::{MeshReadbackChannel, MeshReadbackChannelReceiver},
+    },
 };
 
 pub const SURFACE_NETS_PASS1_SHADER_HANDLE: Handle<Shader> =
@@ -70,7 +73,7 @@ impl Plugin for VoxelRenderPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_voxel_chunk_buffers.in_set(RenderSystems::Prepare),
+                    prepare_voxel_chunk_buffers::<SDFField>.in_set(RenderSystems::Prepare),
                     dispatch_voxel_compute_passes.in_set(RenderSystems::Queue),
                     queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
                 ),

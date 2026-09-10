@@ -6,7 +6,7 @@ use bevy::{
     render::Extract,
 };
 
-use crate::{LOD, SDFField, voxel::buffers::ExtractedChunkSdf};
+use crate::{LOD, SDFField};
 
 pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {

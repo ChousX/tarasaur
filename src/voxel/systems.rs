@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use bevy::{
     prelude::*,
     render::{
@@ -22,17 +24,26 @@ use crate::{
 };
 
 use super::{
-    buffers::{ExtractedChunkSdf, GpuVoxelChunkBuffers},
+    buffers::GpuVoxelChunkBuffers,
     pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
     types::{CompactionUniforms, DrawIndexedIndirectArgs},
 };
 
-pub fn prepare_voxel_chunk_buffers(
+#[derive(Component)]
+pub struct ExtractedChunkField<T: Send + Sync + 'static> {
+    pub main_entity: MainEntity,
+    pub chunk_pos: IVec3,
+    pub padded_sdf_data: Vec<u8>,
+    pub size: u32,
+    pub _type: PhantomData<T>,
+}
+
+pub fn prepare_voxel_chunk_buffers<T: Send + Sync + 'static>(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     layouts: Res<VoxelPipelineLayouts>,
-    extracted_chunks: Query<(Entity, &ExtractedChunkSdf)>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<T>)>,
     mut existing_buffers: Query<(Entity, &MainEntity, &mut GpuVoxelChunkBuffers)>,
 ) {
     for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
@@ -724,11 +735,12 @@ pub fn extract_voxel_chunks(
             }
         }
 
-        commands.spawn(ExtractedChunkSdf {
+        commands.spawn(ExtractedChunkField::<SDFField> {
             main_entity: entity.into(),
             chunk_pos: pos.0,
             padded_sdf_data,
             size: padded_size,
+            _type: PhantomData,
         });
     }
 }
