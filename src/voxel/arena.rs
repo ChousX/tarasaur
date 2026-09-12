@@ -16,31 +16,36 @@ pub static MAX_CHUNKS: OnceLock<u32> = OnceLock::new();
 /// buffers dominate, at 32 bytes/cell) under the device's actual
 /// max_storage_buffer_binding_size, with a 10% safety margin.
 /// Computed once from the real device limit and cached for the app's lifetime.
-fn max_chunks(render_device: &RenderDevice, total_cells: u32, sdf_elems_per_chunk: u32) -> u32 {
+fn max_chunks(
+    render_device: &RenderDevice,
+    total_cells: u32,
+    sdf_elems_per_chunk: u32,
+    budget_cells_per_chunk: u32,
+) -> u32 {
     *MAX_CHUNKS.get_or_init(|| {
         let limit = (render_device.limits().max_storage_buffer_binding_size as u64 * 9) / 10;
 
-        // Per-chunk byte cost of every buffer bound with as_entire_binding().
-        // Whichever is largest sets the real ceiling.
-        let sdf_bytes        = sdf_elems_per_chunk as u64 * 4;
-        let flags_bytes      = total_cells as u64 * 4;
-        let offsets_bytes    = total_cells as u64 * 4;
-        let vertex_bytes     = total_cells as u64 * 32; // scattered_vertex_buffer / final_vertex_buffer
-        let index_bytes      = total_cells as u64 * 18 * 4; // final_index_buffer — the actual worst case
+        let sdf_bytes     = sdf_elems_per_chunk as u64 * 4;
+        let flags_bytes   = total_cells as u64 * 4;
+        let offsets_bytes = total_cells as u64 * 4;
+        // vertex/index strides now sized to the active-cell budget, not total_cells.
+        let vertex_bytes  = budget_cells_per_chunk as u64 * 32;
+        let index_bytes   = budget_cells_per_chunk as u64 * 18 * 4;
 
         let worst_bytes_per_chunk = [sdf_bytes, flags_bytes, offsets_bytes, vertex_bytes, index_bytes]
-            .into_iter()
-            .max()
-            .unwrap();
+            .into_iter().max().unwrap();
 
         let capped = (limit / worst_bytes_per_chunk).max(1) as u32;
         info!(
-            "[VoxelChunkArena] limit={} bytes, worst-case/chunk={} bytes (index_buffer), capping to {} chunks",
-            limit, worst_bytes_per_chunk, capped
+            "[VoxelChunkArena] limit={} bytes, worst-case/chunk={} bytes, capping to {} chunks (budget={} cells/chunk, {:.0}% of {})",
+            limit, worst_bytes_per_chunk, capped, budget_cells_per_chunk,
+            ACTIVE_FRACTION_ESTIMATE * 100.0, total_cells
         );
         capped
     })
 }
+
+const ACTIVE_FRACTION_ESTIMATE: f32 = 0.20; // tune from telemetry
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -49,7 +54,7 @@ pub struct ChunkMeta {
     pub voxel_size: f32,
     pub sdf_offset: u32,
     pub cell_offset: u32,
-    pub vertex_offset: u32,
+    pub active_list_pos: u32, // was `vertex_offset` — now dead, replaced by dynamic bases
     pub _pad: u32,
 }
 
@@ -87,6 +92,14 @@ pub struct VoxelChunkArena {
     slot_of_main_entity: HashMap<MainEntity, u32>,
     pub active_slots: Vec<u32>, // stable order used for this frame's batched dispatch
     pub dirty_slots: Vec<u32>,  // slots whose ChunkMeta/SDF changed since last upload
+    pub chunk_active_counts_buffer: Buffer, // [active_list_pos] -> active cell count, GPU-written
+    pub chunk_vertex_base_buffer: Buffer, // [active_list_pos] -> exclusive prefix sum
+    pub chunk_index_base_buffer: Buffer, // [active_list_pos] -> vertex_base * 18
+    pub active_slot_map_buffer: Buffer, // [active_list_pos] -> real arena slot, CPU-written per frame
+    pub overflow_flag_buffer: Buffer,   // single atomic<u32>, cleared each frame
+    pub overflow_readback_buffer: Buffer, // CPU-mapped copy for telemetry/next-frame drop
+    pub chunk_bases_uniform_buffer: Buffer, // active_count + budget constants
+    pub chunk_bases_bind_group: BindGroup,
 }
 
 impl VoxelChunkArena {
@@ -98,8 +111,14 @@ impl VoxelChunkArena {
     ) -> Self {
         let total_cells = cell_count * cell_count * cell_count;
         let sdf_elems_per_chunk = texture_size * texture_size * texture_size;
-        let max = max_chunks(render_device, total_cells, sdf_elems_per_chunk) as u64;
-
+        let budget_cells_per_chunk =
+            ((total_cells as f32) * ACTIVE_FRACTION_ESTIMATE).ceil() as u32;
+        let max = max_chunks(
+            render_device,
+            total_cells,
+            sdf_elems_per_chunk,
+            budget_cells_per_chunk,
+        ) as u64;
         let sdf_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_sdf_buffer"),
             size: sdf_elems_per_chunk as u64 * 4 * max,
@@ -130,23 +149,23 @@ impl VoxelChunkArena {
 
         let final_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_final_vertex_buffer"),
-            size: total_cells as u64 * 32 * max,
+            size: budget_cells_per_chunk as u64 * 32 * max,
             usage: BufferUsages::STORAGE | BufferUsages::VERTEX | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let index_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_index_buffer"),
-            size: total_cells as u64 * 18 * 4 * max,
+            size: budget_cells_per_chunk as u64 * 18 * 4 * max,
             usage: BufferUsages::STORAGE | BufferUsages::INDEX | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let zeroed_args: Vec<DrawIndexedIndirectArgs> = (0..max as u32)
-            .map(|slot| DrawIndexedIndirectArgs {
+            .map(|_| DrawIndexedIndirectArgs {
                 index_count: 0,
                 instance_count: 1,
-                first_index: slot * total_cells * 18,
+                first_index: 0, // overwritten every frame by compute_chunk_bases
                 base_vertex: 0,
                 first_instance: 0,
             })
@@ -355,6 +374,62 @@ impl VoxelChunkArena {
                 },
             ],
         );
+        let chunk_active_counts_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_chunk_active_counts_buffer"),
+            size: 4 * max,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let chunk_vertex_base_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_chunk_vertex_base_buffer"),
+            size: 4 * max,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let chunk_index_base_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_chunk_index_base_buffer"),
+            size: 4 * max,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let active_slot_map_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_active_slot_map_buffer"),
+            size: 4 * max,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let overflow_flag_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_overflow_flag_buffer"),
+            size: 4,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let overflow_readback_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_overflow_readback_buffer"),
+            size: 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct ChunkBasesUniforms {
+            active_count: u32,
+            budget_cells_per_chunk: u32,
+            total_budget_cells: u32, // budget_cells_per_chunk * max
+            _pad0: u32,
+        }
+        let chunk_bases_uniform_buffer =
+            render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("arena_chunk_bases_uniform_buffer"),
+                contents: bytemuck::bytes_of(&ChunkBasesUniforms {
+                    active_count: 0, // updated per-frame via write_buffer
+                    budget_cells_per_chunk,
+                    total_budget_cells: budget_cells_per_chunk * max as u32,
+                    _pad0: 0,
+                }),
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            });
 
         Self {
             max_chunks: max as u32,
@@ -385,6 +460,14 @@ impl VoxelChunkArena {
             active_slots: Vec::new(),
             dirty_slots: Vec::new(),
             blocks_per_chunk,
+            chunk_active_counts_buffer,
+            chunk_vertex_base_buffer,
+            chunk_index_base_buffer,
+            active_slot_map_buffer,
+            overflow_flag_buffer,
+            overflow_readback_buffer,
+            chunk_bases_uniform_buffer,
+            chunk_bases_bind_group,
         }
     }
 
