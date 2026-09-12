@@ -13,21 +13,15 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, SDFField,
+    CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, Versionable, VoxelDataSlice,
     voxel::{
-        pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
-        types::{
-            CollisionMeshData, MeshReadbackChannel, Pass1Uniforms, Pass3Uniforms,
-            PendingMeshReadback,
-        },
+        arena::{ChunkMeta, VoxelChunkArena},
+        pipeline::{VoxelDummyMaterial, VoxelPipelineLayouts, VoxelRasterPipeline},
+        types::{CollisionMeshData, MeshReadbackChannel, PendingMeshReadback},
     },
 };
 
-use super::{
-    buffers::GpuVoxelChunkBuffers,
-    pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
-    types::{CompactionUniforms, DrawIndexedIndirectArgs},
-};
+use super::{buffers::GpuVoxelChunkBuffers, pipeline::VoxelComputePipeline};
 
 #[derive(Component)]
 pub struct ExtractedChunkField<T: Send + Sync + 'static> {
@@ -38,346 +32,187 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub _type: PhantomData<T>,
 }
 
-pub fn prepare_voxel_chunk_buffers<T: Send + Sync + 'static>(
-    mut commands: Commands,
-    render_device: Res<RenderDevice>,
+pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
+    mut arena: ResMut<VoxelChunkArena>,
     render_queue: Res<RenderQueue>,
-    layouts: Res<VoxelPipelineLayouts>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<T>)>,
-    mut existing_buffers: Query<(Entity, &MainEntity, &mut GpuVoxelChunkBuffers)>,
+    mut commands: Commands,
 ) {
+    arena.dirty_slots.clear();
+
     for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
+        let Some(slot) = arena.slot_for(extracted_sdf.main_entity) else {
+            warn!(
+                "[prepare_voxel_arena] arena full ({} slots), dropping chunk {:?}",
+                arena.max_chunks, extracted_sdf.chunk_pos
+            );
+            commands.entity(extracted_entity).despawn();
+            continue;
+        };
+
+        if !arena.active_slots.contains(&slot) {
+            arena.active_slots.push(slot);
+        }
+
         let size = extracted_sdf.size;
+        debug_assert_eq!(
+            size, arena.texture_size,
+            "mixed LOD in one arena — bucket by LOD"
+        );
+
+        // Upload this chunk's padded SDF data into its slot of the shared sdf_buffer.
+        let sdf_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64 * 4;
+        render_queue.write_buffer(
+            &arena.sdf_buffer,
+            sdf_offset_bytes,
+            &extracted_sdf.padded_sdf_data,
+        );
+
         let chunk_voxels = size - 2;
-        let cell_count = chunk_voxels + 1;
-        let total_cells = (cell_count * cell_count * cell_count) as usize;
-        let unpadded_bytes_per_row = size * std::mem::size_of::<f32>() as u32;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
-        let mut found_existing = false;
+        let voxel_size = CHUNK_SIZE / chunk_voxels as f32;
+        let chunk_world_origin = extracted_sdf.chunk_pos.as_vec3() * CHUNK_SIZE;
 
-        for (buf_entity, main_entity, mut gpu_buffers) in existing_buffers.iter_mut() {
-            if *main_entity == extracted_sdf.main_entity {
-                render_queue.write_texture(
-                    TexelCopyTextureInfo {
-                        texture: &gpu_buffers.sdf_texture,
-                        mip_level: 0,
-                        origin: Origin3d::ZERO,
-                        aspect: TextureAspect::All,
-                    },
-                    &extracted_sdf.padded_sdf_data,
-                    TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(padded_bytes_per_row),
-                        rows_per_image: Some(size),
-                    },
-                    Extent3d {
-                        width: size,
-                        height: size,
-                        depth_or_array_layers: size,
-                    },
-                );
-                gpu_buffers.mesh_generation += 1;
-                commands
-                    .entity(buf_entity)
-                    .insert(PendingMeshReadback::new(gpu_buffers.mesh_generation));
-                found_existing = true;
-                break;
-            }
-        }
+        let meta = ChunkMeta {
+            chunk_world_origin: chunk_world_origin.into(),
+            voxel_size,
+            sdf_offset: slot * arena.sdf_elems_per_chunk,
+            cell_offset: slot * arena.total_cells,
+            vertex_offset: slot * arena.total_cells, // vertex buffers share the same per-slot stride
+            _pad: 0,
+        };
+        render_queue.write_buffer(
+            &arena.chunk_meta_buffer,
+            slot as u64 * std::mem::size_of::<ChunkMeta>() as u64,
+            bytemuck::bytes_of(&meta),
+        );
 
-        if !found_existing {
-            let sdf_texture = render_device.create_texture(&TextureDescriptor {
-                label: Some("chunk_sdf_texture"),
-                size: Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: size,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D3,
-                format: TextureFormat::R32Float,
-                usage: TextureUsages::STORAGE_BINDING
-                    | TextureUsages::COPY_DST
-                    | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-
-            render_queue.write_texture(
-                TexelCopyTextureInfo {
-                    texture: &sdf_texture,
-                    mip_level: 0,
-                    origin: Origin3d::ZERO,
-                    aspect: TextureAspect::All,
-                },
-                &extracted_sdf.padded_sdf_data,
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(size),
-                },
-                Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: size,
-                },
-            );
-
-            let sdf_view = sdf_texture.create_view(&TextureViewDescriptor::default());
-
-            let flags_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_flags_buffer"),
-                size: (total_cells * std::mem::size_of::<u32>()) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            let compacted_offsets_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_compacted_offsets_buffer"),
-                size: (total_cells * std::mem::size_of::<u32>()) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            let scattered_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_scattered_vertex_buffer"),
-                size: (total_cells * 32) as u64,
-                usage: BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
-
-            let final_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_final_vertex_buffer"),
-                size: (total_cells * 32) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::VERTEX | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            let index_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_index_buffer"),
-                size: (total_cells * 18 * std::mem::size_of::<u32>()) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::INDEX | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            let initial_indirect_args = DrawIndexedIndirectArgs {
-                index_count: 0,
-                instance_count: 1,
-                first_index: 0,
-                base_vertex: 0,
-                first_instance: 0,
-            };
-
-            let indirect_args_buffer =
-                render_device.create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some("chunk_indirect_args_buffer"),
-                    contents: bytemuck::bytes_of(&initial_indirect_args),
-                    usage: BufferUsages::STORAGE
-                        | BufferUsages::INDIRECT
-                        | BufferUsages::COPY_DST
-                        | BufferUsages::COPY_SRC,
-                });
-
-            let compaction_uniforms = CompactionUniforms {
-                chunk_size: cell_count,
-                total_cells: total_cells as u32,
-                _pad0: 0,
-                _pad1: 0,
-            };
-
-            let compaction_uniform_buffer =
-                render_device.create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some("chunk_compaction_uniform_buffer"),
-                    contents: bytemuck::bytes_of(&compaction_uniforms),
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                });
-
-            let voxel_size = CHUNK_SIZE / chunk_voxels as f32;
-            let chunk_world_origin = extracted_sdf.chunk_pos.as_vec3() * CHUNK_SIZE;
-
-            let pass3_uniforms = Pass3Uniforms {
-                cell_count,
-                texture_size: size,
-                voxel_size,
-                _pad0: [0; 1],
-                chunk_world_origin: chunk_world_origin.into(),
-                _pad1: 0,
-            };
-
-            let pass3_uniform_buffer =
-                render_device.create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some("chunk_pass3_uniform_buffer"),
-                    contents: bytemuck::bytes_of(&pass3_uniforms),
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                });
-
-            let workgroup_capacity = 512;
-            let num_blocks = ((total_cells + workgroup_capacity - 1) / workgroup_capacity) as u64;
-            let block_sums_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_block_sums_buffer"),
-                size: num_blocks * std::mem::size_of::<u32>() as u64,
-                usage: BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
-
-            let pass1_uniforms = Pass1Uniforms {
-                cell_count,
-                texture_size: size,
-                _pad0: 0,
-                _pad1: 0,
-            };
-            let pass1_uniform_buffer =
-                render_device.create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some("chunk_pass1_uniform_buffer"),
-                    contents: bytemuck::bytes_of(&pass1_uniforms),
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                });
-
-            let pass1_surface_bind_group = render_device.create_bind_group(
-                Some("chunk_pass1_surface_bind_group"),
-                &layouts.pass1_surface_layout,
-                &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: BindingResource::TextureView(&sdf_view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: flags_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: compacted_offsets_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: scattered_vertex_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 4,
-                        resource: final_vertex_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 5,
-                        resource: indirect_args_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 6,
-                        resource: pass1_uniform_buffer.as_entire_binding(),
-                    },
-                ],
-            );
-
-            let pass3_surface_bind_group = render_device.create_bind_group(
-                Some("chunk_pass3_surface_bind_group"),
-                &layouts.pass3_surface_layout,
-                &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: BindingResource::TextureView(&sdf_view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: flags_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: compacted_offsets_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: final_vertex_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 4,
-                        resource: index_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 5,
-                        resource: indirect_args_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 6,
-                        resource: pass3_uniform_buffer.as_entire_binding(),
-                    },
-                ],
-            );
-
-            let compaction_bind_group = render_device.create_bind_group(
-                Some("chunk_compaction_bind_group"),
-                &layouts.compaction_bind_group_layout,
-                &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: compaction_uniform_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: flags_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: compacted_offsets_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: block_sums_buffer.as_entire_binding(),
-                    },
-                ],
-            );
-            // systems.rs, inside prepare_voxel_chunk_buffers, alongside the other buffer creation
-            let readback_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_readback_vertex_buffer"),
-                size: (total_cells * 32) as u64,
-                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-
-            let readback_index_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_readback_index_buffer"),
-                size: (total_cells * 18 * std::mem::size_of::<u32>()) as u64,
-                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-
-            let readback_indirect_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some("chunk_readback_indirect_buffer"),
-                size: 4, // just index_count
-                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-
-            commands.spawn((
-                extracted_sdf.main_entity,
-                GpuVoxelChunkBuffers {
-                    chunk_coord: extracted_sdf.chunk_pos,
-                    lod: size,
-                    chunk_voxels,
-                    sdf_texture,
-                    sdf_view,
-                    flags_buffer,
-                    compacted_offsets_buffer,
-                    scattered_vertex_buffer,
-                    final_vertex_buffer,
-                    index_buffer,
-                    indirect_args_buffer,
-                    compaction_uniform_buffer,
-                    block_sums_buffer,
-                    pass_uniform_buffer: pass3_uniform_buffer,
-                    pass1_surface_bind_group,
-                    pass3_surface_bind_group,
-                    compaction_bind_group,
-                    readback_vertex_buffer,
-                    readback_index_buffer,
-                    readback_indirect_buffer,
-                    mesh_generation: 0,
-                },
-                PendingMeshReadback::new(0),
-            ));
-        }
-
+        arena.dirty_slots.push(slot);
         commands.entity(extracted_entity).despawn();
     }
+}
+
+pub fn dispatch_voxel_compute_passes_batched(
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    pipeline_cache: Res<PipelineCache>,
+    pipeline: Res<VoxelComputePipeline>,
+    arena: Res<VoxelChunkArena>,
+    mut debug_requested: Local<bool>,
+) {
+    let active = arena.active_chunk_count();
+    if active == 0 {
+        return;
+    }
+
+    let (
+        Some(pass1_pipeline),
+        Some(stream_compaction_pipeline),
+        Some(scan_block_sums_pipeline),
+        Some(stream_compaction_resolve_pipeline),
+        Some(pass3_pipeline),
+    ) = (
+        pipeline_cache.get_compute_pipeline(pipeline.pass1_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.scan_block_sums_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_resolve_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
+    )
+    else {
+        warn!("[dispatch_voxel_compute_passes_batched] pipelines not yet compiled, skipping");
+        return;
+    };
+
+    let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("voxel_compute_encoder_batched"),
+    });
+
+    let wg_per_chunk_pass1 = arena.cell_count.div_ceil(4);
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("surface_nets_pass1_batched"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pass1_pipeline);
+        pass.set_bind_group(0, &arena.pass1_bind_group, &[]);
+        pass.dispatch_workgroups(
+            wg_per_chunk_pass1,
+            wg_per_chunk_pass1,
+            wg_per_chunk_pass1 * active,
+        );
+    }
+
+    //let wg_per_chunk_scan = ((arena.total_cells + 511) / 512).max(1);
+    let wg_per_chunk_scan = arena.blocks_per_chunk;
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_scan_batched"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(stream_compaction_pipeline);
+        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+        pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
+        //pass.dispatch_workgroups(active, 1, 1);
+    }
+
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_scan_block_sums_batched"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(scan_block_sums_pipeline);
+        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+        pass.dispatch_workgroups(active, 1, 1); // one block-sum scan per chunk, indexed by workgroup_id.x
+    }
+
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_resolve_batched"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(stream_compaction_resolve_pipeline);
+        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+        pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
+    }
+
+    let wg_per_chunk_pass3 = arena.cell_count.div_ceil(8);
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("surface_nets_pass3_batched"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pass3_pipeline);
+        pass.set_bind_group(0, &arena.pass3_bind_group, &[]);
+        pass.dispatch_workgroups(
+            wg_per_chunk_pass3,
+            wg_per_chunk_pass3,
+            wg_per_chunk_pass3 * active,
+        );
+    }
+
+    // Single readback copy per resource type, covering every active slot's span at once.
+    encoder.copy_buffer_to_buffer(
+        &arena.indirect_args_buffer,
+        0,
+        &arena.readback_indirect_buffer,
+        0,
+        4 * arena.max_chunks as u64,
+    );
+    encoder.copy_buffer_to_buffer(
+        &arena.final_vertex_buffer,
+        0,
+        &arena.readback_vertex_buffer,
+        0,
+        arena.final_vertex_buffer.size(),
+    );
+    encoder.copy_buffer_to_buffer(
+        &arena.index_buffer,
+        0,
+        &arena.readback_index_buffer,
+        0,
+        arena.index_buffer.size(),
+    );
+
+    render_queue.submit(std::iter::once(encoder.finish()));
 }
 
 /// Runs one GPU compute pass across every chunk in `chunks`, reusing the
@@ -442,9 +277,9 @@ pub fn dispatch_voxel_compute_passes(
 
     // Reset index_count to 0 for every chunk, recorded into this same command
     // encoder so it's strictly ordered before the compute passes below.
-    for chunk in chunk_buffers.iter() {
-        command_encoder.clear_buffer(&chunk.indirect_args_buffer, 0, Some(4));
-    }
+    //for chunk in chunk_buffers.iter() {
+    //command_encoder.clear_buffer(&chunk.indirect_args_buffer, 0, Some(4));
+    //}
 
     // --- Pass 1: surface_nets_pass1, all chunks ---
     run_compute_pass(
@@ -531,16 +366,23 @@ pub fn voxel_raster_pass(
         &ViewUniformOffset,
     )>,
     view_uniforms: Res<ViewUniforms>,
-    chunk_buffers: Query<&GpuVoxelChunkBuffers>,
+    arena: Option<Res<VoxelChunkArena>>,
     pipeline_cache: Res<PipelineCache>,
     raster_pipeline: Res<VoxelRasterPipeline>,
     voxel_material: Res<VoxelDummyMaterial>,
     mut ctx: RenderContext,
 ) {
+    // Arena may not exist yet (frame 0, before any chunk has been extracted).
+    let Some(arena) = arena else {
+        return;
+    };
+    if arena.active_slots.is_empty() {
+        return;
+    }
+
     let Some(pipeline) = pipeline_cache.get_render_pipeline(raster_pipeline.pipeline_id) else {
         return;
     };
-
     let Some(binding) = view_uniforms.uniforms.binding() else {
         return;
     };
@@ -571,10 +413,14 @@ pub fn voxel_raster_pass(
     render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
     render_pass.set_bind_group(1, &material_bind_group, &[]);
 
-    for chunk in chunk_buffers.iter() {
-        render_pass.set_vertex_buffer(0, chunk.final_vertex_buffer.slice(..));
-        render_pass.set_index_buffer(chunk.index_buffer.slice(..), IndexFormat::Uint32);
-        render_pass.draw_indexed_indirect(&chunk.indirect_args_buffer, 0);
+    // Buffers are shared across all chunks now — bind once, not per-chunk.
+    render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
+    render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
+
+    const ARGS_STRIDE: u64 = std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
+    for &slot in arena.active_slots.iter() {
+        let offset = slot as u64 * ARGS_STRIDE;
+        render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, offset);
     }
 }
 
@@ -677,21 +523,23 @@ const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 1, 1),
 ];
 
-pub fn extract_voxel_chunks(
+pub fn extract_voxel_chunks<T>(
     mut commands: Commands,
     chunk_manager: Extract<Res<ChunkManager>>,
-    query: Extract<Query<(Entity, &ChunkPosition, &SDFField, &LOD)>>,
+    query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
     mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
-) {
+) where
+    T: Send + Sync + 'static + Component + Versionable + VoxelDataSlice,
+{
     for (entity, pos, sdf, lod) in query.iter() {
         let size = lod.size();
 
         let mut versions = [0u64; 8];
-        versions[0] = sdf.version;
+        versions[0] = sdf.version(); // Updated from field access to Versionable trait method
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
                 if let Ok((_, _, n_sdf, _)) = query.get(n_entity) {
-                    versions[i + 1] = n_sdf.version;
+                    versions[i + 1] = n_sdf.version(); // Updated from field access to Versionable trait method
                 }
             }
         }
@@ -717,21 +565,8 @@ pub fn extract_voxel_chunks(
 
         fill_apron(&mut vol, pos.0, &chunk_manager, &query);
 
-        let unpadded_bytes_per_row = padded_size * 4;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
-        let padding_per_row = (padded_bytes_per_row - unpadded_bytes_per_row) as usize;
-        let mut padded_sdf_data =
-            Vec::with_capacity((padded_bytes_per_row * padded_size * padded_size) as usize);
-        for z in 0..padded_size {
-            for y in 0..padded_size {
-                let start = ((z * padded_size + y) * padded_size) as usize;
-                let end = start + padded_size as usize;
-                padded_sdf_data.extend_from_slice(bytemuck::cast_slice(&vol[start..end]));
-                padded_sdf_data.resize(padded_sdf_data.len() + padding_per_row, 0);
-            }
-        }
-
-        commands.spawn(ExtractedChunkField::<SDFField> {
+        let padded_sdf_data: Vec<u8> = bytemuck::cast_slice(&vol).to_vec();
+        commands.spawn(ExtractedChunkField::<T> {
             main_entity: entity.into(),
             chunk_pos: pos.0,
             padded_sdf_data,
@@ -743,12 +578,14 @@ pub fn extract_voxel_chunks(
 
 const PADDING: u32 = 2;
 
-pub fn fill_apron(
+pub fn fill_apron<T>(
     vol: &mut [f32],
     chunk_pos: IVec3,
     chunk_manager: &ChunkManager,
-    query: &Query<(Entity, &ChunkPosition, &SDFField, &LOD)>,
-) {
+    query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
+) where
+    T: Component + VoxelDataSlice,
+{
     let Some(current_entity) = chunk_manager.get_chunk(&chunk_pos) else {
         return;
     };
@@ -989,4 +826,34 @@ fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
     let c1 = c01 * (1.0 - ty) + c11 * ty;
 
     c0 * (1.0 - tz) + c1 * tz
+}
+
+/// Runs before `prepare_voxel_arena`. Creates and inserts `VoxelChunkArena`
+/// the first time chunk data appears — we can't build it earlier because
+/// `cell_count`/`texture_size` come from the chunk's `size`, which isn't
+/// known until extraction has produced at least one `ExtractedChunkField`.
+pub fn init_voxel_arena<T: Send + Sync + 'static>(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    layouts: Res<VoxelPipelineLayouts>,
+    extracted_chunks: Query<&ExtractedChunkField<T>>,
+    arena: Option<Res<VoxelChunkArena>>,
+) {
+    if arena.is_some() {
+        return;
+    }
+    let Some(first) = extracted_chunks.iter().next() else {
+        return; // nothing extracted yet this frame, try again next frame
+    };
+
+    let size = first.size;
+    let chunk_voxels = size - 2;
+    let cell_count = chunk_voxels + 1;
+
+    commands.insert_resource(VoxelChunkArena::new(
+        &render_device,
+        &layouts,
+        cell_count,
+        size,
+    ));
 }

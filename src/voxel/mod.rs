@@ -1,3 +1,4 @@
+mod arena;
 pub mod buffers;
 pub mod pipeline;
 pub mod systems;
@@ -11,13 +12,17 @@ use bevy::{
 };
 
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
-use systems::{dispatch_voxel_compute_passes, extract_voxel_chunks, prepare_voxel_chunk_buffers};
+use systems::extract_voxel_chunks;
 
 use crate::{
     SDFField,
     voxel::{
+        arena::VoxelChunkArena,
         pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
-        systems::{queue_mesh_readback_maps, voxel_raster_pass},
+        systems::{
+            dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_voxel_arena,
+            queue_mesh_readback_maps, voxel_raster_pass,
+        },
         types::{MeshReadbackChannel, MeshReadbackChannelReceiver},
     },
 };
@@ -69,12 +74,19 @@ impl Plugin for VoxelRenderPlugin {
         render_app.insert_resource(MeshReadbackChannel { sender: tx });
 
         render_app
-            .add_systems(ExtractSchedule, extract_voxel_chunks)
+            .add_systems(ExtractSchedule, extract_voxel_chunks::<SDFField>)
             .add_systems(
                 Render,
                 (
-                    prepare_voxel_chunk_buffers::<SDFField>.in_set(RenderSystems::Prepare),
-                    dispatch_voxel_compute_passes.in_set(RenderSystems::Queue),
+                    (
+                        init_voxel_arena::<SDFField>,
+                        prepare_voxel_arena::<SDFField>.run_if(resource_exists::<VoxelChunkArena>),
+                    )
+                        .chain()
+                        .in_set(RenderSystems::Prepare),
+                    dispatch_voxel_compute_passes_batched
+                        .run_if(resource_exists::<VoxelChunkArena>)
+                        .in_set(RenderSystems::Queue),
                     queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
                 ),
             )

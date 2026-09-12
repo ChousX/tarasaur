@@ -18,12 +18,12 @@ pub struct Pass1Uniforms {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CompactionUniforms {
-    pub chunk_size: u32,
-    pub total_cells: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BatchCompactionUniforms {
+    chunk_size: u32,
+    total_cells: u32,
+    blocks_per_chunk: u32,
+    _pad0: u32,
 }
 
 #[repr(C)]
@@ -74,4 +74,16 @@ pub struct MeshReadbackChannel {
 #[derive(Resource)]
 pub struct MeshReadbackChannelReceiver {
     pub receiver: Receiver<CollisionMeshData>,
+}
+
+// types.rs
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ChunkMeta {
+    pub chunk_world_origin: [f32; 3],
+    pub voxel_size: f32,
+    pub sdf_offset: u32,    // element offset into sdf_buffer
+    pub cell_offset: u32,   // element offset into flags/offsets/index-adjacent buffers
+    pub vertex_offset: u32, // element offset into vertex buffers
+    pub _pad: u32,
 }

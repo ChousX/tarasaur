@@ -52,3 +52,14 @@ pub fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> u32 {
     // Index = z * (width * height) + y * width + x
     z * (size.x * size.y) + y * size.x + x
 }
+
+pub trait Versionable: Component {
+    /// Gets the value at the given grid coordinates.
+    fn version(&self) -> u64;
+    /// Sets the value at the given grid coordinates.
+    fn incorment_version(&mut self);
+}
+
+pub trait VoxelDataSlice {
+    fn data_slice(&self) -> &[f32];
+}

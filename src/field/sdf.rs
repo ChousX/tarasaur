@@ -1,3 +1,5 @@
+use crate::{Versionable, VoxelDataSlice};
+
 use super::{Field, LOD};
 use bevy::prelude::*;
 
@@ -274,5 +276,24 @@ impl Field<f32> for SDFField {
             self.data[i] = value;
             self.version += 1;
         }
+    }
+}
+
+impl Versionable for SDFField {
+    #[inline]
+    fn version(&self) -> u64 {
+        self.version
+    }
+
+    #[inline]
+    fn incorment_version(&mut self) {
+        self.version += 1;
+    }
+}
+
+impl VoxelDataSlice for SDFField {
+    #[inline]
+    fn data_slice(&self) -> &[f32] {
+        &self.data
     }
 }

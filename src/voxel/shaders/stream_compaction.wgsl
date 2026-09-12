@@ -1,11 +1,11 @@
-struct CompactionUniforms {
-    chunk_size: u32,       // e.g., 32
-    total_cells: u32,      // chunk_size^3 (e.g., 32768)
+struct BatchCompactionUniforms {
+    chunk_size: u32,        // cell_count, e.g. 32 — fixed per LOD bucket
+    total_cells: u32,       // chunk_size^3
+    blocks_per_chunk: u32,  // ceil(total_cells / (WORKGROUP_SIZE * 2))
     _pad0: u32,
-    _pad1: u32,
 };
 
-@group(0) @binding(0) var<uniform> uniforms: CompactionUniforms;
+@group(0) @binding(0) var<uniform> uniforms: BatchCompactionUniforms;
 @group(0) @binding(1) var<storage, read_write> cell_flags: array<u32>;
 @group(0) @binding(2) var<storage, read_write> compacted_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read_write> block_sums: array<u32>;
@@ -13,21 +13,28 @@ struct CompactionUniforms {
 const WORKGROUP_SIZE: u32 = 256u;
 var<workgroup> shared_data: array<u32, WORKGROUP_SIZE * 2u>;
 
-/// Phase A: Up-Sweep (Reduction) & Down-Sweep Workgroup Scan
+/// Phase A: Up-Sweep (Reduction) & Down-Sweep Workgroup Scan, batched across chunks.
+/// Dispatched as (blocks_per_chunk * active_chunk_count, 1, 1); each chunk's
+/// local block index is wg_id.x % blocks_per_chunk, chunk index is wg_id.x / blocks_per_chunk.
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn scan_workgroup(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
 ) {
     let thid = local_id.x;
-    let bid = wg_id.x;
-    
-    let idx_a = bid * (WORKGROUP_SIZE * 2u) + thid;
-    let idx_b = idx_a + WORKGROUP_SIZE;
+    let chunk_idx = wg_id.x / uniforms.blocks_per_chunk;
+    let local_bid = wg_id.x % uniforms.blocks_per_chunk;
 
-    shared_data[thid] = select(0u, cell_flags[idx_a], idx_a < uniforms.total_cells);
-    shared_data[thid + WORKGROUP_SIZE] = select(0u, cell_flags[idx_b], idx_b < uniforms.total_cells);
+    let cell_offset = chunk_idx * uniforms.total_cells;
+    let block_offset = chunk_idx * uniforms.blocks_per_chunk;
+
+    let local_idx_a = local_bid * (WORKGROUP_SIZE * 2u) + thid;
+    let local_idx_b = local_idx_a + WORKGROUP_SIZE;
+    let idx_a = cell_offset + local_idx_a;
+    let idx_b = cell_offset + local_idx_b;
+
+    shared_data[thid] = select(0u, cell_flags[idx_a], local_idx_a < uniforms.total_cells);
+    shared_data[thid + WORKGROUP_SIZE] = select(0u, cell_flags[idx_b], local_idx_b < uniforms.total_cells);
 
     var offset = 1u;
 
@@ -44,8 +51,9 @@ fn scan_workgroup(
 
     if (thid == 0u) {
         let last_idx = WORKGROUP_SIZE * 2u - 1u;
-        if (bid < arrayLength(&block_sums)) {
-            block_sums[bid] = shared_data[last_idx];
+        let global_block_idx = block_offset + local_bid;
+        if (global_block_idx < arrayLength(&block_sums)) {
+            block_sums[global_block_idx] = shared_data[last_idx];
         }
         shared_data[last_idx] = 0u;
     }
@@ -64,44 +72,57 @@ fn scan_workgroup(
     }
     workgroupBarrier();
 
-    if (idx_a < uniforms.total_cells) {
+    if (local_idx_a < uniforms.total_cells) {
         compacted_offsets[idx_a] = shared_data[thid];
     }
-    if (idx_b < uniforms.total_cells) {
+    if (local_idx_b < uniforms.total_cells) {
         compacted_offsets[idx_b] = shared_data[thid + WORKGROUP_SIZE];
     }
 }
 
-/// Phase B: Global Block Offset Resolve (Optimized O(1) per thread lookup)
+/// Phase B: Global Block Offset Resolve, batched. Same wg_id.x -> (chunk_idx, local_bid)
+/// split as scan_workgroup; block_sums lookup uses the per-chunk block_offset so each
+/// chunk's blocks only see their own chunk's prefix sums.
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn resolve_block_offsets(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) wg_id: vec3<u32>
 ) {
     let thid = local_id.x;
-    let bid = wg_id.x;
-    
-    // If block sums were pre-scanned on CPU or via a secondary reduction pass, 
-    // load the exclusive block offset directly instead of an O(N^2) loop.
-    let block_modifier = block_sums[bid];
+    let chunk_idx = wg_id.x / uniforms.blocks_per_chunk;
+    let local_bid = wg_id.x % uniforms.blocks_per_chunk;
 
-    let idx_a = bid * (WORKGROUP_SIZE * 2u) + thid;
-    let idx_b = idx_a + WORKGROUP_SIZE;
+    let cell_offset = chunk_idx * uniforms.total_cells;
+    let block_offset = chunk_idx * uniforms.blocks_per_chunk;
 
-    if (idx_a < uniforms.total_cells) { compacted_offsets[idx_a] += block_modifier; }
-    if (idx_b < uniforms.total_cells) { compacted_offsets[idx_b] += block_modifier; }
+    let block_modifier = block_sums[block_offset + local_bid];
+
+    let local_idx_a = local_bid * (WORKGROUP_SIZE * 2u) + thid;
+    let local_idx_b = local_idx_a + WORKGROUP_SIZE;
+    let idx_a = cell_offset + local_idx_a;
+    let idx_b = cell_offset + local_idx_b;
+
+    if (local_idx_a < uniforms.total_cells) { compacted_offsets[idx_a] += block_modifier; }
+    if (local_idx_b < uniforms.total_cells) { compacted_offsets[idx_b] += block_modifier; }
 }
 
-/// Phase A.5: Turns per-block totals into exclusive prefix sums across blocks.
-/// Single workgroup, single thread — num_blocks is small enough that a serial
-/// scan here is effectively free, and it removes any cross-workgroup sync hazard.
+/// Phase A.5: Turns per-block totals into exclusive prefix sums, one chunk's
+/// worth of blocks per workgroup invocation. Dispatched as (active_chunk_count, 1, 1) —
+/// each invocation still does its scan serially since blocks_per_chunk is small,
+/// but now scans only its own chunk's slice of block_sums rather than the whole buffer.
 @compute @workgroup_size(1, 1, 1)
-fn scan_block_sums() {
-    let num_blocks = arrayLength(&block_sums);
+fn scan_block_sums(@builtin(workgroup_id) wg_id: vec3<u32>) {
+    let chunk_idx = wg_id.x;
+    let block_offset = chunk_idx * uniforms.blocks_per_chunk;
+
     var running_total = 0u;
-    for (var i = 0u; i < num_blocks; i = i + 1u) {
-        let block_total = block_sums[i];
-        block_sums[i] = running_total;
+    for (var i = 0u; i < uniforms.blocks_per_chunk; i = i + 1u) {
+        let global_i = block_offset + i;
+        if (global_i >= arrayLength(&block_sums)) {
+            break;
+        }
+        let block_total = block_sums[global_i];
+        block_sums[global_i] = running_total;
         running_total += block_total;
     }
 }

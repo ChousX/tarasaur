@@ -1,26 +1,20 @@
 // examples/terrain_test.rs
-//
-// Generates rolling-hills terrain across a 3x3 grid of chunks using a
-// self-contained value-noise heightmap (no external noise crate). This is
-// deliberately NOT done through EditFieldMessage/WorldEditor — generation
-// writes SDF voxels directly via Field::set, then calls SDFField::reinit()
-// once per chunk to compute real JFA distances from the raw sign data.
-// WorldEditor is reserved for the follow-up carve, to show the two
-// mechanisms composing.
-//
-// Continuity across chunk boundaries falls out for free: `terrain_height`
-// takes world (x, z) only, so two chunks never disagree about the height at
-// a shared point — there's no chunk-local seed or origin baked into the
-// noise call.
 
-use bevy::prelude::*;
+use bevy::{
+    input::mouse::MouseMotion,
+    prelude::*,
+    render::{
+        RenderPlugin,
+        settings::{RenderCreation, WgpuLimits, WgpuSettings},
+    },
+};
 use tarasaur::{
     Field, LOD, SDFField, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::editor::WorldEditor,
 };
 
-const GRID_RADIUS: i32 = 1; // chunks from -1..=1 on x and z -> 3x3 = 9 chunks
+const GRID_RADIUS: i32 = 5; // chunks from -1..=1 on x and z -> 3x3 = 9 chunks
 const LOD_USED: LOD = LOD::Medium;
 
 fn chunk_count() -> i32 {
@@ -30,15 +24,37 @@ fn chunk_count() -> i32 {
 #[derive(Resource, Default)]
 struct TerrainReady(bool);
 
+#[derive(Component)]
+struct FlyCam {
+    pub move_speed: f32,
+    pub sensitivity: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+}
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(
+            DefaultPlugins.set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                    limits: WgpuLimits {
+                        max_buffer_size: 1024 * 1024 * 1024,
+                        max_storage_buffer_binding_size: 512 * 1024 * 1024,
+                        ..default()
+                    }
+                    .into(),
+                    ..default()
+                })),
+                ..default()
+            }),
+        )
         .add_plugins(TarasaurPlugin)
         .init_resource::<TerrainReady>()
         .add_systems(Startup, (spawn_camera_and_light, spawn_terrain_chunks))
         .add_systems(
             Update,
             (
+                fly_cam_system,
                 generate_terrain,
                 verify_seam,
                 carve_valley_across_seam,
@@ -50,9 +66,21 @@ fn main() {
 }
 
 fn spawn_camera_and_light(mut commands: Commands) {
+    let initial_transform =
+        Transform::from_xyz(35.0, 25.0, 35.0).looking_at(Vec3::new(5.0, 3.0, 5.0), Vec3::Y);
+
+    // Extract initial orientation so rotation doesn't snap on first interaction
+    let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
+
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(35.0, 25.0, 35.0).looking_at(Vec3::new(5.0, 3.0, 5.0), Vec3::Y),
+        initial_transform,
+        FlyCam {
+            move_speed: 15.0,
+            sensitivity: 0.002,
+            pitch,
+            yaw,
+        },
     ));
     commands.spawn((
         DirectionalLight {
@@ -61,6 +89,64 @@ fn spawn_camera_and_light(mut commands: Commands) {
         },
         Transform::from_xyz(4.0, 10.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+}
+
+fn fly_cam_system(
+    time: Res<Time>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut mouse_motion: MessageReader<MouseMotion>,
+    mut query: Query<(&mut Transform, &mut FlyCam)>,
+) {
+    let delta_time = time.delta_secs();
+
+    for (mut transform, mut fly_cam) in query.iter_mut() {
+        // Rotate camera when Right Mouse Button is held
+        if mouse_button.pressed(MouseButton::Right) {
+            for ev in mouse_motion.read() {
+                fly_cam.yaw -= ev.delta.x * fly_cam.sensitivity;
+                fly_cam.pitch -= ev.delta.y * fly_cam.sensitivity;
+                fly_cam.pitch = fly_cam.pitch.clamp(-1.54, 1.54);
+            }
+            transform.rotation = Quat::from_euler(EulerRot::YXZ, fly_cam.yaw, fly_cam.pitch, 0.0);
+        } else {
+            mouse_motion.clear();
+        }
+
+        // Translation logic
+        let mut velocity = Vec3::ZERO;
+        let forward = *transform.forward();
+        let right = *transform.right();
+
+        if keyboard.pressed(KeyCode::KeyW) {
+            velocity += forward;
+        }
+        if keyboard.pressed(KeyCode::KeyS) {
+            velocity -= forward;
+        }
+        if keyboard.pressed(KeyCode::KeyD) {
+            velocity += right;
+        }
+        if keyboard.pressed(KeyCode::KeyA) {
+            velocity -= right;
+        }
+        if keyboard.pressed(KeyCode::Space) {
+            velocity += Vec3::Y;
+        }
+        if keyboard.pressed(KeyCode::ShiftLeft) {
+            velocity -= Vec3::Y;
+        }
+
+        if velocity != Vec3::ZERO {
+            let speed_multiplier = if keyboard.pressed(KeyCode::ControlLeft) {
+                2.5
+            } else {
+                1.0
+            };
+            transform.translation +=
+                velocity.normalize() * fly_cam.move_speed * speed_multiplier * delta_time;
+        }
+    }
 }
 
 fn spawn_terrain_chunks(mut commands: Commands) {
@@ -74,8 +160,6 @@ fn spawn_terrain_chunks(mut commands: Commands) {
 
 // --- Self-contained value noise (deterministic, no external deps) ---
 
-/// Integer-coordinate hash -> [0, 1), via bit-mixing. Deterministic per
-/// (x, z, seed) so terrain is reproducible across runs.
 fn hash2(x: i32, z: i32, seed: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(374761393)
         ^ (z as u32).wrapping_mul(668265263)
@@ -93,7 +177,6 @@ fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Bilinear-interpolated value noise at a continuous (x, z).
 fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
     let x0 = x.floor() as i32;
     let z0 = z.floor() as i32;
@@ -110,8 +193,6 @@ fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
     a + (b - a) * tz
 }
 
-/// Fractal Brownian Motion: layered octaves of `value_noise`, normalized to
-/// [0, 1), for natural-looking rolling terrain.
 fn fbm(x: f32, z: f32, octaves: u32, seed: u32) -> f32 {
     let mut amplitude = 0.5;
     let mut frequency = 1.0;
@@ -126,13 +207,10 @@ fn fbm(x: f32, z: f32, octaves: u32, seed: u32) -> f32 {
     sum / max
 }
 
-/// World-space terrain height at (world_x, world_z). Depends only on world
-/// coordinates — never on which chunk is asking — which is the entire
-/// reason adjacent chunks agree at their shared boundary.
 fn terrain_height(world_x: f32, world_z: f32) -> f32 {
-    const BASE_HEIGHT: f32 = 4.0; // mid-chunk, since our grid is 1 chunk tall
+    const BASE_HEIGHT: f32 = 4.0;
     const AMPLITUDE: f32 = 2.5;
-    const NOISE_SCALE: f32 = 0.08; // smaller = broader, more rolling hills
+    const NOISE_SCALE: f32 = 0.08;
 
     let n = fbm(world_x * NOISE_SCALE, world_z * NOISE_SCALE, 4, 1337);
     BASE_HEIGHT + (n - 0.5) * 2.0 * AMPLITUDE
@@ -140,10 +218,6 @@ fn terrain_height(world_x: f32, world_z: f32) -> f32 {
 
 // --- Generation ---
 
-/// Fills every chunk's SDF field directly from the heightmap, then
-/// `reinit()`s each chunk once to turn the raw sign data into real
-/// distances. This bypasses `EditFieldMessage` entirely — it's bulk world
-/// init, not a sculpting operation.
 fn generate_terrain(
     mut generated: Local<bool>,
     mut ready: ResMut<TerrainReady>,
@@ -164,9 +238,6 @@ fn generate_terrain(
                 for x in 0..size.x {
                     let world = chunk_origin + Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
                     let height = terrain_height(world.x, world.z);
-                    // reinit()'s boundary pass only reads the sign; the
-                    // magnitude here is a placeholder that gets replaced by
-                    // real JFA distances below.
                     let value = if world.y < height { -1.0 } else { 1.0 };
                     sdf.set(x, y, z, value);
                 }
@@ -183,10 +254,6 @@ fn generate_terrain(
     );
 }
 
-/// Spot-checks continuity across the boundary between chunks (0,0,0) and
-/// (1,0,0): the last voxel column of the left chunk and the first voxel
-/// column of the right chunk are one voxel-width apart in world space, so
-/// their SDF values should be close (smooth terrain), never a hard jump.
 fn verify_seam(
     mut checked: Local<bool>,
     ready: Res<TerrainReady>,
@@ -226,10 +293,6 @@ fn verify_seam(
     );
 }
 
-/// Once terrain exists, carves a valley centered exactly on the world-space
-/// seam between chunks (0,0,0) and (1,0,0) — the same WorldEditor call used
-/// in the earlier cross-chunk-edit example, now applied on top of generated
-/// terrain instead of an empty field.
 fn carve_valley_across_seam(
     mut fired: Local<bool>,
     ready: Res<TerrainReady>,
@@ -240,18 +303,15 @@ fn carve_valley_across_seam(
     }
     *fired = true;
 
-    let seam_x = CHUNK_SIZE; // world x = 10, the shared face
+    let seam_x = CHUNK_SIZE;
     let seam_z = CHUNK_SIZE * 0.5;
     let ground = terrain_height(seam_x, seam_z);
 
-    editor.fill_sphere(Vec3::new(seam_x, ground, seam_z), 3.5, 1.0); // 1.0 == air
+    editor.fill_sphere(Vec3::new(seam_x, ground, seam_z), 3.5, 1.0);
 
     info!("[terrain_test] carved a valley across the chunk seam at x={seam_x}");
 }
 
-/// Waits a few frames for `reinit_dirty_sdf` (in `FieldSet::Reinit`) to pick
-/// up the carve's `DirtyField` markers and recompute distances, then logs
-/// final per-chunk stats.
 fn log_final_stats(
     mut frame: Local<u32>,
     mut logged: Local<bool>,
@@ -263,7 +323,7 @@ fn log_final_stats(
     }
     *frame += 1;
     if *frame < 5 {
-        return; // give the carve's edit + reinit systems time to land
+        return;
     }
     *logged = true;
 
