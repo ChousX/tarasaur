@@ -29,6 +29,7 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub chunk_pos: IVec3,
     pub padded_sdf_data: Vec<u8>,
     pub size: u32,
+    pub lod: LOD,
     pub _type: PhantomData<T>,
 }
 

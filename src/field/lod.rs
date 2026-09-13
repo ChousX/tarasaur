@@ -2,7 +2,7 @@ use crate::CHUNK_SIZE;
 use bevy::prelude::*;
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LOD {
     Lowest = 4,
     Low = 16,

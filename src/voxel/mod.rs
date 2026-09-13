@@ -17,7 +17,7 @@ use systems::extract_voxel_chunks;
 use crate::{
     SDFField,
     voxel::{
-        arena::VoxelChunkArena,
+        arena::{VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
         systems::{
             dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_voxel_arena,
@@ -83,13 +83,14 @@ impl Plugin for VoxelRenderPlugin {
         render_app.insert_resource(MeshReadbackChannel { sender: tx });
 
         render_app
+            .init_resource::<VoxelChunkArenaSet>()
             .add_systems(ExtractSchedule, extract_voxel_chunks::<SDFField>)
             .add_systems(
                 Render,
                 (
                     (
                         init_voxel_arena::<SDFField>,
-                        prepare_voxel_arena::<SDFField>.run_if(resource_exists::<VoxelChunkArena>),
+                        prepare_voxel_arena::<SDFField>,
                     )
                         .chain()
                         .in_set(RenderSystems::Prepare),

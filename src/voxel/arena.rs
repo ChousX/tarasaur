@@ -553,3 +553,10 @@ impl VoxelChunkArena {
         self.active_slots.len() as u32
     }
 }
+
+use crate::LOD;
+
+#[derive(Resource, Default)]
+pub struct VoxelChunkArenaSet {
+    pub arenas: HashMap<LOD, VoxelChunkArena>,
+}
