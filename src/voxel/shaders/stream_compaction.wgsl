@@ -9,6 +9,19 @@ struct BatchCompactionUniforms {
 @group(0) @binding(1) var<storage, read_write> cell_flags: array<u32>;
 @group(0) @binding(2) var<storage, read_write> compacted_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read_write> block_sums: array<u32>;
+@group(0) @binding(4) var<storage, read_write> chunk_active_counts: array<u32>;
+
+/// Phase C: one thread per active chunk. Reads the same cell_offset convention
+/// as scan_workgroup/resolve_block_offsets (chunk_idx * total_cells) and writes
+/// this chunk's total active-cell count — compacted_offsets is exclusive, so add
+/// the last cell's own flag to get the true total.
+@compute @workgroup_size(1, 1, 1)
+fn write_chunk_active_count(@builtin(workgroup_id) wg_id: vec3<u32>) {
+    let chunk_idx = wg_id.x;
+    let cell_offset = chunk_idx * uniforms.total_cells;
+    let last = cell_offset + uniforms.total_cells - 1u;
+    chunk_active_counts[chunk_idx] = compacted_offsets[last] + cell_flags[last];
+}
 
 const WORKGROUP_SIZE: u32 = 256u;
 var<workgroup> shared_data: array<u32, WORKGROUP_SIZE * 2u>;

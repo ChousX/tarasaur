@@ -23,7 +23,7 @@ struct ChunkMeta {
     voxel_size: f32,
     sdf_offset: u32,
     cell_offset: u32,
-    vertex_offset: u32,
+    active_list_pos: u32,
     _pad: u32,
 }
 
@@ -35,6 +35,8 @@ struct ChunkMeta {
 @group(0) @binding(5) var<storage, read_write> indirect_args: array<IndirectDrawArgs>;
 @group(0) @binding(6) var<uniform> uniforms: BatchUniforms;
 @group(0) @binding(7) var<storage, read> chunk_meta: array<ChunkMeta>;
+@group(0) @binding(8) var<storage, read> chunk_vertex_base: array<u32>;
+@group(0) @binding(9) var<storage, read> chunk_index_base: array<u32>;
 
 fn get_cell_index(local_coord: vec3<u32>, cell_offset: u32) -> u32 {
     return cell_offset + local_coord.x
@@ -103,11 +105,11 @@ fn cs_main(
 
     let cmeta = chunk_meta[chunk_idx];
     let cell_idx = get_cell_index(id, cmeta.cell_offset);
-    let idx_base = index_buffer_base(cmeta.cell_offset);
+    let idx_base = chunk_index_base[cmeta.active_list_pos];
 
     // --- PART 1: VERTEX GENERATION FOR ACTIVE DUAL CELLS ---
     if (flags_buffer[cell_idx] == 1u) {
-        let vert_idx = cmeta.vertex_offset + compacted_offsets[cell_idx];
+        let vert_idx = chunk_vertex_base[cmeta.active_list_pos] + compacted_offsets[cell_idx];
 
         let corners = array<vec3<u32>, 8>(
             vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
@@ -173,14 +175,14 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(0u, 1u, 1u), cmeta.cell_offset);
             let idx_3 = get_cell_index(id - vec3<u32>(0u, 0u, 1u), cmeta.cell_offset);
 
-            let v0 = cmeta.vertex_offset + compacted_offsets[idx_0];
-            let v1 = cmeta.vertex_offset + compacted_offsets[idx_1];
-            let v2 = cmeta.vertex_offset + compacted_offsets[idx_2];
-            let v3 = cmeta.vertex_offset + compacted_offsets[idx_3];
+            let vbase = chunk_vertex_base[cmeta.active_list_pos];
+            let v0 = vbase + compacted_offsets[idx_0];
+            let v1 = vbase + compacted_offsets[idx_1];
+            let v2 = vbase + compacted_offsets[idx_2];
+            let v3 = vbase + compacted_offsets[idx_3];
 
             let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
-
-            if (curr_inside) {
+                if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
                 final_index_buffer[base_idx + 2u] = v2;
@@ -208,10 +210,11 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 0u, 1u), cmeta.cell_offset);
             let idx_3 = get_cell_index(id - vec3<u32>(1u, 0u, 0u), cmeta.cell_offset);
 
-            let v0 = cmeta.vertex_offset + compacted_offsets[idx_0];
-            let v1 = cmeta.vertex_offset + compacted_offsets[idx_1];
-            let v2 = cmeta.vertex_offset + compacted_offsets[idx_2];
-            let v3 = cmeta.vertex_offset + compacted_offsets[idx_3];
+            let vbase = chunk_vertex_base[cmeta.active_list_pos];
+            let v0 = vbase + compacted_offsets[idx_0];
+            let v1 = vbase + compacted_offsets[idx_1];
+            let v2 = vbase + compacted_offsets[idx_2];
+            let v3 = vbase + compacted_offsets[idx_3];
 
             let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
 
@@ -243,10 +246,11 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 1u, 0u), cmeta.cell_offset);
             let idx_3 = get_cell_index(id - vec3<u32>(0u, 1u, 0u), cmeta.cell_offset);
 
-            let v0 = cmeta.vertex_offset + compacted_offsets[idx_0];
-            let v1 = cmeta.vertex_offset + compacted_offsets[idx_1];
-            let v2 = cmeta.vertex_offset + compacted_offsets[idx_2];
-            let v3 = cmeta.vertex_offset + compacted_offsets[idx_3];
+            let vbase = chunk_vertex_base[cmeta.active_list_pos];
+            let v0 = vbase + compacted_offsets[idx_0];
+            let v1 = vbase + compacted_offsets[idx_1];
+            let v2 = vbase + compacted_offsets[idx_2];
+            let v3 = vbase + compacted_offsets[idx_3];
 
             let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
 

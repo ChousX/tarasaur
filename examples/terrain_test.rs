@@ -14,7 +14,7 @@ use tarasaur::{
     field::editor::WorldEditor,
 };
 
-const GRID_RADIUS: i32 = 5; // chunks from -1..=1 on x and z -> 3x3 = 9 chunks
+const GRID_RADIUS: i32 = 10; // chunks from -1..=1 on x and z -> 3x3 = 9 chunks
 const LOD_USED: LOD = LOD::Medium;
 
 fn chunk_count() -> i32 {

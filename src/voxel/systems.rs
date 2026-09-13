@@ -72,12 +72,15 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
         let voxel_size = CHUNK_SIZE / chunk_voxels as f32;
         let chunk_world_origin = extracted_sdf.chunk_pos.as_vec3() * CHUNK_SIZE;
 
+        // active_list_pos is unknown until arena.active_slots is finalized for
+        // this frame (see the patch loop below, after all chunks are processed).
+        // Written as 0 here as a placeholder; patched immediately after.
         let meta = ChunkMeta {
             chunk_world_origin: chunk_world_origin.into(),
             voxel_size,
             sdf_offset: slot * arena.sdf_elems_per_chunk,
             cell_offset: slot * arena.total_cells,
-            vertex_offset: slot * arena.total_cells, // vertex buffers share the same per-slot stride
+            active_list_pos: 0,
             _pad: 0,
         };
         render_queue.write_buffer(
@@ -89,6 +92,40 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
         arena.dirty_slots.push(slot);
         commands.entity(extracted_entity).despawn();
     }
+
+    // Now that arena.active_slots reflects this frame's final order, patch
+    // each active chunk's active_list_pos field (its index into active_slots),
+    // populate active_slot_map (the inverse mapping used by compute_chunk_bases
+    // and pass3), and refresh the bases-pass uniform's active_count.
+    const ACTIVE_LIST_POS_OFFSET: u64 = std::mem::offset_of!(ChunkMeta, active_list_pos) as u64;
+
+    for (pos, &slot) in arena.active_slots.iter().enumerate() {
+        let offset = slot as u64 * std::mem::size_of::<ChunkMeta>() as u64 + ACTIVE_LIST_POS_OFFSET;
+        render_queue.write_buffer(
+            &arena.chunk_meta_buffer,
+            offset,
+            bytemuck::bytes_of(&(pos as u32)),
+        );
+    }
+
+    let slot_map: Vec<u32> = arena.active_slots.clone();
+    render_queue.write_buffer(
+        &arena.active_slot_map_buffer,
+        0,
+        bytemuck::cast_slice(&slot_map),
+    );
+
+    // Clear overflow flag for this frame.
+    render_queue.write_buffer(&arena.overflow_flag_buffer, 0, bytemuck::bytes_of(&0u32));
+
+    // Update active_count in the chunk-bases uniform (first field of
+    // ChunkBasesUniforms; budget fields are set once at construction and
+    // never change, so this partial write is safe).
+    render_queue.write_buffer(
+        &arena.chunk_bases_uniform_buffer,
+        0,
+        bytemuck::bytes_of(&(arena.active_slots.len() as u32)),
+    );
 }
 
 pub fn dispatch_voxel_compute_passes_batched(
@@ -109,12 +146,16 @@ pub fn dispatch_voxel_compute_passes_batched(
         Some(stream_compaction_pipeline),
         Some(scan_block_sums_pipeline),
         Some(stream_compaction_resolve_pipeline),
+        Some(write_chunk_active_count_pipeline),
+        Some(chunk_bases_pipeline),
         Some(pass3_pipeline),
     ) = (
         pipeline_cache.get_compute_pipeline(pipeline.pass1_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.scan_block_sums_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_resolve_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.write_chunk_active_count_pipeline_id),
+        pipeline_cache.get_compute_pipeline(pipeline.chunk_bases_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
     )
     else {
@@ -174,6 +215,26 @@ pub fn dispatch_voxel_compute_passes_batched(
         pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
     }
 
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("stream_compaction_write_active_counts"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(write_chunk_active_count_pipeline);
+        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+        pass.dispatch_workgroups(active, 1, 1);
+    }
+
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("compute_chunk_bases"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(chunk_bases_pipeline);
+        pass.set_bind_group(0, &arena.chunk_bases_bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+
     let wg_per_chunk_pass3 = arena.cell_count.div_ceil(8);
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -210,6 +271,13 @@ pub fn dispatch_voxel_compute_passes_batched(
         &arena.readback_index_buffer,
         0,
         arena.index_buffer.size(),
+    );
+    encoder.copy_buffer_to_buffer(
+        &arena.overflow_flag_buffer,
+        0,
+        &arena.overflow_readback_buffer,
+        0,
+        4,
     );
 
     render_queue.submit(std::iter::once(encoder.finish()));

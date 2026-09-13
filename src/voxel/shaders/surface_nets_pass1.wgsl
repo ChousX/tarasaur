@@ -22,7 +22,7 @@ struct ChunkMeta {
     voxel_size: f32,
     sdf_offset: u32,
     cell_offset: u32,
-    vertex_offset: u32,
+    active_list_pos: u32,
     _pad: u32,
 }
 @group(0) @binding(7) var<storage, read> chunk_meta: array<ChunkMeta>;

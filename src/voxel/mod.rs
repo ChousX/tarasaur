@@ -35,6 +35,8 @@ pub const SURFACE_NETS_PASS3_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a");
 pub const VOXEL_RASTER_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("3c4d5e6f-7081-92a3-b4c5-d6e7f8091a2b");
+pub const COMPUTE_CHUNK_BASES_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("4d5e6f70-8192-a3b4-c5d6-e7f8091a2b3c");
 
 pub struct VoxelRenderPlugin;
 
@@ -63,6 +65,13 @@ impl Plugin for VoxelRenderPlugin {
             app,
             VOXEL_RASTER_SHADER_HANDLE,
             "shaders/voxel_raster.wgsl",
+            Shader::from_wgsl
+        );
+
+        load_internal_asset!(
+            app,
+            COMPUTE_CHUNK_BASES_SHADER_HANDLE,
+            "shaders/compute_chunk_bases.wgsl",
             Shader::from_wgsl
         );
 
