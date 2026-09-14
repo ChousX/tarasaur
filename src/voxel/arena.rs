@@ -8,52 +8,51 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::voxel::types::DrawIndexedIndirectArgs;
 
-use std::sync::OnceLock;
-
-pub static MAX_CHUNKS: OnceLock<u32> = OnceLock::new();
-
 const ACTIVE_FRACTION_ESTIMATE: f32 = 0.20; // tune from telemetry
 
 /// Largest chunk count that keeps every per-chunk-strided buffer (vertex
 /// buffers dominate, at 32 bytes/cell) under the device's actual
 /// max_storage_buffer_binding_size, with a 10% safety margin.
-/// Computed once from the real device limit and cached for the app's lifetime.
 fn max_chunks(
     render_device: &RenderDevice,
     total_cells: u32,
     sdf_elems_per_chunk: u32,
     budget_cells_per_chunk: u32,
 ) -> u32 {
-    *MAX_CHUNKS.get_or_init(|| {
-        let limit = (render_device.limits().max_storage_buffer_binding_size as u64 * 9) / 10;
+    let limit = (render_device.limits().max_storage_buffer_binding_size as u64 * 9) / 10;
 
-        let sdf_bytes       = sdf_elems_per_chunk as u64 * 4;
-        let flags_bytes     = total_cells as u64 * 4;
-        let offsets_bytes   = total_cells as u64 * 4;
-        // scattered_vertex_buffer is now sized off the same budget as
-        // final_vertex_buffer/index_buffer, not total_cells — it must be
-        // included here or max_chunks under-accounts for it and the cap
-        // becomes wrong for this buffer (the actual bug we just hit).
-        let scattered_bytes = budget_cells_per_chunk as u64 * 32;
-        let vertex_bytes    = budget_cells_per_chunk as u64 * 32;
-        let index_bytes     = budget_cells_per_chunk as u64 * 18 * 4;
+    let sdf_bytes = sdf_elems_per_chunk as u64 * 4;
+    let flags_bytes = total_cells as u64 * 4;
+    let offsets_bytes = total_cells as u64 * 4;
+    let scattered_bytes = budget_cells_per_chunk as u64 * 32;
+    let vertex_bytes = budget_cells_per_chunk as u64 * 32;
+    let index_bytes = budget_cells_per_chunk as u64 * 18 * 4;
 
-        let worst_bytes_per_chunk = [
-            sdf_bytes, flags_bytes, offsets_bytes, scattered_bytes, vertex_bytes, index_bytes,
-        ]
-        .into_iter()
-        .max()
-        .unwrap();
+    let worst_bytes_per_chunk = [
+        sdf_bytes,
+        flags_bytes,
+        offsets_bytes,
+        scattered_bytes,
+        vertex_bytes,
+        index_bytes,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
 
-        let capped = (limit / worst_bytes_per_chunk).max(1) as u32;
-        info!(
-            "[VoxelChunkArena] limit={} bytes, worst-case/chunk={} bytes, capping to {} chunks (budget={} cells/chunk, {:.0}% of {})",
-            limit, worst_bytes_per_chunk, capped, budget_cells_per_chunk,
-            ACTIVE_FRACTION_ESTIMATE * 100.0, total_cells
-        );
-        capped
-    })
+    let capped = (limit / worst_bytes_per_chunk).max(1) as u32;
+    info!(
+        "[VoxelChunkArena] limit={} bytes, worst-case/chunk={} bytes, capping to {} chunks (budget={} cells/chunk, {:.0}% of {})",
+        limit,
+        worst_bytes_per_chunk,
+        capped,
+        budget_cells_per_chunk,
+        ACTIVE_FRACTION_ESTIMATE * 100.0,
+        total_cells
+    );
+    capped
 }
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub struct ChunkMeta {
