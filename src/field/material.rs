@@ -6,6 +6,7 @@ pub struct MaterialField {
     lod: LOD,
     data: Box<[u8]>,
 }
+
 impl Default for MaterialField {
     fn default() -> Self {
         let lod: LOD = LOD::default();
@@ -40,3 +41,5 @@ impl Field<u8> for MaterialField {
         self.data[idx] = value;
     }
 }
+
+pub struct MaterialFieldTextur();
