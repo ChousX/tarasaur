@@ -9,9 +9,10 @@ Tarasaur ames to be a minal smoth voxel Engain with every thing needed to build 
 ## Features:
 * Voxel Field Traits.
 * Prebuilt Fields: 
-    - SDF
-    - Material
-    - Visibility
-* Dynmic LOD around the camera.
+    * SDF
+    * Material
+    * Visibility
+- Dynmic LOD around the camera.
 * GPU Driven SurfaceNets implemtation.
-* TriPlanerProjection for material texture.
+- TriPlanerProjection for material texture.
+- TerrainCollitions
