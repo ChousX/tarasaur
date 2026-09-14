@@ -1,651 +1,149 @@
-/tmp/nix-shell.nwfFEs/RenderDoc/terrain_test_2026.09.13_12.05.18_frame3.rdc - Frame #3
+/tmp/nix-shell.F7qMXH/RenderDoc/sphere_test_2026.09.14_12.11.22_frame106.rdc - Frame #106
 
  EID  | Event                                                                                                  | Action #
 -------------------------------------------------------------------------------------------------------------------------
-12    | - => vkQueueSubmit(17)[0]: vkBeginCommandBuffer(Baked Command Buffer 2400)                             | 1     
-14    | - vkCmdCopyBuffer((wgpu internal) Staging, LineGizmo Position Buffer)                                  | 1     
-16    | - vkCmdCopyBuffer((wgpu internal) Staging, LineGizmo Color Buffer)                                     | 2     
-18    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 326)                                                 | 3     
-20    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 324)                                                 | 4     
-21    | - => vkQueueSubmit(17)[0]: vkEndCommandBuffer(Baked Command Buffer 2400)                               | 5     
-22    | - => vkQueueSubmit(17)[1]: vkBeginCommandBuffer(Baked Command Buffer 2427)                             | 5     
-24    | - => vkQueueSubmit(17)[1]: vkEndCommandBuffer(Baked Command Buffer 2427)                               | 5     
-25    | - => vkQueueSubmit(17)[2]: vkBeginCommandBuffer(Baked Command Buffer 2413)                             | 5     
-26    | - => vkQueueSubmit(17)[2]: vkEndCommandBuffer(Baked Command Buffer 2413)                               | 5     
-27    | - => vkQueueSubmit(17)[3]: vkBeginCommandBuffer(Baked Command Buffer 2412)                             | 5     
-28    | - surface_nets_pass1_batched                                                                           |       
-31    |  \- vkCmdDispatch(9, 9, 2097)                                                                          | 5     
-33    | - => vkQueueSubmit(17)[3]: vkEndCommandBuffer(Baked Command Buffer 2412)                               | 6     
-34    | - => vkQueueSubmit(17)[4]: vkBeginCommandBuffer(Baked Command Buffer 2415)                             | 6     
-36    | - => vkQueueSubmit(17)[4]: vkEndCommandBuffer(Baked Command Buffer 2415)                               | 6     
-37    | - => vkQueueSubmit(17)[5]: vkBeginCommandBuffer(Baked Command Buffer 2414)                             | 6     
-38    | - stream_compaction_scan_batched                                                                       |       
-41    |  \- vkCmdDispatch(16543, 1, 1)                                                                         | 6     
-43    | - => vkQueueSubmit(17)[5]: vkEndCommandBuffer(Baked Command Buffer 2414)                               | 7     
-44    | - => vkQueueSubmit(17)[6]: vkBeginCommandBuffer(Baked Command Buffer 2417)                             | 7     
-46    | - => vkQueueSubmit(17)[6]: vkEndCommandBuffer(Baked Command Buffer 2417)                               | 7     
-47    | - => vkQueueSubmit(17)[7]: vkBeginCommandBuffer(Baked Command Buffer 2416)                             | 7     
-48    | - stream_compaction_scan_block_sums_batched                                                            |       
-51    |  \- vkCmdDispatch(233, 1, 1)                                                                           | 7     
-53    | - => vkQueueSubmit(17)[7]: vkEndCommandBuffer(Baked Command Buffer 2416)                               | 8     
-54    | - => vkQueueSubmit(17)[8]: vkBeginCommandBuffer(Baked Command Buffer 2419)                             | 8     
-56    | - => vkQueueSubmit(17)[8]: vkEndCommandBuffer(Baked Command Buffer 2419)                               | 8     
-57    | - => vkQueueSubmit(17)[9]: vkBeginCommandBuffer(Baked Command Buffer 2418)                             | 8     
-58    | - stream_compaction_resolve_batched                                                                    |       
-61    |  \- vkCmdDispatch(16543, 1, 1)                                                                         | 8     
-63    | - => vkQueueSubmit(17)[9]: vkEndCommandBuffer(Baked Command Buffer 2418)                               | 9     
-64    | - => vkQueueSubmit(17)[10]: vkBeginCommandBuffer(Baked Command Buffer 2421)                            | 9     
-66    | - => vkQueueSubmit(17)[10]: vkEndCommandBuffer(Baked Command Buffer 2421)                              | 9     
-67    | - => vkQueueSubmit(17)[11]: vkBeginCommandBuffer(Baked Command Buffer 2420)                            | 9     
-68    | - stream_compaction_write_active_counts                                                                |       
-71    |  \- vkCmdDispatch(233, 1, 1)                                                                           | 9     
-73    | - => vkQueueSubmit(17)[11]: vkEndCommandBuffer(Baked Command Buffer 2420)                              | 10    
-74    | - => vkQueueSubmit(17)[12]: vkBeginCommandBuffer(Baked Command Buffer 2423)                            | 10    
-76    | - => vkQueueSubmit(17)[12]: vkEndCommandBuffer(Baked Command Buffer 2423)                              | 10    
-77    | - => vkQueueSubmit(17)[13]: vkBeginCommandBuffer(Baked Command Buffer 2422)                            | 10    
-78    | - compute_chunk_bases                                                                                  |       
-81    |  \- vkCmdDispatch(1, 1, 1)                                                                             | 10    
-83    | - => vkQueueSubmit(17)[13]: vkEndCommandBuffer(Baked Command Buffer 2422)                              | 11    
-84    | - => vkQueueSubmit(17)[14]: vkBeginCommandBuffer(Baked Command Buffer 2425)                            | 11    
-86    | - => vkQueueSubmit(17)[14]: vkEndCommandBuffer(Baked Command Buffer 2425)                              | 11    
-87    | - => vkQueueSubmit(17)[15]: vkBeginCommandBuffer(Baked Command Buffer 2424)                            | 11    
-88    | - surface_nets_pass3_batched                                                                           |       
-91    |  \- vkCmdDispatch(5, 5, 1165)                                                                          | 11    
-93    | - => vkQueueSubmit(17)[15]: vkEndCommandBuffer(Baked Command Buffer 2424)                              | 12    
-94    | - => vkQueueSubmit(17)[16]: vkBeginCommandBuffer(Baked Command Buffer 2426)                            | 12    
-96    | - vkCmdCopyBuffer(arena_indirect_args_buffer, arena_readback_indirect_buffer)                          | 12    
-98    | - vkCmdCopyBuffer(arena_final_vertex_buffer, arena_readback_vertex_buffer)                             | 13    
-100   | - vkCmdCopyBuffer(arena_index_buffer, arena_readback_index_buffer)                                     | 14    
-102   | - vkCmdCopyBuffer(arena_overflow_flag_buffer, arena_overflow_readback_buffer)                          | 15    
-103   | - => vkQueueSubmit(17)[16]: vkEndCommandBuffer(Baked Command Buffer 2426)                              | 16    
-129   | - => vkQueueSubmit(33)[0]: vkBeginCommandBuffer(Baked Command Buffer 2443)                             | 16    
-131   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 496)                                                 | 16    
-133   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 17    
-135   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 18    
-137   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 19    
-139   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 20    
-141   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 21    
-143   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 22    
-145   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 500)                                                 | 23    
-147   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 502)                                                 | 24    
-149   | - vkCmdCopyBuffer((wgpu internal) Staging, view_uniforms_buffer)                                       | 25    
-151   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 498)                                                 | 26    
-153   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 27    
-155   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 28    
-157   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 29    
-159   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 30    
-161   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 31    
-163   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 32    
-165   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 33    
-167   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 34    
-169   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 35    
-171   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 36    
-173   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 37    
-175   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 38    
-177   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 39    
-179   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 505)                                                 | 40    
-181   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 41    
-183   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 42    
-185   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 43    
-187   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 44    
-189   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 45    
-191   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 46    
-193   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 47    
-195   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 48    
-197   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 49    
-199   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 50    
-201   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 51    
-203   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 52    
-205   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 53    
-207   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 54    
-209   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 55    
-211   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 56    
-213   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 57    
-215   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 58    
-217   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 59    
-219   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 60    
-221   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 61    
-223   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 62    
-225   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 63    
-227   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 64    
-229   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 65    
-231   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 66    
-233   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 67    
-235   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 68    
-237   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 69    
-239   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 70    
-241   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 71    
-243   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 72    
-245   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 73    
-247   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 74    
-249   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 75    
-251   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 76    
-253   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 77    
-255   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 78    
-257   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 79    
-259   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 80    
-261   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 81    
-263   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 82    
-265   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 83    
-267   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 84    
-269   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 85    
-271   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 86    
-273   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 87    
-275   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 88    
-277   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 89    
-279   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 90    
-281   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 91    
-283   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 92    
-285   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 93    
-287   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 94    
-289   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 95    
-291   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 96    
-293   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 97    
-295   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 98    
-297   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 99    
-299   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 100   
-301   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 101   
-303   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 102   
-305   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 103   
-307   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 104   
-309   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 105   
-311   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 106   
-313   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 107   
-315   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 108   
-317   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 109   
-319   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 110   
-321   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 111   
-323   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 112   
-325   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 113   
-327   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 114   
-329   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 115   
-331   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 116   
-333   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 117   
-335   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 118   
-337   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 119   
-339   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 120   
-341   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 121   
-343   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 122   
-345   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 123   
-347   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 124   
-349   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 125   
-351   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 126   
-353   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 127   
-355   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 128   
-357   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 129   
-359   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 130   
-361   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 131   
-363   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 132   
-365   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 133   
-367   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 134   
-369   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 135   
-371   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 136   
-373   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 137   
-375   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 138   
-377   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 139   
-379   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 140   
-381   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 141   
-383   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 142   
-385   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 143   
-387   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 144   
-389   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 145   
-391   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 146   
-393   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 147   
-395   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 148   
-397   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 149   
-399   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 150   
-401   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 151   
-403   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 152   
-405   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 153   
-407   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 154   
-409   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 155   
-411   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 156   
-413   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 157   
-415   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 158   
-417   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 159   
-419   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 160   
-421   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 161   
-423   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 162   
-425   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 163   
-427   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 164   
-429   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 165   
-431   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 166   
-433   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 167   
-435   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 168   
-437   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 169   
-439   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 170   
-441   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 171   
-443   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 172   
-445   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 173   
-447   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 174   
-449   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 175   
-451   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 2599)                                                | 176   
-453   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 177   
-455   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 178   
-457   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 179   
-459   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 180   
-461   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 181   
-463   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 182   
-465   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 183   
-467   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 184   
-469   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 185   
-471   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 186   
-473   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 187   
-475   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 188   
-477   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 189   
-479   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 190   
-481   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 191   
-483   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 192   
-485   | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 2617)                                                | 193   
-487   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 194   
-489   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 195   
-491   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 196   
-493   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 197   
-495   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 198   
-497   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 199   
-499   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 200   
-501   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 201   
-503   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 202   
-505   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 203   
-507   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 204   
-509   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 205   
-511   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 206   
-513   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 207   
-515   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 208   
-517   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 209   
-519   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 210   
-521   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 211   
-523   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 212   
-525   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 213   
-527   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 214   
-529   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 215   
-531   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 216   
-533   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 217   
-535   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 218   
-537   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 219   
-539   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 220   
-541   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 221   
-543   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 222   
-545   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 223   
-547   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 224   
-549   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 225   
-551   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 226   
-553   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 227   
-555   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 228   
-557   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 229   
-559   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 230   
-561   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 231   
-563   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 232   
-565   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 233   
-567   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 234   
-569   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 235   
-571   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 236   
-573   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 237   
-575   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 238   
-577   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 239   
-579   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 240   
-581   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 241   
-583   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 242   
-585   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 243   
-587   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 244   
-589   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 245   
-591   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 246   
-593   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 247   
-595   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 248   
-597   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 249   
-599   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 250   
-601   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 251   
-603   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 252   
-605   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 253   
-607   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 254   
-609   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 255   
-611   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 256   
-613   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_active_slot_map_buffer)                               | 257   
-615   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_overflow_flag_buffer)                                 | 258   
-617   | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_bases_uniform_buffer)                           | 259   
-619   | - vkCmdCopyBuffer((wgpu internal) Staging, clustering Z slicing metadata buffer)                       | 260   
-621   | - vkCmdCopyBuffer((wgpu internal) Staging, previous instance input uniform buffer)                     | 261   
-622   | - => vkQueueSubmit(33)[0]: vkEndCommandBuffer(Baked Command Buffer 2443)                               | 262   
-623   | - => vkQueueSubmit(33)[1]: vkBeginCommandBuffer(Baked Command Buffer 2749)                             | 262   
-625   | - vkCmdFillBuffer(Buffer 2687, 0)                                                                      | 262   
-627   | - vkCmdFillBuffer(Buffer 2692, 0)                                                                      | 263   
-630   | - => vkQueueSubmit(33)[1]: vkEndCommandBuffer(Baked Command Buffer 2749)                               | 264   
-631   | - => vkQueueSubmit(33)[2]: vkBeginCommandBuffer(Baked Command Buffer 2712)                             | 264   
-632   | - clustering                                                                                           | 264-273
-633   |  \- => vkQueueSubmit(33)[2]: vkEndCommandBuffer(Baked Command Buffer 2712)                             | 264   
-634   |   - => vkQueueSubmit(33)[3]: vkBeginCommandBuffer(Baked Command Buffer 2714)                           | 264   
-635   |   - => vkQueueSubmit(33)[3]: vkEndCommandBuffer(Baked Command Buffer 2714)                             | 264   
-636   |   - => vkQueueSubmit(33)[4]: vkBeginCommandBuffer(Baked Command Buffer 2713)                           | 264   
-637   |   - clustering Z slicing pass                                                                          |       
-640   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 264   
-642   |   - => vkQueueSubmit(33)[4]: vkEndCommandBuffer(Baked Command Buffer 2713)                             | 265   
-643   |   - => vkQueueSubmit(33)[5]: vkBeginCommandBuffer(Baked Command Buffer 2718)                           | 265   
-646   |   - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer) | 265   
-648   |   - (wgpu internal) Indirect draw validation pass                                                      |       
-654   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 266   
-657   |   - => vkQueueSubmit(33)[5]: vkEndCommandBuffer(Baked Command Buffer 2718)                             | 267   
-658   |   - => vkQueueSubmit(33)[6]: vkBeginCommandBuffer(Baked Command Buffer 2715)                           | 267   
-659   |   - clustering count pass                                                                              | 267-268
-662   |    \- vkCmdBeginRenderPass(Clear)                                                                      | 267   
-669   |     - vkCmdDrawIndexedIndirect(1) => <6, 1>                                                            | 267   
-670   |     - vkCmdEndRenderPass(Don't Care)                                                                   | 268   
-672   |   - => vkQueueSubmit(33)[6]: vkEndCommandBuffer(Baked Command Buffer 2715)                             | 268   
-673   |   - => vkQueueSubmit(33)[7]: vkBeginCommandBuffer(Baked Command Buffer 2721)                           | 268   
-675   |   - => vkQueueSubmit(33)[7]: vkEndCommandBuffer(Baked Command Buffer 2721)                             | 268   
-676   |   - => vkQueueSubmit(33)[8]: vkBeginCommandBuffer(Baked Command Buffer 2720)                           | 268   
-677   |   - clustering allocation local pass                                                                   |       
-680   |    \- vkCmdDispatch(15, 1, 1)                                                                          | 268   
-682   |   - => vkQueueSubmit(33)[8]: vkEndCommandBuffer(Baked Command Buffer 2720)                             | 269   
-683   |   - => vkQueueSubmit(33)[9]: vkBeginCommandBuffer(Baked Command Buffer 2723)                           | 269   
-685   |   - => vkQueueSubmit(33)[9]: vkEndCommandBuffer(Baked Command Buffer 2723)                             | 269   
-686   |   - => vkQueueSubmit(33)[10]: vkBeginCommandBuffer(Baked Command Buffer 2722)                          | 269   
-687   |   - clustering allocation global pass                                                                  |       
-690   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 269   
-692   |   - => vkQueueSubmit(33)[10]: vkEndCommandBuffer(Baked Command Buffer 2722)                            | 270   
-693   |   - => vkQueueSubmit(33)[11]: vkBeginCommandBuffer(Baked Command Buffer 2725)                          | 270   
-697   |   - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer) | 270   
-699   |   - (wgpu internal) Indirect draw validation pass                                                      |       
-705   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 271   
-708   |   - => vkQueueSubmit(33)[11]: vkEndCommandBuffer(Baked Command Buffer 2725)                            | 272   
-709   |   - => vkQueueSubmit(33)[12]: vkBeginCommandBuffer(Baked Command Buffer 2724)                          | 272   
-710   |   - clustering populate pass                                                                           | 272-273
-713   |    \- vkCmdBeginRenderPass(Clear)                                                                      | 272   
-720   |     - vkCmdDrawIndexedIndirect(1) => <6, 1>                                                            | 272   
-721   |     - vkCmdEndRenderPass(Don't Care)                                                                   | 273   
-723   |   - => vkQueueSubmit(33)[12]: vkEndCommandBuffer(Baked Command Buffer 2724)                            | 273   
-724   |   - => vkQueueSubmit(33)[13]: vkBeginCommandBuffer(Baked Command Buffer 2727)                          | 273   
-726   |   - vkCmdCopyBuffer(clustering Z slicing metadata buffer, clustering metadata staging buffer)          | 273   
-728   | - => vkQueueSubmit(33)[13]: vkEndCommandBuffer(Baked Command Buffer 2727)                              | 274   
-729   | - => vkQueueSubmit(33)[14]: vkBeginCommandBuffer(Baked Command Buffer 2750)                            | 274   
-730   | - => vkQueueSubmit(33)[14]: vkEndCommandBuffer(Baked Command Buffer 2750)                              | 274   
-731   | - => vkQueueSubmit(33)[15]: vkBeginCommandBuffer(Baked Command Buffer 2729)                            | 274   
-732   | - => vkQueueSubmit(33)[15]: vkEndCommandBuffer(Baked Command Buffer 2729)                              | 274   
-733   | - => vkQueueSubmit(33)[16]: vkBeginCommandBuffer(Baked Command Buffer 2728)                            | 274   
-734   | - bin unpacking                                                                                        |       
-737   | - => vkQueueSubmit(33)[16]: vkEndCommandBuffer(Baked Command Buffer 2728)                              | 274   
-738   | - => vkQueueSubmit(33)[17]: vkBeginCommandBuffer(Baked Command Buffer 2751)                            | 274   
-739   | - => vkQueueSubmit(33)[17]: vkEndCommandBuffer(Baked Command Buffer 2751)                              | 274   
-740   | - => vkQueueSubmit(33)[18]: vkBeginCommandBuffer(Baked Command Buffer 2731)                            | 274   
-741   | - => vkQueueSubmit(33)[18]: vkEndCommandBuffer(Baked Command Buffer 2731)                              | 274   
-742   | - => vkQueueSubmit(33)[19]: vkBeginCommandBuffer(Baked Command Buffer 2730)                            | 274   
-743   | - early_mesh_preprocessing                                                                             |       
-745   | - => vkQueueSubmit(33)[19]: vkEndCommandBuffer(Baked Command Buffer 2730)                              | 274   
-746   | - => vkQueueSubmit(33)[20]: vkBeginCommandBuffer(Baked Command Buffer 2752)                            | 274   
-748   | - => vkQueueSubmit(33)[20]: vkEndCommandBuffer(Baked Command Buffer 2752)                              | 274   
-749   | - => vkQueueSubmit(33)[21]: vkBeginCommandBuffer(Baked Command Buffer 2734)                            | 274   
-750   | - => vkQueueSubmit(33)[21]: vkEndCommandBuffer(Baked Command Buffer 2734)                              | 274   
-751   | - => vkQueueSubmit(33)[22]: vkBeginCommandBuffer(Baked Command Buffer 2732)                            | 274   
-752   | - main_opaque_pass_3d                                                                                  |       
-755   |  \- vkCmdBeginRenderPass(C=Load, D=Load)                                                               | 274   
-756   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 274   
-758   | - => vkQueueSubmit(33)[22]: vkEndCommandBuffer(Baked Command Buffer 2732)                              | 274   
-759   | - => vkQueueSubmit(33)[23]: vkBeginCommandBuffer(Baked Command Buffer 2753)                            | 274   
-762   | - => vkQueueSubmit(33)[23]: vkEndCommandBuffer(Baked Command Buffer 2753)                              | 274   
-763   | - => vkQueueSubmit(33)[24]: vkBeginCommandBuffer(Baked Command Buffer 2737)                            | 274   
-764   | - => vkQueueSubmit(33)[24]: vkEndCommandBuffer(Baked Command Buffer 2737)                              | 274   
-765   | - => vkQueueSubmit(33)[25]: vkBeginCommandBuffer(Baked Command Buffer 2735)                            | 274   
-766   | - main_transparent_pass_3d                                                                             | 274-275
-769   |  \- vkCmdBeginRenderPass(C=Load, D=Load)                                                               | 274   
-775   |   - vkCmdDraw(6, 5292)                                                                                 | 274   
-776   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 275   
-778   | - => vkQueueSubmit(33)[25]: vkEndCommandBuffer(Baked Command Buffer 2735)                              | 275   
-779   | - => vkQueueSubmit(33)[26]: vkBeginCommandBuffer(Baked Command Buffer 2754)                            | 275   
-782   | - => vkQueueSubmit(33)[26]: vkEndCommandBuffer(Baked Command Buffer 2754)                              | 275   
-783   | - => vkQueueSubmit(33)[27]: vkBeginCommandBuffer(Baked Command Buffer 2742)                            | 275   
-785   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 275   
-787   | - (wgpu internal) Indirect draw validation pass                                                        |       
-793   |  \- vkCmdDispatch(4, 1, 1)                                                                             | 276   
-796   | - => vkQueueSubmit(33)[27]: vkEndCommandBuffer(Baked Command Buffer 2742)                              | 277   
-797   | - => vkQueueSubmit(33)[28]: vkBeginCommandBuffer(Baked Command Buffer 2738)                            | 277   
-798   | - voxel_raster_pass                                                                                    | 277-510
-801   |  \- vkCmdBeginRenderPass(C=Clear, D=Clear)                                                             | 277   
-808   |   - vkCmdDrawIndexedIndirect(1) => <7506, 1>                                                           | 277   
-810   |   - vkCmdDrawIndexedIndirect(1) => <7614, 1>                                                           | 278   
-812   |   - vkCmdDrawIndexedIndirect(1) => <8250, 1>                                                           | 279   
-814   |   - vkCmdDrawIndexedIndirect(1) => <7596, 1>                                                           | 280   
-816   |   - vkCmdDrawIndexedIndirect(1) => <8316, 1>                                                           | 281   
-818   |   - vkCmdDrawIndexedIndirect(1) => <7890, 1>                                                           | 282   
-820   |   - vkCmdDrawIndexedIndirect(1) => <8076, 1>                                                           | 283   
-822   |   - vkCmdDrawIndexedIndirect(1) => <8022, 1>                                                           | 284   
-824   |   - vkCmdDrawIndexedIndirect(1) => <8214, 1>                                                           | 285   
-826   |   - vkCmdDrawIndexedIndirect(1) => <8118, 1>                                                           | 286   
-828   |   - vkCmdDrawIndexedIndirect(1) => <7836, 1>                                                           | 287   
-830   |   - vkCmdDrawIndexedIndirect(1) => <7896, 1>                                                           | 288   
-832   |   - vkCmdDrawIndexedIndirect(1) => <8268, 1>                                                           | 289   
-834   |   - vkCmdDrawIndexedIndirect(1) => <7998, 1>                                                           | 290   
-836   |   - vkCmdDrawIndexedIndirect(1) => <7734, 1>                                                           | 291   
-838   |   - vkCmdDrawIndexedIndirect(1) => <7542, 1>                                                           | 292   
-840   |   - vkCmdDrawIndexedIndirect(1) => <7608, 1>                                                           | 293   
-842   |   - vkCmdDrawIndexedIndirect(1) => <8352, 1>                                                           | 294   
-844   |   - vkCmdDrawIndexedIndirect(1) => <7590, 1>                                                           | 295   
-846   |   - vkCmdDrawIndexedIndirect(1) => <8052, 1>                                                           | 296   
-848   |   - vkCmdDrawIndexedIndirect(1) => <7866, 1>                                                           | 297   
-850   |   - vkCmdDrawIndexedIndirect(1) => <7740, 1>                                                           | 298   
-852   |   - vkCmdDrawIndexedIndirect(1) => <7974, 1>                                                           | 299   
-854   |   - vkCmdDrawIndexedIndirect(1) => <7692, 1>                                                           | 300   
-856   |   - vkCmdDrawIndexedIndirect(1) => <7968, 1>                                                           | 301   
-858   |   - vkCmdDrawIndexedIndirect(1) => <8280, 1>                                                           | 302   
-860   |   - vkCmdDrawIndexedIndirect(1) => <8214, 1>                                                           | 303   
-862   |   - vkCmdDrawIndexedIndirect(1) => <7830, 1>                                                           | 304   
-864   |   - vkCmdDrawIndexedIndirect(1) => <7446, 1>                                                           | 305   
-866   |   - vkCmdDrawIndexedIndirect(1) => <7806, 1>                                                           | 306   
-868   |   - vkCmdDrawIndexedIndirect(1) => <7404, 1>                                                           | 307   
-870   |   - vkCmdDrawIndexedIndirect(1) => <7800, 1>                                                           | 308   
-872   |   - vkCmdDrawIndexedIndirect(1) => <7626, 1>                                                           | 309   
-874   |   - vkCmdDrawIndexedIndirect(1) => <7896, 1>                                                           | 310   
-876   |   - vkCmdDrawIndexedIndirect(1) => <7272, 1>                                                           | 311   
-878   |   - vkCmdDrawIndexedIndirect(1) => <7710, 1>                                                           | 312   
-880   |   - vkCmdDrawIndexedIndirect(1) => <7752, 1>                                                           | 313   
-882   |   - vkCmdDrawIndexedIndirect(1) => <7914, 1>                                                           | 314   
-884   |   - vkCmdDrawIndexedIndirect(1) => <7698, 1>                                                           | 315   
-886   |   - vkCmdDrawIndexedIndirect(1) => <7854, 1>                                                           | 316   
-888   |   - vkCmdDrawIndexedIndirect(1) => <7776, 1>                                                           | 317   
-890   |   - vkCmdDrawIndexedIndirect(1) => <7284, 1>                                                           | 318   
-892   |   - vkCmdDrawIndexedIndirect(1) => <7524, 1>                                                           | 319   
-894   |   - vkCmdDrawIndexedIndirect(1) => <7710, 1>                                                           | 320   
-896   |   - vkCmdDrawIndexedIndirect(1) => <7572, 1>                                                           | 321   
-898   |   - vkCmdDrawIndexedIndirect(1) => <8034, 1>                                                           | 322   
-900   |   - vkCmdDrawIndexedIndirect(1) => <7446, 1>                                                           | 323   
-902   |   - vkCmdDrawIndexedIndirect(1) => <8022, 1>                                                           | 324   
-904   |   - vkCmdDrawIndexedIndirect(1) => <7752, 1>                                                           | 325   
-906   |   - vkCmdDrawIndexedIndirect(1) => <8340, 1>                                                           | 326   
-908   |   - vkCmdDrawIndexedIndirect(1) => <8076, 1>                                                           | 327   
-910   |   - vkCmdDrawIndexedIndirect(1) => <7926, 1>                                                           | 328   
-912   |   - vkCmdDrawIndexedIndirect(1) => <7746, 1>                                                           | 329   
-914   |   - vkCmdDrawIndexedIndirect(1) => <7614, 1>                                                           | 330   
-916   |   - vkCmdDrawIndexedIndirect(1) => <7902, 1>                                                           | 331   
-918   |   - vkCmdDrawIndexedIndirect(1) => <8286, 1>                                                           | 332   
-920   |   - vkCmdDrawIndexedIndirect(1) => <8136, 1>                                                           | 333   
-922   |   - vkCmdDrawIndexedIndirect(1) => <8064, 1>                                                           | 334   
-924   |   - vkCmdDrawIndexedIndirect(1) => <7440, 1>                                                           | 335   
-926   |   - vkCmdDrawIndexedIndirect(1) => <8130, 1>                                                           | 336   
-928   |   - vkCmdDrawIndexedIndirect(1) => <7530, 1>                                                           | 337   
-930   |   - vkCmdDrawIndexedIndirect(1) => <7746, 1>                                                           | 338   
-932   |   - vkCmdDrawIndexedIndirect(1) => <7722, 1>                                                           | 339   
-934   |   - vkCmdDrawIndexedIndirect(1) => <8046, 1>                                                           | 340   
-936   |   - vkCmdDrawIndexedIndirect(1) => <8022, 1>                                                           | 341   
-938   |   - vkCmdDrawIndexedIndirect(1) => <7506, 1>                                                           | 342   
-940   |   - vkCmdDrawIndexedIndirect(1) => <7248, 1>                                                           | 343   
-942   |   - vkCmdDrawIndexedIndirect(1) => <7560, 1>                                                           | 344   
-944   |   - vkCmdDrawIndexedIndirect(1) => <7926, 1>                                                           | 345   
-946   |   - vkCmdDrawIndexedIndirect(1) => <7782, 1>                                                           | 346   
-948   |   - vkCmdDrawIndexedIndirect(1) => <8190, 1>                                                           | 347   
-950   |   - vkCmdDrawIndexedIndirect(1) => <7668, 1>                                                           | 348   
-952   |   - vkCmdDrawIndexedIndirect(1) => <7860, 1>                                                           | 349   
-954   |   - vkCmdDrawIndexedIndirect(1) => <7806, 1>                                                           | 350   
-956   |   - vkCmdDrawIndexedIndirect(1) => <7794, 1>                                                           | 351   
-958   |   - vkCmdDrawIndexedIndirect(1) => <7830, 1>                                                           | 352   
-960   |   - vkCmdDrawIndexedIndirect(1) => <8070, 1>                                                           | 353   
-962   |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 354   
-964   |   - vkCmdDrawIndexedIndirect(1) => <7602, 1>                                                           | 355   
-966   |   - vkCmdDrawIndexedIndirect(1) => <7380, 1>                                                           | 356   
-968   |   - vkCmdDrawIndexedIndirect(1) => <7836, 1>                                                           | 357   
-970   |   - vkCmdDrawIndexedIndirect(1) => <7644, 1>                                                           | 358   
-972   |   - vkCmdDrawIndexedIndirect(1) => <7632, 1>                                                           | 359   
-974   |   - vkCmdDrawIndexedIndirect(1) => <7698, 1>                                                           | 360   
-976   |   - vkCmdDrawIndexedIndirect(1) => <7860, 1>                                                           | 361   
-978   |   - vkCmdDrawIndexedIndirect(1) => <7860, 1>                                                           | 362   
-980   |   - vkCmdDrawIndexedIndirect(1) => <7992, 1>                                                           | 363   
-982   |   - vkCmdDrawIndexedIndirect(1) => <8238, 1>                                                           | 364   
-984   |   - vkCmdDrawIndexedIndirect(1) => <8238, 1>                                                           | 365   
-986   |   - vkCmdDrawIndexedIndirect(1) => <7998, 1>                                                           | 366   
-988   |   - vkCmdDrawIndexedIndirect(1) => <8430, 1>                                                           | 367   
-990   |   - vkCmdDrawIndexedIndirect(1) => <8058, 1>                                                           | 368   
-992   |   - vkCmdDrawIndexedIndirect(1) => <7374, 1>                                                           | 369   
-994   |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 370   
-996   |   - vkCmdDrawIndexedIndirect(1) => <7752, 1>                                                           | 371   
-998   |   - vkCmdDrawIndexedIndirect(1) => <7722, 1>                                                           | 372   
-1000  |   - vkCmdDrawIndexedIndirect(1) => <8040, 1>                                                           | 373   
-1002  |   - vkCmdDrawIndexedIndirect(1) => <7920, 1>                                                           | 374   
-1004  |   - vkCmdDrawIndexedIndirect(1) => <7512, 1>                                                           | 375   
-1006  |   - vkCmdDrawIndexedIndirect(1) => <8022, 1>                                                           | 376   
-1008  |   - vkCmdDrawIndexedIndirect(1) => <7794, 1>                                                           | 377   
-1010  |   - vkCmdDrawIndexedIndirect(1) => <7212, 1>                                                           | 378   
-1012  |   - vkCmdDrawIndexedIndirect(1) => <7626, 1>                                                           | 379   
-1014  |   - vkCmdDrawIndexedIndirect(1) => <8088, 1>                                                           | 380   
-1016  |   - vkCmdDrawIndexedIndirect(1) => <7944, 1>                                                           | 381   
-1018  |   - vkCmdDrawIndexedIndirect(1) => <7914, 1>                                                           | 382   
-1020  |   - vkCmdDrawIndexedIndirect(1) => <7668, 1>                                                           | 383   
-1022  |   - vkCmdDrawIndexedIndirect(1) => <8196, 1>                                                           | 384   
-1024  |   - vkCmdDrawIndexedIndirect(1) => <8274, 1>                                                           | 385   
-1026  |   - vkCmdDrawIndexedIndirect(1) => <7812, 1>                                                           | 386   
-1028  |   - vkCmdDrawIndexedIndirect(1) => <7812, 1>                                                           | 387   
-1030  |   - vkCmdDrawIndexedIndirect(1) => <7968, 1>                                                           | 388   
-1032  |   - vkCmdDrawIndexedIndirect(1) => <7398, 1>                                                           | 389   
-1034  |   - vkCmdDrawIndexedIndirect(1) => <7674, 1>                                                           | 390   
-1036  |   - vkCmdDrawIndexedIndirect(1) => <7908, 1>                                                           | 391   
-1038  |   - vkCmdDrawIndexedIndirect(1) => <7908, 1>                                                           | 392   
-1040  |   - vkCmdDrawIndexedIndirect(1) => <7650, 1>                                                           | 393   
-1042  |   - vkCmdDrawIndexedIndirect(1) => <7728, 1>                                                           | 394   
-1044  |   - vkCmdDrawIndexedIndirect(1) => <7440, 1>                                                           | 395   
-1046  |   - vkCmdDrawIndexedIndirect(1) => <8118, 1>                                                           | 396   
-1048  |   - vkCmdDrawIndexedIndirect(1) => <7668, 1>                                                           | 397   
-1050  |   - vkCmdDrawIndexedIndirect(1) => <7854, 1>                                                           | 398   
-1052  |   - vkCmdDrawIndexedIndirect(1) => <7590, 1>                                                           | 399   
-1054  |   - vkCmdDrawIndexedIndirect(1) => <8208, 1>                                                           | 400   
-1056  |   - vkCmdDrawIndexedIndirect(1) => <7818, 1>                                                           | 401   
-1058  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 402   
-1060  |   - vkCmdDrawIndexedIndirect(1) => <8184, 1>                                                           | 403   
-1062  |   - vkCmdDrawIndexedIndirect(1) => <7542, 1>                                                           | 404   
-1064  |   - vkCmdDrawIndexedIndirect(1) => <7326, 1>                                                           | 405   
-1066  |   - vkCmdDrawIndexedIndirect(1) => <7830, 1>                                                           | 406   
-1068  |   - vkCmdDrawIndexedIndirect(1) => <7464, 1>                                                           | 407   
-1070  |   - vkCmdDrawIndexedIndirect(1) => <7380, 1>                                                           | 408   
-1072  |   - vkCmdDrawIndexedIndirect(1) => <7506, 1>                                                           | 409   
-1074  |   - vkCmdDrawIndexedIndirect(1) => <7740, 1>                                                           | 410   
-1076  |   - vkCmdDrawIndexedIndirect(1) => <7536, 1>                                                           | 411   
-1078  |   - vkCmdDrawIndexedIndirect(1) => <7824, 1>                                                           | 412   
-1080  |   - vkCmdDrawIndexedIndirect(1) => <8100, 1>                                                           | 413   
-1082  |   - vkCmdDrawIndexedIndirect(1) => <7644, 1>                                                           | 414   
-1084  |   - vkCmdDrawIndexedIndirect(1) => <7662, 1>                                                           | 415   
-1086  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 416   
-1088  |   - vkCmdDrawIndexedIndirect(1) => <8052, 1>                                                           | 417   
-1090  |   - vkCmdDrawIndexedIndirect(1) => <7944, 1>                                                           | 418   
-1092  |   - vkCmdDrawIndexedIndirect(1) => <7956, 1>                                                           | 419   
-1094  |   - vkCmdDrawIndexedIndirect(1) => <7920, 1>                                                           | 420   
-1096  |   - vkCmdDrawIndexedIndirect(1) => <7860, 1>                                                           | 421   
-1098  |   - vkCmdDrawIndexedIndirect(1) => <7848, 1>                                                           | 422   
-1100  |   - vkCmdDrawIndexedIndirect(1) => <7824, 1>                                                           | 423   
-1102  |   - vkCmdDrawIndexedIndirect(1) => <7860, 1>                                                           | 424   
-1104  |   - vkCmdDrawIndexedIndirect(1) => <7536, 1>                                                           | 425   
-1106  |   - vkCmdDrawIndexedIndirect(1) => <7458, 1>                                                           | 426   
-1108  |   - vkCmdDrawIndexedIndirect(1) => <7524, 1>                                                           | 427   
-1110  |   - vkCmdDrawIndexedIndirect(1) => <7554, 1>                                                           | 428   
-1112  |   - vkCmdDrawIndexedIndirect(1) => <7212, 1>                                                           | 429   
-1114  |   - vkCmdDrawIndexedIndirect(1) => <7656, 1>                                                           | 430   
-1116  |   - vkCmdDrawIndexedIndirect(1) => <7938, 1>                                                           | 431   
-1118  |   - vkCmdDrawIndexedIndirect(1) => <7704, 1>                                                           | 432   
-1120  |   - vkCmdDrawIndexedIndirect(1) => <7614, 1>                                                           | 433   
-1122  |   - vkCmdDrawIndexedIndirect(1) => <7626, 1>                                                           | 434   
-1124  |   - vkCmdDrawIndexedIndirect(1) => <7416, 1>                                                           | 435   
-1126  |   - vkCmdDrawIndexedIndirect(1) => <7566, 1>                                                           | 436   
-1128  |   - vkCmdDrawIndexedIndirect(1) => <7824, 1>                                                           | 437   
-1130  |   - vkCmdDrawIndexedIndirect(1) => <7392, 1>                                                           | 438   
-1132  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 439   
-1134  |   - vkCmdDrawIndexedIndirect(1) => <8262, 1>                                                           | 440   
-1136  |   - vkCmdDrawIndexedIndirect(1) => <7836, 1>                                                           | 441   
-1138  |   - vkCmdDrawIndexedIndirect(1) => <7494, 1>                                                           | 442   
-1140  |   - vkCmdDrawIndexedIndirect(1) => <7656, 1>                                                           | 443   
-1142  |   - vkCmdDrawIndexedIndirect(1) => <7650, 1>                                                           | 444   
-1144  |   - vkCmdDrawIndexedIndirect(1) => <7704, 1>                                                           | 445   
-1146  |   - vkCmdDrawIndexedIndirect(1) => <8358, 1>                                                           | 446   
-1148  |   - vkCmdDrawIndexedIndirect(1) => <7866, 1>                                                           | 447   
-1150  |   - vkCmdDrawIndexedIndirect(1) => <7524, 1>                                                           | 448   
-1152  |   - vkCmdDrawIndexedIndirect(1) => <7896, 1>                                                           | 449   
-1154  |   - vkCmdDrawIndexedIndirect(1) => <7914, 1>                                                           | 450   
-1156  |   - vkCmdDrawIndexedIndirect(1) => <7674, 1>                                                           | 451   
-1158  |   - vkCmdDrawIndexedIndirect(1) => <7596, 1>                                                           | 452   
-1160  |   - vkCmdDrawIndexedIndirect(1) => <7848, 1>                                                           | 453   
-1162  |   - vkCmdDrawIndexedIndirect(1) => <7722, 1>                                                           | 454   
-1164  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 455   
-1166  |   - vkCmdDrawIndexedIndirect(1) => <7260, 1>                                                           | 456   
-1168  |   - vkCmdDrawIndexedIndirect(1) => <8406, 1>                                                           | 457   
-1170  |   - vkCmdDrawIndexedIndirect(1) => <7446, 1>                                                           | 458   
-1172  |   - vkCmdDrawIndexedIndirect(1) => <7368, 1>                                                           | 459   
-1174  |   - vkCmdDrawIndexedIndirect(1) => <7410, 1>                                                           | 460   
-1176  |   - vkCmdDrawIndexedIndirect(1) => <7410, 1>                                                           | 461   
-1178  |   - vkCmdDrawIndexedIndirect(1) => <7554, 1>                                                           | 462   
-1180  |   - vkCmdDrawIndexedIndirect(1) => <7572, 1>                                                           | 463   
-1182  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 464   
-1184  |   - vkCmdDrawIndexedIndirect(1) => <7470, 1>                                                           | 465   
-1186  |   - vkCmdDrawIndexedIndirect(1) => <8052, 1>                                                           | 466   
-1188  |   - vkCmdDrawIndexedIndirect(1) => <8058, 1>                                                           | 467   
-1190  |   - vkCmdDrawIndexedIndirect(1) => <7794, 1>                                                           | 468   
-1192  |   - vkCmdDrawIndexedIndirect(1) => <7872, 1>                                                           | 469   
-1194  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 470   
-1196  |   - vkCmdDrawIndexedIndirect(1) => <8034, 1>                                                           | 471   
-1198  |   - vkCmdDrawIndexedIndirect(1) => <7674, 1>                                                           | 472   
-1200  |   - vkCmdDrawIndexedIndirect(1) => <7716, 1>                                                           | 473   
-1202  |   - vkCmdDrawIndexedIndirect(1) => <7644, 1>                                                           | 474   
-1204  |   - vkCmdDrawIndexedIndirect(1) => <7770, 1>                                                           | 475   
-1206  |   - vkCmdDrawIndexedIndirect(1) => <7572, 1>                                                           | 476   
-1208  |   - vkCmdDrawIndexedIndirect(1) => <7386, 1>                                                           | 477   
-1210  |   - vkCmdDrawIndexedIndirect(1) => <7578, 1>                                                           | 478   
-1212  |   - vkCmdDrawIndexedIndirect(1) => <7362, 1>                                                           | 479   
-1214  |   - vkCmdDrawIndexedIndirect(1) => <7896, 1>                                                           | 480   
-1216  |   - vkCmdDrawIndexedIndirect(1) => <7866, 1>                                                           | 481   
-1218  |   - vkCmdDrawIndexedIndirect(1) => <8280, 1>                                                           | 482   
-1220  |   - vkCmdDrawIndexedIndirect(1) => <7734, 1>                                                           | 483   
-1222  |   - vkCmdDrawIndexedIndirect(1) => <7944, 1>                                                           | 484   
-1224  |   - vkCmdDrawIndexedIndirect(1) => <7104, 1>                                                           | 485   
-1226  |   - vkCmdDrawIndexedIndirect(1) => <7920, 1>                                                           | 486   
-1228  |   - vkCmdDrawIndexedIndirect(1) => <8094, 1>                                                           | 487   
-1230  |   - vkCmdDrawIndexedIndirect(1) => <8178, 1>                                                           | 488   
-1232  |   - vkCmdDrawIndexedIndirect(1) => <7524, 1>                                                           | 489   
-1234  |   - vkCmdDrawIndexedIndirect(1) => <8364, 1>                                                           | 490   
-1236  |   - vkCmdDrawIndexedIndirect(1) => <7926, 1>                                                           | 491   
-1238  |   - vkCmdDrawIndexedIndirect(1) => <7668, 1>                                                           | 492   
-1240  |   - vkCmdDrawIndexedIndirect(1) => <7656, 1>                                                           | 493   
-1242  |   - vkCmdDrawIndexedIndirect(1) => <7440, 1>                                                           | 494   
-1244  |   - vkCmdDrawIndexedIndirect(1) => <7908, 1>                                                           | 495   
-1246  |   - vkCmdDrawIndexedIndirect(1) => <7578, 1>                                                           | 496   
-1248  |   - vkCmdDrawIndexedIndirect(1) => <9792, 1>                                                           | 497   
-1250  |   - vkCmdDrawIndexedIndirect(1) => <7332, 1>                                                           | 498   
-1252  |   - vkCmdDrawIndexedIndirect(1) => <7638, 1>                                                           | 499   
-1254  |   - vkCmdDrawIndexedIndirect(1) => <8058, 1>                                                           | 500   
-1256  |   - vkCmdDrawIndexedIndirect(1) => <7674, 1>                                                           | 501   
-1258  |   - vkCmdDrawIndexedIndirect(1) => <8064, 1>                                                           | 502   
-1260  |   - vkCmdDrawIndexedIndirect(1) => <7992, 1>                                                           | 503   
-1262  |   - vkCmdDrawIndexedIndirect(1) => <7404, 1>                                                           | 504   
-1264  |   - vkCmdDrawIndexedIndirect(1) => <7596, 1>                                                           | 505   
-1266  |   - vkCmdDrawIndexedIndirect(1) => <7728, 1>                                                           | 506   
-1268  |   - vkCmdDrawIndexedIndirect(1) => <7848, 1>                                                           | 507   
-1270  |   - vkCmdDrawIndexedIndirect(1) => <7530, 1>                                                           | 508   
-1272  |   - vkCmdDrawIndexedIndirect(1) => <7668, 1>                                                           | 509   
-1273  |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 510   
-1275  | - => vkQueueSubmit(33)[28]: vkEndCommandBuffer(Baked Command Buffer 2738)                              | 510   
-1276  | - => vkQueueSubmit(33)[29]: vkBeginCommandBuffer(Baked Command Buffer 2755)                            | 510   
-1278  | - => vkQueueSubmit(33)[29]: vkEndCommandBuffer(Baked Command Buffer 2755)                              | 510   
-1279  | - => vkQueueSubmit(33)[30]: vkBeginCommandBuffer(Baked Command Buffer 2748)                            | 510   
-1280  | - => vkQueueSubmit(33)[30]: vkEndCommandBuffer(Baked Command Buffer 2748)                              | 510   
-1281  | - => vkQueueSubmit(33)[31]: vkBeginCommandBuffer(Baked Command Buffer 2746)                            | 510   
-1282  | - upscaling                                                                                            | 510-511
-1285  |  \- vkCmdBeginRenderPass(Clear)                                                                        | 510   
-1288  |   - vkCmdDraw(3, 1)                                                                                    | 510   
-1289  |   - vkCmdEndRenderPass(Store)                                                                          | 511   
-1291  | - => vkQueueSubmit(33)[31]: vkEndCommandBuffer(Baked Command Buffer 2746)                              | 511   
-1292  | - => vkQueueSubmit(33)[32]: vkBeginCommandBuffer(Baked Command Buffer 2756)                            | 511   
-1294  | - => vkQueueSubmit(33)[32]: vkEndCommandBuffer(Baked Command Buffer 2756)                              | 511   
-1302  | - => vkQueueSubmit(1)[0]: vkBeginCommandBuffer(Baked Command Buffer 2781)                              | 511   
-1303  | - => vkQueueSubmit(1)[0]: vkEndCommandBuffer(Baked Command Buffer 2781)                                | 511   
-1305  | - vkQueuePresentKHR(Swapchain Image 345)                                                               | 511   
+31    | - => vkQueueSubmit(33)[0]: vkBeginCommandBuffer(Baked Command Buffer 11043)                            | 1     
+33    | - vkCmdCopyBuffer((wgpu internal) Staging, LineGizmo Position Buffer)                                  | 1     
+35    | - vkCmdCopyBuffer((wgpu internal) Staging, LineGizmo Color Buffer)                                     | 2     
+37    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 325)                                                 | 3     
+39    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 323)                                                 | 4     
+41    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 5     
+43    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 6     
+45    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 7     
+47    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 8     
+49    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 9     
+51    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 10    
+53    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 11    
+55    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_meta_buffer)                                    | 12    
+57    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_active_slot_map_buffer)                               | 13    
+59    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_overflow_flag_buffer)                                 | 14    
+61    | - vkCmdCopyBuffer((wgpu internal) Staging, arena_chunk_bases_uniform_buffer)                           | 15    
+63    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 521)                                                 | 16    
+65    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 523)                                                 | 17    
+67    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 531)                                                 | 18    
+69    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 527)                                                 | 19    
+71    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 525)                                                 | 20    
+73    | - vkCmdCopyBuffer((wgpu internal) Staging, view_uniforms_buffer)                                       | 21    
+75    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 11071)                                               | 22    
+77    | - vkCmdCopyBuffer((wgpu internal) Staging, Buffer 11073)                                               | 23    
+79    | - vkCmdCopyBuffer((wgpu internal) Staging, clustering Z slicing metadata buffer)                       | 24    
+81    | - vkCmdCopyBuffer((wgpu internal) Staging, previous instance input uniform buffer)                     | 25    
+82    | - => vkQueueSubmit(33)[0]: vkEndCommandBuffer(Baked Command Buffer 11043)                              | 26    
+83    | - => vkQueueSubmit(33)[1]: vkBeginCommandBuffer(Baked Command Buffer 11131)                            | 26    
+85    | - vkCmdFillBuffer(Buffer 11075, 0)                                                                     | 26    
+87    | - vkCmdFillBuffer(Buffer 11080, 0)                                                                     | 27    
+90    | - => vkQueueSubmit(33)[1]: vkEndCommandBuffer(Baked Command Buffer 11131)                              | 28    
+91    | - => vkQueueSubmit(33)[2]: vkBeginCommandBuffer(Baked Command Buffer 11099)                            | 28    
+92    | - clustering                                                                                           | 28-37 
+93    |  \- => vkQueueSubmit(33)[2]: vkEndCommandBuffer(Baked Command Buffer 11099)                            | 28    
+94    |   - => vkQueueSubmit(33)[3]: vkBeginCommandBuffer(Baked Command Buffer 11101)                          | 28    
+95    |   - => vkQueueSubmit(33)[3]: vkEndCommandBuffer(Baked Command Buffer 11101)                            | 28    
+96    |   - => vkQueueSubmit(33)[4]: vkBeginCommandBuffer(Baked Command Buffer 11100)                          | 28    
+97    |   - clustering Z slicing pass                                                                          |       
+100   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 28    
+102   |   - => vkQueueSubmit(33)[4]: vkEndCommandBuffer(Baked Command Buffer 11100)                            | 29    
+103   |   - => vkQueueSubmit(33)[5]: vkBeginCommandBuffer(Baked Command Buffer 11104)                          | 29    
+106   |   - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer) | 29    
+108   |   - (wgpu internal) Indirect draw validation pass                                                      |       
+114   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 30    
+117   |   - => vkQueueSubmit(33)[5]: vkEndCommandBuffer(Baked Command Buffer 11104)                            | 31    
+118   |   - => vkQueueSubmit(33)[6]: vkBeginCommandBuffer(Baked Command Buffer 11102)                          | 31    
+119   |   - clustering count pass                                                                              | 31-32 
+122   |    \- vkCmdBeginRenderPass(Clear)                                                                      | 31    
+129   |     - vkCmdDrawIndexedIndirect(1) => <6, 1>                                                            | 31    
+130   |     - vkCmdEndRenderPass(Don't Care)                                                                   | 32    
+132   |   - => vkQueueSubmit(33)[6]: vkEndCommandBuffer(Baked Command Buffer 11102)                            | 32    
+133   |   - => vkQueueSubmit(33)[7]: vkBeginCommandBuffer(Baked Command Buffer 11107)                          | 32    
+135   |   - => vkQueueSubmit(33)[7]: vkEndCommandBuffer(Baked Command Buffer 11107)                            | 32    
+136   |   - => vkQueueSubmit(33)[8]: vkBeginCommandBuffer(Baked Command Buffer 11106)                          | 32    
+137   |   - clustering allocation local pass                                                                   |       
+140   |    \- vkCmdDispatch(15, 1, 1)                                                                          | 32    
+142   |   - => vkQueueSubmit(33)[8]: vkEndCommandBuffer(Baked Command Buffer 11106)                            | 33    
+143   |   - => vkQueueSubmit(33)[9]: vkBeginCommandBuffer(Baked Command Buffer 11109)                          | 33    
+145   |   - => vkQueueSubmit(33)[9]: vkEndCommandBuffer(Baked Command Buffer 11109)                            | 33    
+146   |   - => vkQueueSubmit(33)[10]: vkBeginCommandBuffer(Baked Command Buffer 11108)                         | 33    
+147   |   - clustering allocation global pass                                                                  |       
+150   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 33    
+152   |   - => vkQueueSubmit(33)[10]: vkEndCommandBuffer(Baked Command Buffer 11108)                           | 34    
+153   |   - => vkQueueSubmit(33)[11]: vkBeginCommandBuffer(Baked Command Buffer 11111)                         | 34    
+157   |   - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer) | 34    
+159   |   - (wgpu internal) Indirect draw validation pass                                                      |       
+165   |    \- vkCmdDispatch(1, 1, 1)                                                                           | 35    
+168   |   - => vkQueueSubmit(33)[11]: vkEndCommandBuffer(Baked Command Buffer 11111)                           | 36    
+169   |   - => vkQueueSubmit(33)[12]: vkBeginCommandBuffer(Baked Command Buffer 11110)                         | 36    
+170   |   - clustering populate pass                                                                           | 36-37 
+173   |    \- vkCmdBeginRenderPass(Clear)                                                                      | 36    
+180   |     - vkCmdDrawIndexedIndirect(1) => <6, 1>                                                            | 36    
+181   |     - vkCmdEndRenderPass(Don't Care)                                                                   | 37    
+183   |   - => vkQueueSubmit(33)[12]: vkEndCommandBuffer(Baked Command Buffer 11110)                           | 37    
+184   |   - => vkQueueSubmit(33)[13]: vkBeginCommandBuffer(Baked Command Buffer 11113)                         | 37    
+186   |   - vkCmdCopyBuffer(clustering Z slicing metadata buffer, clustering metadata staging buffer)          | 37    
+188   | - => vkQueueSubmit(33)[13]: vkEndCommandBuffer(Baked Command Buffer 11113)                             | 38    
+189   | - => vkQueueSubmit(33)[14]: vkBeginCommandBuffer(Baked Command Buffer 11132)                           | 38    
+190   | - => vkQueueSubmit(33)[14]: vkEndCommandBuffer(Baked Command Buffer 11132)                             | 38    
+191   | - => vkQueueSubmit(33)[15]: vkBeginCommandBuffer(Baked Command Buffer 11115)                           | 38    
+192   | - => vkQueueSubmit(33)[15]: vkEndCommandBuffer(Baked Command Buffer 11115)                             | 38    
+193   | - => vkQueueSubmit(33)[16]: vkBeginCommandBuffer(Baked Command Buffer 11114)                           | 38    
+194   | - bin unpacking                                                                                        |       
+197   | - => vkQueueSubmit(33)[16]: vkEndCommandBuffer(Baked Command Buffer 11114)                             | 38    
+198   | - => vkQueueSubmit(33)[17]: vkBeginCommandBuffer(Baked Command Buffer 11133)                           | 38    
+199   | - => vkQueueSubmit(33)[17]: vkEndCommandBuffer(Baked Command Buffer 11133)                             | 38    
+200   | - => vkQueueSubmit(33)[18]: vkBeginCommandBuffer(Baked Command Buffer 11117)                           | 38    
+201   | - => vkQueueSubmit(33)[18]: vkEndCommandBuffer(Baked Command Buffer 11117)                             | 38    
+202   | - => vkQueueSubmit(33)[19]: vkBeginCommandBuffer(Baked Command Buffer 11116)                           | 38    
+203   | - early_mesh_preprocessing                                                                             |       
+205   | - => vkQueueSubmit(33)[19]: vkEndCommandBuffer(Baked Command Buffer 11116)                             | 38    
+206   | - => vkQueueSubmit(33)[20]: vkBeginCommandBuffer(Baked Command Buffer 11134)                           | 38    
+208   | - => vkQueueSubmit(33)[20]: vkEndCommandBuffer(Baked Command Buffer 11134)                             | 38    
+209   | - => vkQueueSubmit(33)[21]: vkBeginCommandBuffer(Baked Command Buffer 11120)                           | 38    
+210   | - => vkQueueSubmit(33)[21]: vkEndCommandBuffer(Baked Command Buffer 11120)                             | 38    
+211   | - => vkQueueSubmit(33)[22]: vkBeginCommandBuffer(Baked Command Buffer 11118)                           | 38    
+212   | - main_opaque_pass_3d                                                                                  |       
+215   |  \- vkCmdBeginRenderPass(C=Load, D=Load)                                                               | 38    
+216   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 38    
+218   | - => vkQueueSubmit(33)[22]: vkEndCommandBuffer(Baked Command Buffer 11118)                             | 38    
+219   | - => vkQueueSubmit(33)[23]: vkBeginCommandBuffer(Baked Command Buffer 11135)                           | 38    
+222   | - => vkQueueSubmit(33)[23]: vkEndCommandBuffer(Baked Command Buffer 11135)                             | 38    
+223   | - => vkQueueSubmit(33)[24]: vkBeginCommandBuffer(Baked Command Buffer 11123)                           | 38    
+224   | - => vkQueueSubmit(33)[24]: vkEndCommandBuffer(Baked Command Buffer 11123)                             | 38    
+225   | - => vkQueueSubmit(33)[25]: vkBeginCommandBuffer(Baked Command Buffer 11121)                           | 38    
+226   | - main_transparent_pass_3d                                                                             | 38-39 
+229   |  \- vkCmdBeginRenderPass(C=Load, D=Load)                                                               | 38    
+235   |   - vkCmdDraw(6, 96)                                                                                   | 38    
+236   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 39    
+238   | - => vkQueueSubmit(33)[25]: vkEndCommandBuffer(Baked Command Buffer 11121)                             | 39    
+239   | - => vkQueueSubmit(33)[26]: vkBeginCommandBuffer(Baked Command Buffer 11136)                           | 39    
+241   | - => vkQueueSubmit(33)[26]: vkEndCommandBuffer(Baked Command Buffer 11136)                             | 39    
+242   | - => vkQueueSubmit(33)[27]: vkBeginCommandBuffer(Baked Command Buffer 11126)                           | 39    
+244   | - vkCmdCopyBuffer((wgpu internal) Staging, (wgpu internal) Indirect draw validation metadata buffer)   | 39    
+246   | - (wgpu internal) Indirect draw validation pass                                                        |       
+252   |  \- vkCmdDispatch(1, 1, 1)                                                                             | 40    
+255   | - => vkQueueSubmit(33)[27]: vkEndCommandBuffer(Baked Command Buffer 11126)                             | 41    
+256   | - => vkQueueSubmit(33)[28]: vkBeginCommandBuffer(Baked Command Buffer 11124)                           | 41    
+257   | - voxel_raster_pass                                                                                    | 41-49 
+260   |  \- vkCmdBeginRenderPass(C=Clear, D=Clear)                                                             | 41    
+267   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 41    
+269   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 42    
+271   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 43    
+273   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 44    
+275   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 45    
+277   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 46    
+279   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 47    
+281   |   - vkCmdDrawIndexedIndirect(1) => <0, 1>                                                              | 48    
+282   |   - vkCmdEndRenderPass(C=Store, D=Store)                                                               | 49    
+284   | - => vkQueueSubmit(33)[28]: vkEndCommandBuffer(Baked Command Buffer 11124)                             | 49    
+285   | - => vkQueueSubmit(33)[29]: vkBeginCommandBuffer(Baked Command Buffer 11137)                           | 49    
+287   | - => vkQueueSubmit(33)[29]: vkEndCommandBuffer(Baked Command Buffer 11137)                             | 49    
+288   | - => vkQueueSubmit(33)[30]: vkBeginCommandBuffer(Baked Command Buffer 11130)                           | 49    
+289   | - => vkQueueSubmit(33)[30]: vkEndCommandBuffer(Baked Command Buffer 11130)                             | 49    
+290   | - => vkQueueSubmit(33)[31]: vkBeginCommandBuffer(Baked Command Buffer 11128)                           | 49    
+291   | - upscaling                                                                                            | 49-50 
+294   |  \- vkCmdBeginRenderPass(Clear)                                                                        | 49    
+297   |   - vkCmdDraw(3, 1)                                                                                    | 49    
+298   |   - vkCmdEndRenderPass(Store)                                                                          | 50    
+300   | - => vkQueueSubmit(33)[31]: vkEndCommandBuffer(Baked Command Buffer 11128)                             | 50    
+301   | - => vkQueueSubmit(33)[32]: vkBeginCommandBuffer(Baked Command Buffer 11138)                           | 50    
+303   | - => vkQueueSubmit(33)[32]: vkEndCommandBuffer(Baked Command Buffer 11138)                             | 50    
+311   | - => vkQueueSubmit(1)[0]: vkBeginCommandBuffer(Baked Command Buffer 11139)                             | 50    
+312   | - => vkQueueSubmit(1)[0]: vkEndCommandBuffer(Baked Command Buffer 11139)                               | 50    
+314   | - vkQueuePresentKHR(Swapchain Image 345)                                                               | 50    

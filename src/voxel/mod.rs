@@ -94,9 +94,7 @@ impl Plugin for VoxelRenderPlugin {
                     )
                         .chain()
                         .in_set(RenderSystems::Prepare),
-                    dispatch_voxel_compute_passes_batched
-                        .run_if(resource_exists::<VoxelChunkArena>)
-                        .in_set(RenderSystems::Queue),
+                    dispatch_voxel_compute_passes_batched.in_set(RenderSystems::Queue),
                     queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
                 ),
             )

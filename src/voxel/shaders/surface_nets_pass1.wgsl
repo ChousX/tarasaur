@@ -26,6 +26,7 @@ struct ChunkMeta {
     _pad: u32,
 }
 @group(0) @binding(7) var<storage, read> chunk_meta: array<ChunkMeta>;
+@group(0) @binding(8) var<storage, read> active_slot_map: array<u32>;
 
 fn flatten_cell_idx(coord: vec3<u32>, cell_count: u32) -> u32 {
     return coord.z * cell_count * cell_count + coord.y * cell_count + coord.x;
@@ -45,7 +46,8 @@ fn cs_main(
     let local_wg_z = wg_id.z % uniforms.wg_per_chunk_z;
     let cell_coord = vec3<u32>(global_id.x, global_id.y, local_wg_z * 4u + local_id.z);
 
-    let cmeta = chunk_meta[chunk_idx];
+    let real_slot = active_slot_map[chunk_idx];
+    let cmeta = chunk_meta[real_slot];
     let cell_count = uniforms.cell_count;
 
     if (all(cell_coord == vec3<u32>(0u))) {

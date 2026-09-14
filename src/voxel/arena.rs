@@ -378,9 +378,12 @@ impl VoxelChunkArena {
                     binding: 7,
                     resource: chunk_meta_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 8,
+                    resource: active_slot_map_buffer.as_entire_binding(),
+                },
             ],
         );
-
         let pass3_bind_group = render_device.create_bind_group(
             Some("arena_pass3_bind_group"),
             &layouts.pass3_surface_layout,
@@ -426,9 +429,12 @@ impl VoxelChunkArena {
                     binding: 9,
                     resource: chunk_index_base_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 10,
+                    resource: active_slot_map_buffer.as_entire_binding(),
+                },
             ],
         );
-
         let compaction_bind_group = render_device.create_bind_group(
             Some("arena_compaction_bind_group"),
             &layouts.compaction_bind_group_layout,

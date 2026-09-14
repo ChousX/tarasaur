@@ -15,7 +15,7 @@ use bevy::{
 use crate::{
     CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, Versionable, VoxelDataSlice,
     voxel::{
-        arena::{ChunkMeta, VoxelChunkArena},
+        arena::{ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{VoxelDummyMaterial, VoxelPipelineLayouts, VoxelRasterPipeline},
         types::{CollisionMeshData, MeshReadbackChannel, PendingMeshReadback},
     },
@@ -34,14 +34,26 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
 }
 
 pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
-    mut arena: ResMut<VoxelChunkArena>,
+    mut arena_set: ResMut<VoxelChunkArenaSet>,
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<T>)>,
     mut commands: Commands,
 ) {
-    arena.dirty_slots.clear();
+    for arena in arena_set.arenas.values_mut() {
+        arena.dirty_slots.clear();
+    }
 
     for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
+        let Some(arena) = arena_set.arenas.get_mut(&extracted_sdf.lod) else {
+            // init_voxel_arena runs earlier in the same Prepare set and creates
+            // an arena for every LOD seen this frame, so this shouldn't happen.
+            warn!(
+                "[prepare_voxel_arena] no arena for LOD {:?}, dropping chunk {:?}",
+                extracted_sdf.lod, extracted_sdf.chunk_pos
+            );
+            commands.entity(extracted_entity).despawn();
+            continue;
+        };
         let Some(slot) = arena.slot_for(extracted_sdf.main_entity) else {
             warn!(
                 "[prepare_voxel_arena] arena full ({} slots), dropping chunk {:?}",
@@ -98,35 +110,38 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
     // each active chunk's active_list_pos field (its index into active_slots),
     // populate active_slot_map (the inverse mapping used by compute_chunk_bases
     // and pass3), and refresh the bases-pass uniform's active_count.
-    const ACTIVE_LIST_POS_OFFSET: u64 = std::mem::offset_of!(ChunkMeta, active_list_pos) as u64;
+    for arena in arena_set.arenas.values_mut() {
+        const ACTIVE_LIST_POS_OFFSET: u64 = std::mem::offset_of!(ChunkMeta, active_list_pos) as u64;
 
-    for (pos, &slot) in arena.active_slots.iter().enumerate() {
-        let offset = slot as u64 * std::mem::size_of::<ChunkMeta>() as u64 + ACTIVE_LIST_POS_OFFSET;
+        for (pos, &slot) in arena.active_slots.iter().enumerate() {
+            let offset =
+                slot as u64 * std::mem::size_of::<ChunkMeta>() as u64 + ACTIVE_LIST_POS_OFFSET;
+            render_queue.write_buffer(
+                &arena.chunk_meta_buffer,
+                offset,
+                bytemuck::bytes_of(&(pos as u32)),
+            );
+        }
+
+        let slot_map: Vec<u32> = arena.active_slots.clone();
         render_queue.write_buffer(
-            &arena.chunk_meta_buffer,
-            offset,
-            bytemuck::bytes_of(&(pos as u32)),
+            &arena.active_slot_map_buffer,
+            0,
+            bytemuck::cast_slice(&slot_map),
+        );
+
+        // Clear overflow flag for this frame.
+        render_queue.write_buffer(&arena.overflow_flag_buffer, 0, bytemuck::bytes_of(&0u32));
+
+        // Update active_count in the chunk-bases uniform (first field of
+        // ChunkBasesUniforms; budget fields are set once at construction and
+        // never change, so this partial write is safe).
+        render_queue.write_buffer(
+            &arena.chunk_bases_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&(arena.active_slots.len() as u32)),
         );
     }
-
-    let slot_map: Vec<u32> = arena.active_slots.clone();
-    render_queue.write_buffer(
-        &arena.active_slot_map_buffer,
-        0,
-        bytemuck::cast_slice(&slot_map),
-    );
-
-    // Clear overflow flag for this frame.
-    render_queue.write_buffer(&arena.overflow_flag_buffer, 0, bytemuck::bytes_of(&0u32));
-
-    // Update active_count in the chunk-bases uniform (first field of
-    // ChunkBasesUniforms; budget fields are set once at construction and
-    // never change, so this partial write is safe).
-    render_queue.write_buffer(
-        &arena.chunk_bases_uniform_buffer,
-        0,
-        bytemuck::bytes_of(&(arena.active_slots.len() as u32)),
-    );
 }
 
 pub fn dispatch_voxel_compute_passes_batched(
@@ -134,11 +149,9 @@ pub fn dispatch_voxel_compute_passes_batched(
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
-    arena: Res<VoxelChunkArena>,
-    mut debug_requested: Local<bool>,
+    arena_set: Res<VoxelChunkArenaSet>,
 ) {
-    let active = arena.active_chunk_count();
-    if active == 0 {
+    if arena_set.arenas.is_empty() {
         return;
     }
 
@@ -168,118 +181,124 @@ pub fn dispatch_voxel_compute_passes_batched(
         label: Some("voxel_compute_encoder_batched"),
     });
 
-    let wg_per_chunk_pass1 = arena.cell_count.div_ceil(4);
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("surface_nets_pass1_batched"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pass1_pipeline);
-        pass.set_bind_group(0, &arena.pass1_bind_group, &[]);
-        pass.dispatch_workgroups(
-            wg_per_chunk_pass1,
-            wg_per_chunk_pass1,
-            wg_per_chunk_pass1 * active,
+    for arena in arena_set.arenas.values() {
+        let active = arena.active_chunk_count();
+        if active == 0 {
+            continue;
+        }
+
+        let wg_per_chunk_pass1 = arena.cell_count.div_ceil(4);
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("surface_nets_pass1_batched"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pass1_pipeline);
+            pass.set_bind_group(0, &arena.pass1_bind_group, &[]);
+            pass.dispatch_workgroups(
+                wg_per_chunk_pass1,
+                wg_per_chunk_pass1,
+                wg_per_chunk_pass1 * active,
+            );
+        }
+
+        let wg_per_chunk_scan = arena.blocks_per_chunk;
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("stream_compaction_scan_batched"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(stream_compaction_pipeline);
+            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+            pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("stream_compaction_scan_block_sums_batched"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(scan_block_sums_pipeline);
+            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+            pass.dispatch_workgroups(active, 1, 1); // one block-sum scan per chunk, indexed by workgroup_id.x
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("stream_compaction_resolve_batched"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(stream_compaction_resolve_pipeline);
+            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+            pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("stream_compaction_write_active_counts"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(write_chunk_active_count_pipeline);
+            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
+            pass.dispatch_workgroups(active, 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("compute_chunk_bases"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(chunk_bases_pipeline);
+            pass.set_bind_group(0, &arena.chunk_bases_bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        let wg_per_chunk_pass3 = arena.cell_count.div_ceil(8);
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("surface_nets_pass3_batched"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pass3_pipeline);
+            pass.set_bind_group(0, &arena.pass3_bind_group, &[]);
+            pass.dispatch_workgroups(
+                wg_per_chunk_pass3,
+                wg_per_chunk_pass3,
+                wg_per_chunk_pass3 * active,
+            );
+        }
+
+        // Single readback copy per resource type per arena, covering every
+        // active slot's span at once.
+        encoder.copy_buffer_to_buffer(
+            &arena.indirect_args_buffer,
+            0,
+            &arena.readback_indirect_buffer,
+            0,
+            4 * arena.max_chunks as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            &arena.final_vertex_buffer,
+            0,
+            &arena.readback_vertex_buffer,
+            0,
+            arena.final_vertex_buffer.size(),
+        );
+        encoder.copy_buffer_to_buffer(
+            &arena.index_buffer,
+            0,
+            &arena.readback_index_buffer,
+            0,
+            arena.index_buffer.size(),
+        );
+        encoder.copy_buffer_to_buffer(
+            &arena.overflow_flag_buffer,
+            0,
+            &arena.overflow_readback_buffer,
+            0,
+            4,
         );
     }
-
-    //let wg_per_chunk_scan = ((arena.total_cells + 511) / 512).max(1);
-    let wg_per_chunk_scan = arena.blocks_per_chunk;
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_scan_batched"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(stream_compaction_pipeline);
-        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-        pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
-        //pass.dispatch_workgroups(active, 1, 1);
-    }
-
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_scan_block_sums_batched"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(scan_block_sums_pipeline);
-        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-        pass.dispatch_workgroups(active, 1, 1); // one block-sum scan per chunk, indexed by workgroup_id.x
-    }
-
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_resolve_batched"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(stream_compaction_resolve_pipeline);
-        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-        pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
-    }
-
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("stream_compaction_write_active_counts"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(write_chunk_active_count_pipeline);
-        pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-        pass.dispatch_workgroups(active, 1, 1);
-    }
-
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("compute_chunk_bases"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(chunk_bases_pipeline);
-        pass.set_bind_group(0, &arena.chunk_bases_bind_group, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
-
-    let wg_per_chunk_pass3 = arena.cell_count.div_ceil(8);
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("surface_nets_pass3_batched"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pass3_pipeline);
-        pass.set_bind_group(0, &arena.pass3_bind_group, &[]);
-        pass.dispatch_workgroups(
-            wg_per_chunk_pass3,
-            wg_per_chunk_pass3,
-            wg_per_chunk_pass3 * active,
-        );
-    }
-
-    // Single readback copy per resource type, covering every active slot's span at once.
-    encoder.copy_buffer_to_buffer(
-        &arena.indirect_args_buffer,
-        0,
-        &arena.readback_indirect_buffer,
-        0,
-        4 * arena.max_chunks as u64,
-    );
-    encoder.copy_buffer_to_buffer(
-        &arena.final_vertex_buffer,
-        0,
-        &arena.readback_vertex_buffer,
-        0,
-        arena.final_vertex_buffer.size(),
-    );
-    encoder.copy_buffer_to_buffer(
-        &arena.index_buffer,
-        0,
-        &arena.readback_index_buffer,
-        0,
-        arena.index_buffer.size(),
-    );
-    encoder.copy_buffer_to_buffer(
-        &arena.overflow_flag_buffer,
-        0,
-        &arena.overflow_readback_buffer,
-        0,
-        4,
-    );
 
     render_queue.submit(std::iter::once(encoder.finish()));
 }
@@ -435,17 +454,17 @@ pub fn voxel_raster_pass(
         &ViewUniformOffset,
     )>,
     view_uniforms: Res<ViewUniforms>,
-    arena: Option<Res<VoxelChunkArena>>,
+    arena_set: Option<Res<VoxelChunkArenaSet>>,
     pipeline_cache: Res<PipelineCache>,
     raster_pipeline: Res<VoxelRasterPipeline>,
     voxel_material: Res<VoxelDummyMaterial>,
     mut ctx: RenderContext,
 ) {
-    // Arena may not exist yet (frame 0, before any chunk has been extracted).
-    let Some(arena) = arena else {
+    // Arena set may not exist yet (frame 0, before any chunk has been extracted).
+    let Some(arena_set) = arena_set else {
         return;
     };
-    if arena.active_slots.is_empty() {
+    if arena_set.arenas.values().all(|a| a.active_slots.is_empty()) {
         return;
     }
 
@@ -482,14 +501,23 @@ pub fn voxel_raster_pass(
     render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
     render_pass.set_bind_group(1, &material_bind_group, &[]);
 
-    // Buffers are shared across all chunks now — bind once, not per-chunk.
-    render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
-    render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
-
     const ARGS_STRIDE: u64 = std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
-    for &slot in arena.active_slots.iter() {
-        let offset = slot as u64 * ARGS_STRIDE;
-        render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, offset);
+
+    // Each LOD's arena has its own vertex/index buffers, so the bind-once
+    // optimization from the single-arena version now happens once per arena
+    // instead of once per frame.
+    for arena in arena_set.arenas.values() {
+        if arena.active_slots.is_empty() {
+            continue;
+        }
+
+        render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
+        render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
+
+        for &slot in arena.active_slots.iter() {
+            let offset = slot as u64 * ARGS_STRIDE;
+            render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, offset);
+        }
     }
 }
 
@@ -640,6 +668,7 @@ pub fn extract_voxel_chunks<T>(
             chunk_pos: pos.0,
             padded_sdf_data,
             size: padded_size,
+            lod: *lod,
             _type: PhantomData,
         });
     }
@@ -902,27 +931,25 @@ fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
 /// `cell_count`/`texture_size` come from the chunk's `size`, which isn't
 /// known until extraction has produced at least one `ExtractedChunkField`.
 pub fn init_voxel_arena<T: Send + Sync + 'static>(
-    mut commands: Commands,
     render_device: Res<RenderDevice>,
     layouts: Res<VoxelPipelineLayouts>,
     extracted_chunks: Query<&ExtractedChunkField<T>>,
-    arena: Option<Res<VoxelChunkArena>>,
+    mut arena_set: ResMut<VoxelChunkArenaSet>,
 ) {
-    if arena.is_some() {
-        return;
+    for chunk in extracted_chunks.iter() {
+        if arena_set.arenas.contains_key(&chunk.lod) {
+            continue;
+        }
+        let size = chunk.size;
+        let chunk_voxels = size - 2;
+        let cell_count = chunk_voxels + 1;
+        info!(
+            "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
+            chunk.lod, cell_count, size
+        );
+        arena_set.arenas.insert(
+            chunk.lod,
+            VoxelChunkArena::new(&render_device, &layouts, cell_count, size),
+        );
     }
-    let Some(first) = extracted_chunks.iter().next() else {
-        return; // nothing extracted yet this frame, try again next frame
-    };
-
-    let size = first.size;
-    let chunk_voxels = size - 2;
-    let cell_count = chunk_voxels + 1;
-
-    commands.insert_resource(VoxelChunkArena::new(
-        &render_device,
-        &layouts,
-        cell_count,
-        size,
-    ));
 }

@@ -37,6 +37,7 @@ struct ChunkMeta {
 @group(0) @binding(7) var<storage, read> chunk_meta: array<ChunkMeta>;
 @group(0) @binding(8) var<storage, read> chunk_vertex_base: array<u32>;
 @group(0) @binding(9) var<storage, read> chunk_index_base: array<u32>;
+@group(0) @binding(10) var<storage, read> active_slot_map: array<u32>;
 
 fn get_cell_index(local_coord: vec3<u32>, cell_offset: u32) -> u32 {
     return cell_offset + local_coord.x
@@ -103,7 +104,8 @@ fn cs_main(
         return;
     }
 
-    let cmeta = chunk_meta[chunk_idx];
+    let real_slot = active_slot_map[chunk_idx];
+    let cmeta = chunk_meta[real_slot];
     let cell_idx = get_cell_index(id, cmeta.cell_offset);
     let idx_base = chunk_index_base[cmeta.active_list_pos];
 

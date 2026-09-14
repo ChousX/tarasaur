@@ -86,6 +86,7 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(5, ShaderStages::COMPUTE, false),
         uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(16)),
         storage_buffer_entry(7, ShaderStages::COMPUTE, true), // chunk_meta
+        storage_buffer_entry(8, ShaderStages::COMPUTE, true), // active_slot_map: dispatch-order pos -> real arena slot
     ]
 }
 
@@ -103,6 +104,7 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(7, ShaderStages::COMPUTE, true), // chunk_meta
         storage_buffer_entry(8, ShaderStages::COMPUTE, true), // chunk_vertex_base
         storage_buffer_entry(9, ShaderStages::COMPUTE, true), // chunk_index_base
+        storage_buffer_entry(10, ShaderStages::COMPUTE, true), // active_slot_map: dispatch-order pos -> real arena slot
     ]
 }
 
