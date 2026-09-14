@@ -7,5 +7,6 @@ edition = "2024"
 bevy = "0.19.1"
 bytemuck = "1.25.2"
 crossbeam-channel = "0.5.16"
+thiserror = "2.0.20"
 
 [dev-dependencies]

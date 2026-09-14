@@ -4859,6 +4859,7 @@ dependencies = [
  "bevy",
  "bytemuck",
  "crossbeam-channel",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
