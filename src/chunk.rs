@@ -11,19 +11,22 @@ pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkManager>()
+            .init_resource::<ShowChunkBounds>()
             .add_observer(new_chunk_spawned)
             .add_systems(Update, chunk_loader_boundry_checker)
-            .add_observer(update_chunk_loaded);
-        app.add_systems(Startup, configure_gizmo_depth_bias)
+            .add_observer(update_chunk_loaded)
+            .add_systems(Startup, configure_gizmo_depth_bias)
             .add_systems(
                 Update,
                 chunk_boundry_visualizer.run_if(resource_exists::<ShowChunkBounds>),
-            )
-            .init_resource::<ShowChunkBounds>();
+            );
     }
 }
 
 pub const CHUNK_SIZE: f32 = 10.;
+
+#[derive(Resource, Default)]
+pub struct ShowChunkBounds;
 
 #[derive(Resource, Clone, Default)]
 pub struct ChunkManager {
@@ -44,7 +47,7 @@ pub fn world_pos_to_chunk_pos(world_position: &Vec3) -> IVec3 {
     (world_position / CHUNK_SIZE).floor().as_ivec3()
 }
 
-//Managed by Hooks
+// Managed by Hooks
 impl ChunkManager {
     fn add_chunk(&mut self, position: IVec3, id: Entity) {
         self.arena.insert(position, id);
@@ -63,17 +66,18 @@ impl ChunkManager {
 )]
 #[component(
     immutable,
-    on_add= on_add_chunk,
+    on_add = on_add_chunk,
     on_remove = on_remove_chunk
 )]
 pub struct Chunk;
+
 /// Registers the chunk with [`ChunkManager`] when added.
 fn on_add_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     let chunk_pos = world.get::<ChunkPosition>(entity).unwrap().0;
     let mut chunk_manager = world.get_resource_mut::<ChunkManager>().unwrap();
     if chunk_manager.is_loaded(&chunk_pos) {
         warn!(
-            "New chunk at pos:{} was not spawned there was already a chunk there",
+            "New chunk at pos:{} was not spawned, there was already a chunk there",
             chunk_pos
         );
         return;
@@ -92,10 +96,7 @@ fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
 
 #[derive(Component, Default, Deref, DerefMut)]
 #[require(Transform)]
-#[component(
-    immutable,
-    on_add= on_add_chunk_pos,
-)]
+#[component(immutable, on_add = on_add_chunk_pos)]
 pub struct ChunkPosition(pub IVec3);
 
 /// Sets the entity's [`Transform`] translation based on chunk position and size.
@@ -131,15 +132,66 @@ fn new_chunk_spawned(
 #[derive(Default, Deref, DerefMut, Component)]
 pub struct CurrentChunk(pub IVec3);
 
-#[derive(Default, Deref, DerefMut, Component)]
+#[derive(Component, Clone, Debug)]
 #[require(CurrentChunk)]
-#[component(
-    on_add= on_add_chunk_loader,
-)]
-///ChunkLoader(val) val = 0 means only the chunk the chunkloader is in gets loaded
-///val = 1 means the chunk the chunkloader is in and its nabaros.
-///val = 2 is the nabars nabaros as well
-pub struct ChunkLoader(pub u8);
+#[component(on_add = on_add_chunk_loader)]
+pub struct ChunkLoader {
+    pub high_distance: i32,
+    pub medium_distance: i32,
+    pub low_distance: i32,
+    pub lowest_distance: i32,
+    /// Distance buffer in chunks before a chunk drops to a lower LOD level
+    pub hysteresis: i32,
+}
+
+impl Default for ChunkLoader {
+    fn default() -> Self {
+        Self {
+            high_distance: 1,
+            medium_distance: 3,
+            low_distance: 6,
+            lowest_distance: 10,
+            hysteresis: 1,
+        }
+    }
+}
+
+impl ChunkLoader {
+    /// Determines target LOD level taking hysteresis into account to prevent thrashing.
+    pub fn calculate_lod(&self, distance: i32, current_lod: Option<LOD>) -> Option<LOD> {
+        let ideal_lod = if distance <= self.high_distance {
+            LOD::High
+        } else if distance <= self.medium_distance {
+            LOD::Medium
+        } else if distance <= self.low_distance {
+            LOD::Low
+        } else if distance <= self.lowest_distance {
+            LOD::Lowest
+        } else {
+            return None;
+        };
+
+        let Some(current) = current_lod else {
+            return Some(ideal_lod);
+        };
+
+        // Instant upgrade when getting closer
+        if (ideal_lod as u32) > (current as u32) {
+            return Some(ideal_lod);
+        }
+
+        // Apply hysteresis buffer on downgrades
+        let h = self.hysteresis;
+        match current {
+            LOD::High if distance <= self.high_distance + h => Some(LOD::High),
+            LOD::Medium if distance <= self.medium_distance + h => Some(LOD::Medium),
+            LOD::Low if distance <= self.low_distance + h => Some(LOD::Low),
+            LOD::Lowest if distance <= self.lowest_distance + h => Some(LOD::Lowest),
+            _ => Some(ideal_lod),
+        }
+    }
+}
+
 fn on_add_chunk_loader(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     let chunk_pos = world.get::<GlobalTransform>(entity).unwrap();
     world.get_mut::<CurrentChunk>(entity).unwrap().0 =
@@ -171,76 +223,67 @@ fn chunk_loader_boundry_checker(
 
 fn update_chunk_loaded(
     trigger: On<ChunkLoaderChunkChange>,
-    chunk_q: Query<(&ChunkLoader, &CurrentChunk)>,
+    chunk_loader_q: Query<(&ChunkLoader, &CurrentChunk)>,
     chunk_manager: Res<ChunkManager>,
+    lod_q: Query<&LOD>,
     mut commands: Commands,
 ) {
-    let Ok((&ChunkLoader(range), &CurrentChunk(pos))) = chunk_q.get(trigger.entity) else {
+    let Ok((loader, &CurrentChunk(center_pos))) = chunk_loader_q.get(trigger.entity) else {
         return;
     };
-    if range == 0 {
-        if !chunk_manager.is_loaded(&pos) {
-            commands.spawn((Chunk, ChunkPosition(pos)));
-        }
-        return;
-    }
-    let range = range as i32;
-    let min = pos - range;
-    let max = pos + range;
-    for x in min.x..max.x {
-        for y in min.y..max.y {
-            for z in min.z..max.z {
-                let pos = ivec3(x, y, z);
-                if !chunk_manager.is_loaded(&pos) {
-                    commands.spawn((Chunk, ChunkPosition(pos)));
+
+    let max_r = loader.lowest_distance + loader.hysteresis;
+    let min_bounds = center_pos - IVec3::splat(max_r);
+    let max_bounds = center_pos + IVec3::splat(max_r);
+
+    for x in min_bounds.x..=max_bounds.x {
+        for y in min_bounds.y..=max_bounds.y {
+            for z in min_bounds.z..=max_bounds.z {
+                let chunk_pos = ivec3(x, y, z);
+                let distance = (chunk_pos - center_pos).abs().max_element();
+
+                let existing_entity = chunk_manager.get_chunk(&chunk_pos);
+                let current_lod = existing_entity.and_then(|e| lod_q.get(e).ok().copied());
+
+                let target_lod = loader.calculate_lod(distance, current_lod);
+
+                match (existing_entity, target_lod, current_lod) {
+                    (Some(entity), Some(new_lod), Some(old_lod)) => {
+                        if new_lod != old_lod {
+                            commands.entity(entity).insert(new_lod);
+                        }
+                    }
+                    (None, Some(new_lod), _) => {
+                        commands.spawn((Chunk, ChunkPosition(chunk_pos), new_lod));
+                    }
+                    _ => {}
                 }
             }
         }
     }
 }
 
-#[derive(Resource, Default)]
-pub struct ShowChunkBounds;
+// Visualizer Systems
 
 fn configure_gizmo_depth_bias(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    config.depth_bias = -0.001; // negative pulls lines toward the camera, wins depth test reliably
+    config.depth_bias = -1.0;
 }
 
-/// Shows all existing chunk boundaries using gizmos
-fn chunk_boundry_visualizer(chunks: Query<&ChunkPosition>, mut gizmos: Gizmos) {
-    for ChunkPosition(chunk_pos) in chunks.iter() {
-        let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
+fn chunk_boundry_visualizer(chunk_q: Query<(&Transform, &LOD), With<Chunk>>, mut gizmos: Gizmos) {
+    let half_size = Vec3::splat(CHUNK_SIZE * 0.5);
+    for (transform, lod) in chunk_q.iter() {
+        let color = match lod {
+            LOD::High => Color::srgb(0.0, 1.0, 0.0),   // Green
+            LOD::Medium => Color::srgb(1.0, 1.0, 0.0), // Yellow
+            LOD::Low => Color::srgb(1.0, 0.5, 0.0),    // Orange
+            LOD::Lowest => Color::srgb(1.0, 0.0, 0.0), // Red
+        };
 
-        // 8 corners of the box
-        let p000 = origin;
-        let p100 = origin + Vec3::new(CHUNK_SIZE, 0.0, 0.0);
-        let p010 = origin + Vec3::new(0.0, CHUNK_SIZE, 0.0);
-        let p110 = origin + Vec3::new(CHUNK_SIZE, CHUNK_SIZE, 0.0);
-
-        let p001 = origin + Vec3::new(0.0, 0.0, CHUNK_SIZE);
-        let p101 = origin + Vec3::new(CHUNK_SIZE, 0.0, CHUNK_SIZE);
-        let p011 = origin + Vec3::new(0.0, CHUNK_SIZE, CHUNK_SIZE);
-        let p111 = origin + Vec3::new(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE);
-
-        let color = bevy::color::palettes::tailwind::GREEN_500;
-
-        // bottom rectangle
-        gizmos.line(p000, p100, color);
-        gizmos.line(p100, p110, color);
-        gizmos.line(p110, p010, color);
-        gizmos.line(p010, p000, color);
-
-        // top rectangle
-        gizmos.line(p001, p101, color);
-        gizmos.line(p101, p111, color);
-        gizmos.line(p111, p011, color);
-        gizmos.line(p011, p001, color);
-
-        // vertical edges
-        gizmos.line(p000, p001, color);
-        gizmos.line(p100, p101, color);
-        gizmos.line(p110, p111, color);
-        gizmos.line(p010, p011, color);
+        let center = transform.translation + half_size;
+        gizmos.cube(
+            Transform::from_translation(center).with_scale(Vec3::splat(CHUNK_SIZE)),
+            color,
+        );
     }
 }
