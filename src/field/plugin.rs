@@ -1,9 +1,12 @@
+use std::marker::PhantomData;
+
 use bevy::ecs::component::Mutable;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
 
 use crate::LOD;
 use crate::chunk::NewChunkSpawned;
+use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDFField, VisibilityField};
 
 use super::{
@@ -21,6 +24,35 @@ pub enum FieldSet {
     Reinit,
 }
 
+/// Registers a single material channel (`MaterialField<M>`) with the app —
+/// its edit messages/systems, and the observer that attaches it to new
+/// chunks. Add one of these per material enum you use; most projects need
+/// exactly one, but nothing stops registering a second channel (e.g. a
+/// separate cave-stratum material) alongside it.
+pub struct MaterialFieldPlugin<M: VoxelMaterial>(PhantomData<M>);
+
+impl<M: VoxelMaterial> MaterialFieldPlugin<M> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: VoxelMaterial> Default for MaterialFieldPlugin<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
+    fn build(&self, app: &mut App) {
+        app.add_field::<MaterialField<M>, M>();
+        app.add_observer(material_build_on_chunk_spawn::<M>);
+    }
+}
+
+/// Registers the fields every chunk always has: SDF (topology) and
+/// visibility (cull mask). Material is opt-in via `MaterialFieldPlugin<M>`
+/// since only the end user knows their material enum.
 pub struct FieldsPlugin;
 
 impl Plugin for FieldsPlugin {
@@ -29,11 +61,9 @@ impl Plugin for FieldsPlugin {
         app.add_systems(Update, reinit_dirty_sdf.in_set(FieldSet::Reinit));
 
         app.add_field::<SDFField, f32>()
-            .add_field::<MaterialField, u8>()
             .add_field::<VisibilityField, bool>();
 
         app.add_observer(sdf_build_on_chunk_spawn)
-            .add_observer(material_build_on_chunk_spawn)
             .add_observer(visibility_build_on_chunk_spawn);
     }
 }
@@ -50,7 +80,7 @@ impl AppFieldExt for App {
     fn add_field<F, V>(&mut self) -> &mut Self
     where
         F: Field<V> + Component<Mutability = Mutable>,
-        V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt, // Fixed: Removed the semicolon here!
+        V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt,
     {
         // 1. Register the custom Messages/Events for this field type
         self.add_message::<EditFieldMessage<F, Sphere, V>>()
@@ -83,23 +113,29 @@ fn sdf_build_on_chunk_spawn(
 fn visibility_build_on_chunk_spawn(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
+    lod_q: Query<&LOD>,
     chunk_q: Query<(), With<VisibilityField>>,
 ) {
     let NewChunkSpawned { entity, .. } = trigger.event();
     if chunk_q.get(*entity).is_ok() {
         return;
     }
-    commands.entity(*entity).insert(VisibilityField::default());
+    let lod = lod_q.get(*entity).copied().unwrap_or_default();
+    commands.entity(*entity).insert(VisibilityField::new(lod));
 }
 
-fn material_build_on_chunk_spawn(
+fn material_build_on_chunk_spawn<M: VoxelMaterial>(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
-    chunk_q: Query<(), With<MaterialField>>,
+    lod_q: Query<&LOD>,
+    chunk_q: Query<(), With<MaterialField<M>>>,
 ) {
     let NewChunkSpawned { entity, .. } = trigger.event();
     if chunk_q.get(*entity).is_ok() {
         return;
     }
-    commands.entity(*entity).insert(MaterialField::default());
+    let lod = lod_q.get(*entity).copied().unwrap_or_default();
+    commands
+        .entity(*entity)
+        .insert(MaterialField::<M>::new(lod));
 }
