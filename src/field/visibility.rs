@@ -24,6 +24,37 @@ impl VisibilityField {
     }
 
     #[inline]
+    pub fn is_uniform(&self) -> Option<bool> {
+        let total_bits = self.total_bits();
+        let full_words = total_bits / 64;
+        let remaining_bits = total_bits % 64;
+
+        let mut all_zero = true;
+        let mut all_ones = true;
+
+        for &w in &self.words[..full_words] {
+            all_zero &= w == 0;
+            all_ones &= w == u64::MAX;
+            if !all_zero && !all_ones {
+                return None;
+            }
+        }
+
+        if remaining_bits > 0 {
+            let mask = (1u64 << remaining_bits) - 1;
+            let tail = self.words[full_words] & mask;
+            all_zero &= tail == 0;
+            all_ones &= tail == mask;
+        }
+
+        match (all_zero, all_ones) {
+            (false, false) => None,
+            (_, true) => Some(true),
+            _ => Some(false),
+        }
+    }
+
+    #[inline]
     pub fn all_false(&self) -> bool {
         let total_bits = self.total_bits();
         let full_words = total_bits / 64;
