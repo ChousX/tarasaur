@@ -75,15 +75,3 @@ pub struct MeshReadbackChannel {
 pub struct MeshReadbackChannelReceiver {
     pub receiver: Receiver<CollisionMeshData>,
 }
-
-// types.rs
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ChunkMeta {
-    pub chunk_world_origin: [f32; 3],
-    pub voxel_size: f32,
-    pub sdf_offset: u32,  // element offset into sdf_buffer
-    pub cell_offset: u32, // element offset into flags/offsets/index-adjacent buffers
-    active_list_pos: u32,
-    pub _pad: u32,
-}

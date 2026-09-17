@@ -3,11 +3,15 @@ use std::marker::PhantomData;
 use bevy::ecs::component::Mutable;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
+use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::LOD;
 use crate::chunk::NewChunkSpawned;
 use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDFField, VisibilityField};
+use crate::voxel::systems::{
+    extract_voxel_chunks, prepare_material_for_arena, prepare_voxel_arena,
+};
 
 use super::{
     Field,
@@ -47,6 +51,23 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
         app.add_field::<MaterialField<M>, M>();
         app.add_observer(material_build_on_chunk_spawn::<M>);
+
+        // extract_voxel_chunks<T> was already generalized to any
+        // T: Versionable + ApronSample, so this is the whole extraction
+        // side for free — MaterialField<M> already satisfies the bound.
+        // Its own Local<HashMap<...>> dirty-cache is independent of
+        // SDFField's, which is the point.
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        render_app
+            .add_systems(ExtractSchedule, extract_voxel_chunks::<MaterialField<M>>)
+            .add_systems(
+                Render,
+                prepare_material_for_arena::<M>
+                    .after(prepare_voxel_arena::<SDFField>)
+                    .in_set(RenderSystems::Prepare),
+            );
     }
 }
 
@@ -82,11 +103,9 @@ impl AppFieldExt for App {
         F: Field<V> + Component<Mutability = Mutable>,
         V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt,
     {
-        // 1. Register the custom Messages/Events for this field type
         self.add_message::<EditFieldMessage<F, Sphere, V>>()
             .add_message::<EditFieldMessage<F, Cuboid, V>>();
 
-        // 2. Attach the generic edit execution systems into the Edit schedule set
         self.add_systems(
             Update,
             (process_sphere_edits::<F, V>, process_box_edits::<F, V>).in_set(FieldSet::Edit),

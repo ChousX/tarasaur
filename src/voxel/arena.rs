@@ -22,6 +22,7 @@ fn max_chunks(
     let limit = (render_device.limits().max_storage_buffer_binding_size as u64 * 9) / 10;
 
     let sdf_bytes = sdf_elems_per_chunk as u64 * 4;
+    let material_bytes = sdf_elems_per_chunk as u64;
     let flags_bytes = total_cells as u64 * 4;
     let offsets_bytes = total_cells as u64 * 4;
     let scattered_bytes = budget_cells_per_chunk as u64 * 32;
@@ -30,6 +31,7 @@ fn max_chunks(
 
     let worst_bytes_per_chunk = [
         sdf_bytes,
+        material_bytes,
         flags_bytes,
         offsets_bytes,
         scattered_bytes,
@@ -57,11 +59,7 @@ fn max_chunks(
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub struct ChunkMeta {
     pub chunk_world_origin: [f32; 3],
-    pub voxel_size: f32,
-    pub sdf_offset: u32,
-    pub cell_offset: u32,
-    pub active_list_pos: u32, // was `vertex_offset` — now dead, replaced by dynamic bases
-    pub _pad: u32,
+    pub active_list_pos: u32,
 }
 
 #[derive(Resource)]
@@ -75,6 +73,7 @@ pub struct VoxelChunkArena {
     pub budget_cells_per_chunk: u32, // provisioned vertex/index budget per chunk (ACTIVE_FRACTION_ESTIMATE * total_cells)
 
     pub sdf_buffer: Buffer,
+    pub material_buffer: Buffer,
     pub flags_buffer: Buffer,
     pub compacted_offsets_buffer: Buffer,
     pub scattered_vertex_buffer: Buffer,
@@ -131,6 +130,12 @@ impl VoxelChunkArena {
         let sdf_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_sdf_buffer"),
             size: sdf_elems_per_chunk as u64 * 4 * max,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let material_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_material_buffer"),
+            size: sdf_elems_per_chunk as u64 * max,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -223,13 +228,16 @@ impl VoxelChunkArena {
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             });
 
+        let chunk_voxels = texture_size - 2;
+        let voxel_size = crate::CHUNK_SIZE / chunk_voxels as f32;
+
         #[repr(C)]
         #[derive(Clone, Copy, Pod, Zeroable)]
         struct BatchUniforms {
             cell_count: u32,
             texture_size: u32,
             wg_per_chunk_z: u32,
-            _pad0: u32,
+            voxel_size: f32,
         }
 
         // Pass 1 uses @workgroup_size(4, 4, 4) -> its own z-stride.
@@ -240,7 +248,7 @@ impl VoxelChunkArena {
                 cell_count,
                 texture_size,
                 wg_per_chunk_z: wg_per_chunk_z_pass1,
-                _pad0: 0,
+                voxel_size,
             }),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
@@ -257,7 +265,7 @@ impl VoxelChunkArena {
                     cell_count,
                     texture_size,
                     wg_per_chunk_z: wg_per_chunk_z_pass3,
-                    _pad0: 0,
+                    voxel_size,
                 }),
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             });
@@ -432,6 +440,10 @@ impl VoxelChunkArena {
                     binding: 10,
                     resource: active_slot_map_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 11,
+                    resource: material_buffer.as_entire_binding(),
+                },
             ],
         );
         let compaction_bind_group = render_device.create_bind_group(
@@ -534,6 +546,7 @@ impl VoxelChunkArena {
             overflow_readback_buffer,
             chunk_bases_uniform_buffer,
             chunk_bases_bind_group,
+            material_buffer,
         }
     }
 
@@ -556,6 +569,9 @@ impl VoxelChunkArena {
 
     pub fn active_chunk_count(&self) -> u32 {
         self.active_slots.len() as u32
+    }
+    pub fn existing_slot(&self, main_entity: MainEntity) -> Option<u32> {
+        self.slot_of_main_entity.get(&main_entity).copied()
     }
 }
 

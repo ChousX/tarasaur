@@ -13,10 +13,13 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, Versionable, VoxelDataSlice,
+    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, Versionable,
+    VoxelDataSlice, VoxelMaterial,
     voxel::{
         arena::{ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
-        pipeline::{VoxelDummyMaterial, VoxelPipelineLayouts, VoxelRasterPipeline},
+        pipeline::{
+            VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline,
+        },
         types::{CollisionMeshData, MeshReadbackChannel, PendingMeshReadback},
     },
 };
@@ -27,7 +30,7 @@ use super::{buffers::GpuVoxelChunkBuffers, pipeline::VoxelComputePipeline};
 pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub main_entity: MainEntity,
     pub chunk_pos: IVec3,
-    pub padded_sdf_data: Vec<u8>,
+    pub padded_data: Vec<u8>,
     pub size: u32,
     pub lod: LOD,
     pub _type: PhantomData<T>,
@@ -78,11 +81,9 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
         render_queue.write_buffer(
             &arena.sdf_buffer,
             sdf_offset_bytes,
-            &extracted_sdf.padded_sdf_data,
+            &extracted_sdf.padded_data,
         );
 
-        let chunk_voxels = size - 2;
-        let voxel_size = CHUNK_SIZE / chunk_voxels as f32;
         let chunk_world_origin = extracted_sdf.chunk_pos.as_vec3() * CHUNK_SIZE;
 
         // active_list_pos is unknown until arena.active_slots is finalized for
@@ -90,11 +91,7 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
         // Written as 0 here as a placeholder; patched immediately after.
         let meta = ChunkMeta {
             chunk_world_origin: chunk_world_origin.into(),
-            voxel_size,
-            sdf_offset: slot * arena.sdf_elems_per_chunk,
-            cell_offset: slot * arena.total_cells,
             active_list_pos: 0,
-            _pad: 0,
         };
         render_queue.write_buffer(
             &arena.chunk_meta_buffer,
@@ -141,6 +138,61 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
             0,
             bytemuck::bytes_of(&(arena.active_slots.len() as u32)),
         );
+    }
+}
+
+/// Sibling to `prepare_voxel_arena`, not a reuse of it — that function's
+/// body is SDF-specific (hardcodes `sdf_buffer`/`sdf_elems_per_chunk`/
+/// `meta.sdf_offset`) despite being generic over `T`. This system owns the
+/// material upload instead of trying to force-fit into that one.
+///
+/// Must run after `prepare_voxel_arena::<SDFField>` in the same Prepare
+/// set — that system owns slot allocation and the initial full `ChunkMeta`
+/// write; this one only ever looks a slot up.
+pub fn prepare_material_for_arena<M: VoxelMaterial>(
+    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    render_queue: Res<RenderQueue>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<MaterialField<M>>)>,
+    mut commands: Commands,
+) {
+    for (extracted_entity, extracted_material) in extracted_chunks.iter() {
+        let Some(arena) = arena_set.arenas.get_mut(&extracted_material.lod) else {
+            // Arena for this LOD doesn't exist yet (SDF extraction hasn't
+            // produced one). Drop this frame's upload — it'll be retried
+            // the next time this chunk's material data changes, which in
+            // practice is frame 1 for every chunk (material spawns
+            // alongside SDF, so both extract together the first time).
+            warn!(
+                "[prepare_material_for_arena] no arena for LOD {:?}, dropping material for chunk {:?}",
+                extracted_material.lod, extracted_material.chunk_pos
+            );
+            commands.entity(extracted_entity).despawn();
+            continue;
+        };
+
+        let Some(slot) = arena.existing_slot(extracted_material.main_entity) else {
+            warn!(
+                "[prepare_material_for_arena] no slot yet for chunk {:?}, dropping this frame's material upload",
+                extracted_material.chunk_pos
+            );
+            commands.entity(extracted_entity).despawn();
+            continue;
+        };
+
+        debug_assert_eq!(
+            extracted_material.size, arena.texture_size,
+            "mixed LOD in one arena — bucket by LOD"
+        );
+
+        // 1 byte/elem, same element count as the SDF payload for this slot.
+        let material_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64;
+        render_queue.write_buffer(
+            &arena.material_buffer,
+            material_offset_bytes,
+            &extracted_material.padded_data,
+        );
+
+        commands.entity(extracted_entity).despawn();
     }
 }
 
@@ -457,7 +509,7 @@ pub fn voxel_raster_pass(
     arena_set: Option<Res<VoxelChunkArenaSet>>,
     pipeline_cache: Res<PipelineCache>,
     raster_pipeline: Res<VoxelRasterPipeline>,
-    voxel_material: Res<VoxelDummyMaterial>,
+    voxel_material: Res<VoxelMaterialBindGroup>,
     mut ctx: RenderContext,
 ) {
     // Arena set may not exist yet (frame 0, before any chunk has been extracted).
@@ -486,7 +538,7 @@ pub fn voxel_raster_pass(
         }],
     );
 
-    let material_bind_group = &voxel_material.bind_group;
+    let material_bind_group = &voxel_material.0;
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),
@@ -626,17 +678,17 @@ pub fn extract_voxel_chunks<T>(
     query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
     mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
 ) where
-    T: Send + Sync + 'static + Component + Versionable + VoxelDataSlice,
+    T: Send + Sync + 'static + Component + Versionable + ApronSample,
 {
-    for (entity, pos, sdf, lod) in query.iter() {
+    for (entity, pos, field, lod) in query.iter() {
         let size = lod.size();
 
         let mut versions = [0u64; 8];
-        versions[0] = sdf.version(); // Updated from field access to Versionable trait method
+        versions[0] = field.version();
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
-                if let Ok((_, _, n_sdf, _)) = query.get(n_entity) {
-                    versions[i + 1] = n_sdf.version(); // Updated from field access to Versionable trait method
+                if let Ok((_, _, n_field, _)) = query.get(n_entity) {
+                    versions[i + 1] = n_field.version();
                 }
             }
         }
@@ -647,9 +699,9 @@ pub fn extract_voxel_chunks<T>(
         last_versions.insert(pos.0, versions);
 
         let padded_size = size + PADDING;
-        let mut vol = vec![0.0f32; (padded_size * padded_size * padded_size) as usize];
+        let mut vol = vec![T::Elem::default(); (padded_size * padded_size * padded_size) as usize];
 
-        let raw = sdf.data_slice();
+        let raw = field.data_slice();
         for z in 0..size {
             for y in 0..size {
                 for x in 0..size {
@@ -660,13 +712,13 @@ pub fn extract_voxel_chunks<T>(
             }
         }
 
-        fill_apron(&mut vol, pos.0, &chunk_manager, &query);
+        fill_apron::<T>(&mut vol, pos.0, &chunk_manager, &query);
 
-        let padded_sdf_data: Vec<u8> = bytemuck::cast_slice(&vol).to_vec();
+        let padded_data: Vec<u8> = bytemuck::cast_slice(&vol).to_vec();
         commands.spawn(ExtractedChunkField::<T> {
             main_entity: entity.into(),
             chunk_pos: pos.0,
-            padded_sdf_data,
+            padded_data,
             size: padded_size,
             lod: *lod,
             _type: PhantomData,
@@ -677,12 +729,12 @@ pub fn extract_voxel_chunks<T>(
 const PADDING: u32 = 2;
 
 pub fn fill_apron<T>(
-    vol: &mut [f32],
+    vol: &mut [T::Elem],
     chunk_pos: IVec3,
     chunk_manager: &ChunkManager,
     query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
 ) where
-    T: Component + VoxelDataSlice,
+    T: Component + ApronSample,
 {
     let Some(current_entity) = chunk_manager.get_chunk(&chunk_pos) else {
         return;
@@ -697,12 +749,12 @@ pub fn fill_apron<T>(
     let idx =
         |x: u32, y: u32, z: u32| -> usize { ((z * padded_size + y) * padded_size + x) as usize };
 
-    let neighbor_info = |offset: IVec3| -> Option<(Box<[f32]>, u32)> {
+    let neighbor_info = |offset: IVec3| -> Option<(Box<[T::Elem]>, u32)> {
         let n_entity = chunk_manager.get_chunk(&(chunk_pos + offset))?;
-        let Ok((_, _, n_sdf, n_lod)) = query.get(n_entity) else {
+        let Ok((_, _, n_field, n_lod)) = query.get(n_entity) else {
             return None;
         };
-        let data = n_sdf.data_slice().to_vec().into_boxed_slice();
+        let data = n_field.data_slice().to_vec().into_boxed_slice();
         Some((data, n_lod.size()))
     };
 
@@ -715,7 +767,7 @@ pub fn fill_apron<T>(
                 coords.push((x_target, y, z));
             }
         }
-        fill_region(
+        fill_region::<T>(
             vol,
             chunk_size,
             IVec3::new(1, 0, 0),
@@ -734,7 +786,7 @@ pub fn fill_apron<T>(
                 coords.push((x, y_target, z));
             }
         }
-        fill_region(
+        fill_region::<T>(
             vol,
             chunk_size,
             IVec3::new(0, 1, 0),
@@ -753,7 +805,7 @@ pub fn fill_apron<T>(
                 coords.push((x, y, z_target));
             }
         }
-        fill_region(
+        fill_region::<T>(
             vol,
             chunk_size,
             IVec3::new(0, 0, 1),
@@ -771,7 +823,7 @@ pub fn fill_apron<T>(
             for z in 0..chunk_size {
                 coords.push((chunk_size + dx, chunk_size + dy, z));
             }
-            fill_region(
+            fill_region::<T>(
                 vol,
                 chunk_size,
                 IVec3::new(1, 1, 0),
@@ -789,7 +841,7 @@ pub fn fill_apron<T>(
             for y in 0..chunk_size {
                 coords.push((chunk_size + dx, y, chunk_size + dz));
             }
-            fill_region(
+            fill_region::<T>(
                 vol,
                 chunk_size,
                 IVec3::new(1, 0, 1),
@@ -807,7 +859,7 @@ pub fn fill_apron<T>(
             for x in 0..chunk_size {
                 coords.push((x, chunk_size + dy, chunk_size + dz));
             }
-            fill_region(
+            fill_region::<T>(
                 vol,
                 chunk_size,
                 IVec3::new(0, 1, 1),
@@ -824,7 +876,7 @@ pub fn fill_apron<T>(
         for dy in 0..PADDING {
             for dz in 0..PADDING {
                 let coords = vec![(chunk_size + dx, chunk_size + dy, chunk_size + dz)];
-                fill_region(
+                fill_region::<T>(
                     vol,
                     chunk_size,
                     IVec3::new(1, 1, 1),
@@ -838,17 +890,16 @@ pub fn fill_apron<T>(
     }
 }
 
-fn fill_region(
-    vol: &mut [f32],
+fn fill_region<T: ApronSample>(
+    vol: &mut [T::Elem],
     chunk_size: u32,
     offset: IVec3,
     iter_ranges: &[(u32, u32, u32)],
     fallback_idx: impl Fn(u32, u32, u32) -> usize,
-    neighbor_info: &impl Fn(IVec3) -> Option<(Box<[f32]>, u32)>,
+    neighbor_info: &impl Fn(IVec3) -> Option<(Box<[T::Elem]>, u32)>,
     idx: &impl Fn(u32, u32, u32) -> usize,
 ) {
     if let Some((nx_data, n_size)) = neighbor_info(offset) {
-        //let scale_ratio = chunk_size as f32 / n_size as f32;
         let scale_ratio = n_size as f32 / chunk_size as f32;
 
         for &(cx, cy, cz) in iter_ranges {
@@ -872,7 +923,7 @@ fn fill_region(
             let ny_coord = local_y * scale_ratio;
             let nz_coord = local_z * scale_ratio;
 
-            let val = sample_neighbor(&nx_data, n_size, nx_coord, ny_coord, nz_coord);
+            let val = T::sample_apron(&nx_data, n_size, nx_coord, ny_coord, nz_coord);
             vol[idx(cx, cy, cz)] = val;
         }
     } else {
@@ -885,7 +936,12 @@ fn fill_region(
     }
 }
 
-fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
+/// Trilinear neighbor sampling — meaningful for continuous data like SDF
+/// distances. Used by `SDFField`'s `ApronSample` impl. Not exported for
+/// general use: categorical fields (e.g. material ids) must not blend
+/// samples this way — see `MaterialField`'s nearest-neighbor `ApronSample`
+/// impl instead.
+pub fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
     let max_coord = (size - 1) as f32;
     let x = x.clamp(0.0, max_coord);
     let y = y.clamp(0.0, max_coord);

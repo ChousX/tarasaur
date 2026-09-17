@@ -3,16 +3,16 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 
 pub mod editor;
-mod lod;
-mod material;
+pub mod lod;
+pub mod material;
 pub mod ops;
-mod plugin;
-mod sdf;
+pub mod plugin;
+pub mod sdf;
 pub mod systems;
-mod visibility;
-
+pub mod visibility;
 pub use lod::LOD;
 pub use material::MaterialField;
+pub use material::VoxelMaterial;
 pub use plugin::AppFieldExt;
 pub use plugin::{FieldSet, FieldsPlugin};
 pub use sdf::SDFField;
@@ -60,6 +60,18 @@ pub trait Versionable: Component {
     fn incorment_version(&mut self);
 }
 
+/// A field whose backing storage can be uploaded to the GPU as a flat byte
+/// buffer. `Elem` is the raw stored type — f32 for SDF distances, u8 for
+/// packed material ids.
 pub trait VoxelDataSlice {
-    fn data_slice(&self) -> &[f32];
+    type Elem: bytemuck::Pod + Default;
+    fn data_slice(&self) -> &[Self::Elem];
+}
+
+/// How a field samples its own data at a non-integer (neighbor-chunk)
+/// coordinate when building the padding apron. SDF distances interpolate
+/// meaningfully (trilinear); material ids are categorical and must never be
+/// blended, so they use nearest-neighbor instead.
+pub trait ApronSample: VoxelDataSlice {
+    fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem;
 }

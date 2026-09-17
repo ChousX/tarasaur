@@ -18,7 +18,10 @@ use crate::{
     SDFField,
     voxel::{
         arena::{VoxelChunkArena, VoxelChunkArenaSet},
-        pipeline::{VoxelDummyMaterial, VoxelRasterPipeline},
+        pipeline::{
+            VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
+            update_voxel_material_bind_group,
+        },
         systems::{
             dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_voxel_arena,
             queue_mesh_readback_maps, voxel_raster_pass,
@@ -94,6 +97,7 @@ impl Plugin for VoxelRenderPlugin {
                     )
                         .chain()
                         .in_set(RenderSystems::Prepare),
+                    update_voxel_material_bind_group.in_set(RenderSystems::Prepare), // NEW — independent of arena prep, no ordering needed
                     dispatch_voxel_compute_passes_batched.in_set(RenderSystems::Queue),
                     queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
                 ),
@@ -109,6 +113,7 @@ impl Plugin for VoxelRenderPlugin {
         render_app
             .init_resource::<VoxelRasterPipeline>()
             .init_resource::<VoxelDummyMaterial>()
+            .init_resource::<VoxelMaterialBindGroup>()
             .init_resource::<VoxelPipelineLayouts>()
             .init_resource::<VoxelComputePipeline>();
     }

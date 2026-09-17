@@ -1,9 +1,8 @@
 //! Builder for constructing texture palettes.
 
-use bevy::prelude::*;
-
 use super::asset::TexturePalette;
 use super::properties::PaletteMaterial;
+use bevy::prelude::*;
 
 /// Builder for creating [`TexturePalette`] instances.
 ///

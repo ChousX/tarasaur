@@ -11,7 +11,7 @@ pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkManager>()
-            .init_resource::<ShowChunkBounds>()
+            //.init_resource::<ShowChunkBounds>()
             .add_observer(new_chunk_spawned)
             .add_systems(Update, chunk_loader_boundry_checker)
             .add_observer(update_chunk_loaded)

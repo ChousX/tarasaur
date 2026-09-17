@@ -1,4 +1,4 @@
-use crate::{Versionable, VoxelDataSlice};
+use crate::{ApronSample, Versionable, VoxelDataSlice};
 
 use super::{Field, LOD};
 use bevy::prelude::*;
@@ -292,8 +292,15 @@ impl Versionable for SDFField {
 }
 
 impl VoxelDataSlice for SDFField {
+    type Elem = f32;
     #[inline]
     fn data_slice(&self) -> &[f32] {
         &self.data
+    }
+}
+
+impl ApronSample for SDFField {
+    fn sample_apron(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
+        crate::voxel::systems::sample_neighbor(data, size, x, y, z)
     }
 }

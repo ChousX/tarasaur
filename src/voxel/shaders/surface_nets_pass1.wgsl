@@ -13,20 +13,17 @@ struct BatchUniforms {
     cell_count: u32,
     texture_size: u32,
     wg_per_chunk_z: u32,
-    _pad0: u32,
+    voxel_size: f32, // unused here — kept for byte-layout parity with pass3's copy of this struct
 };
 @group(0) @binding(6) var<uniform> uniforms: BatchUniforms;
 
-struct ChunkMeta {
-    chunk_world_origin: vec3<f32>,
-    voxel_size: f32,
-    sdf_offset: u32,
-    cell_offset: u32,
-    active_list_pos: u32,
-    _pad: u32,
-}
-@group(0) @binding(7) var<storage, read> chunk_meta: array<ChunkMeta>;
 @group(0) @binding(8) var<storage, read> active_slot_map: array<u32>;
+
+// chunk_meta (binding 7) is no longer read by this pass — sdf_offset and
+// cell_offset are derived below from real_slot + the constants above, and
+// pass1 never needed chunk_world_origin/active_list_pos. The Rust-side
+// bind group layout still reserves binding 7 (harmless if unused) so
+// pass1 and pass3 keep sharing layout-construction code unchanged.
 
 fn flatten_cell_idx(coord: vec3<u32>, cell_count: u32) -> u32 {
     return coord.z * cell_count * cell_count + coord.y * cell_count + coord.x;
@@ -34,6 +31,16 @@ fn flatten_cell_idx(coord: vec3<u32>, cell_count: u32) -> u32 {
 
 fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
     return coord.z * texture_size * texture_size + coord.y * texture_size + coord.x;
+}
+
+// Pure functions of slot + per-arena constants — replaces the per-chunk
+// ChunkMeta.sdf_offset / .cell_offset fields this pass used to read.
+fn sdf_offset_for(slot: u32) -> u32 {
+    return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
+}
+
+fn cell_offset_for(slot: u32) -> u32 {
+    return slot * uniforms.cell_count * uniforms.cell_count * uniforms.cell_count;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -47,7 +54,8 @@ fn cs_main(
     let cell_coord = vec3<u32>(global_id.x, global_id.y, local_wg_z * 4u + local_id.z);
 
     let real_slot = active_slot_map[chunk_idx];
-    let cmeta = chunk_meta[real_slot];
+    let sdf_base = sdf_offset_for(real_slot);
+    let cell_base = cell_offset_for(real_slot);
     let cell_count = uniforms.cell_count;
 
     if (all(cell_coord == vec3<u32>(0u))) {
@@ -68,12 +76,12 @@ fn cs_main(
     var inside_count = 0u;
     for (var i = 0u; i < 8u; i = i + 1u) {
         let pos = cell_coord + offsets[i];
-        let val = sdf_buffer[cmeta.sdf_offset + flatten_sdf_idx(pos, uniforms.texture_size)];
+        let val = sdf_buffer[sdf_base + flatten_sdf_idx(pos, uniforms.texture_size)];
         if (val <= 0.0) {
             inside_count = inside_count + 1u;
         }
     }
 
-    let flat_idx = cmeta.cell_offset + flatten_cell_idx(cell_coord, cell_count);
+    let flat_idx = cell_base + flatten_cell_idx(cell_coord, cell_count);
     flags_buffer[flat_idx] = select(0u, 1u, inside_count > 0u && inside_count < 8u);
 }

@@ -1,4 +1,7 @@
-use crate::ops::{AccumulateExt, BlendExt};
+use crate::{
+    ApronSample, Versionable, VoxelDataSlice,
+    ops::{AccumulateExt, BlendExt},
+};
 
 use super::{Field, LOD};
 use bevy::prelude::*;
@@ -71,4 +74,30 @@ pub trait VoxelMaterial:
 
     fn to_id(self) -> u8;
     fn from_id(id: u8) -> Self;
+}
+impl<M: VoxelMaterial> VoxelDataSlice for MaterialField<M> {
+    type Elem = u8;
+    fn data_slice(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl<M: VoxelMaterial> ApronSample for MaterialField<M> {
+    fn sample_apron(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
+        let max_coord = (size - 1) as f32;
+        let xi = x.round().clamp(0.0, max_coord) as usize;
+        let yi = y.round().clamp(0.0, max_coord) as usize;
+        let zi = z.round().clamp(0.0, max_coord) as usize;
+        let s = size as usize;
+        data[(zi * s + yi) * s + xi]
+    }
+}
+
+impl<M: VoxelMaterial> Versionable for MaterialField<M> {
+    fn version(&self) -> u64 {
+        self.version
+    }
+    fn incorment_version(&mut self) {
+        self.version += 1;
+    }
 }

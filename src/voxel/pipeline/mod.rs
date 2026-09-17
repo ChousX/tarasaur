@@ -4,17 +4,21 @@ use bevy::{
     mesh::VertexBufferLayout,
     prelude::*,
     render::{
+        render_asset::RenderAssets,
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
+        texture::GpuImage,
     },
 };
 use std::borrow::Cow;
 
-use crate::voxel::{
-    COMPUTE_CHUNK_BASES_SHADER_HANDLE, STREAM_COMPACTION_SHADER_HANDLE,
-    SURFACE_NETS_PASS1_SHADER_HANDLE, SURFACE_NETS_PASS3_SHADER_HANDLE,
+use crate::{
+    texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
+    voxel::{
+        COMPUTE_CHUNK_BASES_SHADER_HANDLE, STREAM_COMPACTION_SHADER_HANDLE,
+        SURFACE_NETS_PASS1_SHADER_HANDLE, SURFACE_NETS_PASS3_SHADER_HANDLE,
+    },
 };
-
 #[derive(Resource)]
 pub struct VoxelPipelineLayouts {
     pub pass1_surface_layout: BindGroupLayout,
@@ -185,10 +189,12 @@ impl FromWorld for VoxelComputePipeline {
         }
     }
 }
+
 #[derive(Resource)]
 pub struct VoxelDummyMaterial {
     pub texture_view: TextureView,
     pub sampler: Sampler,
+    pub properties_buffer: Buffer,
     pub bind_group: BindGroup,
 }
 
@@ -203,7 +209,7 @@ impl FromWorld for VoxelDummyMaterial {
             size: Extent3d {
                 width: 1,
                 height: 1,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: 1, // 1-layer array, not a plain 2D texture
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -233,12 +239,33 @@ impl FromWorld for VoxelDummyMaterial {
             },
         );
 
-        let texture_view = dummy_texture.create_view(&TextureViewDescriptor::default());
+        // ASSUMPTION: default_view creates a D2Array view for a texture
+        // with dimension D2 + array_layer_count 1 when array_layer_count
+        // is explicit — TextureViewDescriptor's dimension field defaults
+        // to inferring from the texture, which for a D2 texture with
+        // depth_or_array_layers > 0 declared as an array... WGPU actually
+        // needs the *view* dimension set explicitly to D2Array here, since
+        // a 1-layer D2 texture defaults its view to D2, not D2Array.
+        let texture_view = dummy_texture.create_view(&TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
         let sampler = render_device.create_sampler(&SamplerDescriptor {
             label: Some("voxel_dummy_sampler"),
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             ..default()
+        });
+
+        // Single dummy material entry — matches MaterialPropertiesGpu's
+        // layout exactly so the real buffer can later replace this
+        // 1-for-1 with no shader-side changes.
+        let dummy_properties = [0.1f32, 4.0, -1.0, -1.0]; // texture_scale, blend_sharpness, roughness_override, metallic_override
+        let properties_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_dummy_material_properties_buffer"),
+            contents: bytemuck::cast_slice(&dummy_properties),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
         let bind_group = render_device.create_bind_group(
@@ -253,12 +280,17 @@ impl FromWorld for VoxelDummyMaterial {
                     binding: 1,
                     resource: BindingResource::Sampler(&sampler),
                 },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: properties_buffer.as_entire_binding(),
+                },
             ],
         );
 
         Self {
             texture_view,
             sampler,
+            properties_buffer,
             bind_group,
         }
     }
@@ -298,7 +330,7 @@ impl FromWorld for VoxelRasterPipeline {
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Texture {
                     sample_type: TextureSampleType::Float { filterable: true },
-                    view_dimension: TextureViewDimension::D2,
+                    view_dimension: TextureViewDimension::D2Array,
                     multisampled: false,
                 },
                 count: None,
@@ -308,6 +340,18 @@ impl FromWorld for VoxelRasterPipeline {
                 binding: 1,
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                count: None,
+            },
+            // Binding 2: MaterialPropertiesArray — storage, not uniform, since
+            // it's runtime-sized (materials.len() varies per palette).
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             },
         ];
@@ -387,4 +431,110 @@ impl FromWorld for VoxelRasterPipeline {
             material_layout,
         }
     }
+}
+
+/// The bind group actually used by `voxel_raster_pass`. Starts out cloned
+/// from `VoxelDummyMaterial`'s bind group; `update_voxel_material_bind_group`
+/// replaces it once a real palette's albedo texture has finished loading.
+/// A separate resource rather than mutating `VoxelDummyMaterial` in place —
+/// the dummy stays available as a known-good fallback value to reset to
+/// if that's ever useful (e.g. palette hot-swap failing validation).
+#[derive(Resource)]
+pub struct VoxelMaterialBindGroup(pub BindGroup);
+
+impl FromWorld for VoxelMaterialBindGroup {
+    fn from_world(world: &mut World) -> Self {
+        // ASSUMPTION: BindGroup is Clone (an Arc-wrapped wgpu handle, per
+        // Bevy's usual render_resource wrapper convention). If this
+        // doesn't compile, the fallback is restructuring VoxelDummyMaterial
+        // to build a bind group once and have both resources hold a
+        // reference to the same underlying wgpu::BindGroup instead.
+        let dummy = world.resource::<VoxelDummyMaterial>();
+        Self(dummy.bind_group.clone())
+    }
+}
+
+/// Runs in RenderSystems::Prepare. Rebuilds VoxelMaterialBindGroup once
+/// the active palette's albedo image is loaded, and never again after
+/// that for the same albedo handle — in-place edits to palette.materials
+/// after the initial build won't hot-reload; only a handle change
+/// (different palette asset) triggers a rebuild. Acceptable for now since
+/// palette hot-editing isn't a stated requirement.
+pub fn update_voxel_material_bind_group(
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    raster_pipeline: Res<VoxelRasterPipeline>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    extracted: Option<Res<ExtractedPalette>>,
+    mut bind_group: ResMut<VoxelMaterialBindGroup>,
+    mut built_for: Local<Option<AssetId<Image>>>,
+) {
+    let Some(extracted) = extracted else {
+        return; // No PalettePlugin registered — keep the dummy.
+    };
+
+    let albedo_id = extracted.albedo.id();
+    if *built_for == Some(albedo_id) {
+        return; // Already built for this exact albedo — nothing changed.
+    }
+
+    // ASSUMPTION: GpuImage exposes `texture_view: TextureView` — field
+    // name based on Bevy's typical GpuImage shape; verify against actual
+    // compiler output if this doesn't match.
+    let Some(gpu_image) = gpu_images.get(&extracted.albedo) else {
+        return; // Not loaded/converted to GPU form yet — try again next frame.
+    };
+
+    let material_data: Vec<MaterialPropertiesGpu> = extracted
+        .materials
+        .iter()
+        .map(MaterialPropertiesGpu::from)
+        .collect();
+    // Guard against an empty palette — a zero-length storage buffer is
+    // invalid to create/bind. Falls back to a single dummy entry so the
+    // bind group is always valid even if `materials` is empty.
+    let material_bytes: Vec<MaterialPropertiesGpu> = if material_data.is_empty() {
+        vec![MaterialPropertiesGpu::default()]
+    } else {
+        material_data
+    };
+
+    let properties_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("voxel_material_properties_buffer"),
+        contents: bytemuck::cast_slice(&material_bytes),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+
+    let sampler = render_device.create_sampler(&SamplerDescriptor {
+        label: Some("voxel_material_sampler"),
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        address_mode_u: AddressMode::Repeat,
+        address_mode_v: AddressMode::Repeat,
+        address_mode_w: AddressMode::Repeat,
+        ..default()
+    });
+
+    let new_bind_group = render_device.create_bind_group(
+        Some("voxel_material_bind_group"),
+        &raster_pipeline.material_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&gpu_image.texture_view),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: BindingResource::Sampler(&sampler),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: properties_buffer.as_entire_binding(),
+            },
+        ],
+    );
+
+    bind_group.0 = new_bind_group;
+    *built_for = Some(albedo_id);
+    let _ = &render_queue; // kept for symmetry with other prepare systems; unused directly here since create_buffer_with_data already uploads
 }
