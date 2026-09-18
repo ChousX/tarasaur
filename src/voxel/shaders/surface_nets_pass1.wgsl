@@ -21,6 +21,11 @@ struct BatchUniforms {
 @group(0) @binding(9) var<storage, read> visibility_mask_buffer: array<u32>;
 @group(0) @binding(10) var<storage, read> chunk_has_mask_buffer: array<u32>;
 
+fn mask_words_per_chunk() -> u32 {
+    let elems = uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
+    return (elems + 31u) / 32u;
+}
+
 fn chunk_has_mask(slot: u32) -> bool {
     let word = chunk_has_mask_buffer[slot / 32u];
     return ((word >> (slot % 32u)) & 1u) != 0u;
@@ -87,11 +92,21 @@ fn cs_main(
     );
 
     var inside_count = 0u;
+    var visible_count = 0u;
+    let has_mask = chunk_has_mask(real_slot);
     for (var i = 0u; i < 8u; i = i + 1u) {
         let pos = cell_coord + offsets[i];
         let val = sdf_buffer[sdf_base + flatten_sdf_idx(pos, uniforms.texture_size)];
         if (val <= 0.0) {
             inside_count = inside_count + 1u;
+        }
+        // has_mask == false means this chunk is uniformly visible — the
+        // Some(false) case never reaches pass1 (extraction/dispatch skips
+        // those chunks upstream, once the active_slots gap above is
+        // resolved), so "no mask" here always means "fully visible," not
+        // "fully invisible."
+        if (!has_mask || sample_visibility(real_slot, pos)) {
+            visible_count = visible_count + 1u;
         }
     }
 
