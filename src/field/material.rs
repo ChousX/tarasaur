@@ -1,6 +1,7 @@
 use crate::{
     ApronSample, ExtractGate, Versionable, VoxelDataSlice,
     ops::{AccumulateExt, BlendExt},
+    voxel::systems::nearest_neighbor_sample,
 };
 
 use super::{Field, LOD};

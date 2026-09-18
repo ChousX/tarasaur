@@ -1,4 +1,4 @@
-use crate::{LOD, flatten_with_size};
+use crate::{ApronSample, ExtractGate, LOD, Versionable, VoxelDataSlice, flatten_with_size};
 // fields/visibility.rs
 use super::Field;
 use bevy::prelude::*;
@@ -7,13 +7,18 @@ use bevy::prelude::*;
 pub struct VisibilityField {
     pub lod: LOD,
     words: Box<[u64]>,
+    byte_mirror: Box<[u8]>, // authoritative, GPU-upload-sized representation
+    version: u64,
 }
 
 impl VisibilityField {
     pub fn new(lod: LOD) -> Self {
+        let volume = lod.volume();
         Self {
             lod,
             words: vec![0u64; words_for_lod(lod)].into_boxed_slice(),
+            byte_mirror: vec![0u8; volume].into_boxed_slice(),
+            version: 0,
         }
     }
 
@@ -114,16 +119,48 @@ impl Field<bool> for VisibilityField {
         let bit = flatten_with_size(x, y, z, size);
         let word_idx = (bit / 64) as usize;
         let shift = bit % 64;
-        if value {
-            self.words[word_idx] |= 1 << shift;
-        } else {
-            self.words[word_idx] &= !(1 << shift);
+        let old = ((self.words[word_idx] >> shift) & 1) == 1;
+        if old != value {
+            if value {
+                self.words[word_idx] |= 1 << shift;
+            } else {
+                self.words[word_idx] &= !(1 << shift);
+            }
+            self.byte_mirror[bit as usize] = value as u8;
+            self.version += 1;
         }
     }
 }
 
+impl VoxelDataSlice for VisibilityField {
+    type Elem = u8;
+    fn data_slice(&self) -> &[u8] {
+        &self.byte_mirror
+    }
+}
+
+impl ApronSample for VisibilityField {
+    fn sample_apron(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
+        crate::voxel::systems::nearest_neighbor_sample(data, size, x, y, z)
+    }
+}
+
+impl Versionable for VisibilityField {
+    fn version(&self) -> u64 {
+        self.version
+    }
+    fn incorment_version(&mut self) {
+        self.version += 1;
+    }
+}
+
+impl ExtractGate for VisibilityField {
+    fn should_extract(&self) -> bool {
+        self.is_uniform().is_none()
+    }
+}
+
 /// Number of u64 words needed to store one bit per voxel at the given LOD.
-#[inline]
 fn words_for_lod(lod: LOD) -> usize {
     lod.volume().div_ceil(64)
 }

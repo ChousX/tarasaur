@@ -753,16 +753,17 @@ pub fn nearest_neighbor_sample(data: &[u8], size: u32, x: f32, y: f32, z: f32) -
 pub fn extract_voxel_chunks<T>(
     mut commands: Commands,
     chunk_manager: Extract<Res<ChunkManager>>,
-    query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD, &VisibilityField)>>,
+    query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
+    visibility_query: Extract<Query<&VisibilityField>>,
     mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
 ) where
     T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
-    for (entity, pos, field, lod, visibility) in query.iter() {
-        // Fully-invisible chunk — nothing downstream is worth extracting.
-        // NOTE: does not yet stop this chunk from being drawn if it was
-        // already active from a previous frame — see the active_slots gap
-        // flagged separately. This only prevents new/changed uploads.
+    for (entity, pos, field, lod) in query.iter() {
+        let Ok(visibility) = visibility_query.get(entity) else {
+            continue; // FieldsPlugin guarantees this on every chunk; defensive only
+        };
+
         if visibility.is_uniform() == Some(false) {
             continue;
         }
@@ -773,23 +774,19 @@ pub fn extract_voxel_chunks<T>(
         versions[0] = field.version();
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
-                if let Ok((_, _, n_field, _, _)) = query.get(n_entity) {
+                if let Ok((_, _, n_field, _)) = query.get(n_entity) {
                     versions[i + 1] = n_field.version();
                 }
             }
         }
 
         if last_versions.get(&pos.0) == Some(&versions) {
-            continue; // genuinely unchanged — leave whatever state exists alone
+            continue;
         }
         last_versions.insert(pos.0, versions);
 
         let padded_size = size + PADDING;
 
-        // Field-level opt-out from the expensive padding/apron work —
-        // still spawns an artifact (with empty payload) so the Prepare
-        // side gets an explicit "this chunk's state changed to uniform"
-        // signal, distinct from the unchanged-case continue above.
         let padded_data: Vec<u8> = if field.should_extract() {
             let mut vol =
                 vec![T::Elem::default(); (padded_size * padded_size * padded_size) as usize];
