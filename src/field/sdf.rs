@@ -1,4 +1,4 @@
-use crate::{ApronSample, Versionable, VoxelDataSlice};
+use crate::{ApronSample, ExtractGate, Versionable, VoxelDataSlice};
 
 use super::{Field, LOD};
 use bevy::prelude::*;
@@ -304,3 +304,5 @@ impl ApronSample for SDFField {
         crate::voxel::systems::sample_neighbor(data, size, x, y, z)
     }
 }
+
+impl ExtractGate for SDFField {}

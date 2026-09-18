@@ -18,7 +18,20 @@ struct BatchUniforms {
 @group(0) @binding(6) var<uniform> uniforms: BatchUniforms;
 
 @group(0) @binding(8) var<storage, read> active_slot_map: array<u32>;
+@group(0) @binding(9) var<storage, read> visibility_mask_buffer: array<u32>;
+@group(0) @binding(10) var<storage, read> chunk_has_mask_buffer: array<u32>;
 
+fn chunk_has_mask(slot: u32) -> bool {
+    let word = chunk_has_mask_buffer[slot / 32u];
+    return ((word >> (slot % 32u)) & 1u) != 0u;
+}
+
+fn sample_visibility(slot: u32, coord: vec3<u32>) -> bool {
+    let local_bit = flatten_sdf_idx(coord, uniforms.texture_size);
+    let word_idx = slot * mask_words_per_chunk() + local_bit / 32u;
+    let word = visibility_mask_buffer[word_idx];
+    return ((word >> (local_bit % 32u)) & 1u) != 0u;
+}
 // chunk_meta (binding 7) is no longer read by this pass — sdf_offset and
 // cell_offset are derived below from real_slot + the constants above, and
 // pass1 never needed chunk_world_origin/active_list_pos. The Rust-side
@@ -83,5 +96,5 @@ fn cs_main(
     }
 
     let flat_idx = cell_base + flatten_cell_idx(cell_coord, cell_count);
-    flags_buffer[flat_idx] = select(0u, 1u, inside_count > 0u && inside_count < 8u);
+    flags_buffer[flat_idx] = select(0u, 1u, inside_count > 0u && inside_count < 8u && visible_count > 0u);
 }

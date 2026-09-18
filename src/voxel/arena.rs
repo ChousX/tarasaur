@@ -74,6 +74,8 @@ pub struct VoxelChunkArena {
 
     pub sdf_buffer: Buffer,
     pub material_buffer: Buffer,
+    pub visibility_mask_buffer: Buffer,
+    pub chunk_has_mask_buffer: Buffer,
     pub flags_buffer: Buffer,
     pub compacted_offsets_buffer: Buffer,
     pub scattered_vertex_buffer: Buffer,
@@ -94,6 +96,7 @@ pub struct VoxelChunkArena {
     pub pass3_bind_group: BindGroup,
     pub compaction_bind_group: BindGroup,
 
+    mask_slots: Vec<bool>,
     free_slots: Vec<u32>,
     slot_of_main_entity: HashMap<MainEntity, u32>,
     pub active_slots: Vec<u32>, // stable order used for this frame's batched dispatch
@@ -136,6 +139,35 @@ impl VoxelChunkArena {
         let material_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_material_buffer"),
             size: sdf_elems_per_chunk as u64 * max,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 1 bit/voxel, same element count as sdf_buffer/material_buffer, but each
+        // slot gets its OWN word-aligned region (mask_words_per_chunk words) —
+        // deliberately not a flat globally-packed bit array, since that would let
+        // adjacent slots' write_buffer calls corrupt each other's boundary words
+        // whenever texture_size^3 isn't a multiple of 32 (it never is, for the
+        // LOD sizes in use).
+        let mask_words_per_chunk = sdf_elems_per_chunk.div_ceil(32);
+        let visibility_mask_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_visibility_mask_buffer"),
+            size: mask_words_per_chunk as u64 * 4 * max,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Tiny: 1 bit per SLOT (not per voxel), packed 32 slots/word. Kept
+        // deliberately separate from ChunkMeta rather than a bit stolen from
+        // active_list_pos — pass1 doesn't read ChunkMeta at all since the
+        // earlier shrink, and pass3 uses active_list_pos as a raw array index in
+        // several places that would all need defensive masking if the flag lived
+        // there. This buffer is orders of magnitude smaller than ChunkMeta per
+        // slot and keeps pass3 completely untouched by visibility work.
+        let has_mask_words = (max as u32).div_ceil(32);
+        let chunk_has_mask_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("arena_chunk_has_mask_buffer"),
+            size: has_mask_words as u64 * 4,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -389,6 +421,14 @@ impl VoxelChunkArena {
                     binding: 8,
                     resource: active_slot_map_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 9,
+                    resource: visibility_mask_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 10,
+                    resource: chunk_has_mask_buffer.as_entire_binding(),
+                },
             ],
         );
         let pass3_bind_group = render_device.create_bind_group(
@@ -547,6 +587,19 @@ impl VoxelChunkArena {
             chunk_bases_uniform_buffer,
             chunk_bases_bind_group,
             material_buffer,
+            visibility_mask_buffer,
+            chunk_has_mask_buffer,
+            mask_slots: default(),
+        }
+    }
+
+    /// Marks whether `slot` currently has valid visibility-mask data
+    /// uploaded. Doesn't itself write chunk_has_mask_buffer — that upload
+    /// still needs to happen somewhere each frame; see the note in
+    /// prepare_visibility_for_arena's caller about wiring that write.
+    pub fn set_slot_has_mask(&mut self, slot: u32, has_mask: bool) {
+        if (slot as usize) < self.mask_slots.len() {
+            self.mask_slots[slot as usize] = has_mask;
         }
     }
 
@@ -564,6 +617,7 @@ impl VoxelChunkArena {
         if let Some(slot) = self.slot_of_main_entity.remove(&main_entity) {
             self.free_slots.push(slot);
             self.active_slots.retain(|&s| s != slot);
+            self.mask_slots[slot as usize] = false;
         }
     }
 

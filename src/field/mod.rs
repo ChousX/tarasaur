@@ -75,3 +75,15 @@ pub trait VoxelDataSlice {
 pub trait ApronSample: VoxelDataSlice {
     fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem;
 }
+
+/// Optional opt-out checked by `extract_voxel_chunks<T>` before doing the
+/// expensive padding/apron work for a chunk. Default: always do it.
+/// SDFField/MaterialField<M> use the default via a trivial empty impl —
+/// same pattern as AccumulateExt/BlendExt, explicit per-type impls rather
+/// than a blanket, since a blanket would make it impossible for
+/// VisibilityField to actually override this under Rust's coherence rules.
+pub trait ExtractGate {
+    fn should_extract(&self) -> bool {
+        true
+    }
+}

@@ -1,5 +1,5 @@
 use crate::{
-    ApronSample, Versionable, VoxelDataSlice,
+    ApronSample, ExtractGate, Versionable, VoxelDataSlice,
     ops::{AccumulateExt, BlendExt},
 };
 
@@ -82,14 +82,11 @@ impl<M: VoxelMaterial> VoxelDataSlice for MaterialField<M> {
     }
 }
 
+impl<M: VoxelMaterial> ExtractGate for MaterialField<M> {}
+
 impl<M: VoxelMaterial> ApronSample for MaterialField<M> {
     fn sample_apron(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
-        let max_coord = (size - 1) as f32;
-        let xi = x.round().clamp(0.0, max_coord) as usize;
-        let yi = y.round().clamp(0.0, max_coord) as usize;
-        let zi = z.round().clamp(0.0, max_coord) as usize;
-        let s = size as usize;
-        data[(zi * s + yi) * s + xi]
+        nearest_neighbor_sample(data, size, x, y, z)
     }
 }
 

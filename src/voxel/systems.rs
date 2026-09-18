@@ -13,8 +13,8 @@ use bevy::{
 };
 
 use crate::{
-    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, Versionable,
-    VoxelDataSlice, VoxelMaterial,
+    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField,
+    Versionable, VisibilityField, VoxelDataSlice, VoxelMaterial,
     voxel::{
         arena::{ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{
@@ -196,6 +196,71 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
     }
 }
 
+pub fn prepare_visibility_for_arena(
+    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    render_queue: Res<RenderQueue>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<VisibilityField>)>,
+    mut commands: Commands,
+) {
+    for (extracted_entity, extracted_mask) in extracted_chunks.iter() {
+        let Some(arena) = arena_set.arenas.get_mut(&extracted_mask.lod) else {
+            warn!(
+                "[prepare_visibility_for_arena] no arena for LOD {:?}, dropping mask for chunk {:?}",
+                extracted_mask.lod, extracted_mask.chunk_pos
+            );
+            commands.entity(extracted_entity).despawn();
+            continue;
+        };
+
+        let Some(slot) = arena.existing_slot(extracted_mask.main_entity) else {
+            warn!(
+                "[prepare_visibility_for_arena] no slot yet for chunk {:?}, dropping this frame's mask",
+                extracted_mask.chunk_pos
+            );
+            commands.entity(extracted_entity).despawn();
+            continue;
+        };
+
+        if extracted_mask.padded_data.is_empty() {
+            // Chunk transitioned to uniform this frame — clear the flag;
+            // the previous frame's mask data, if any, is now stale and
+            // pass1 will stop consulting it once chunk_has_mask reflects
+            // this.
+            arena.set_slot_has_mask(slot, false);
+            commands.entity(extracted_entity).despawn();
+            continue;
+        }
+
+        debug_assert_eq!(
+            extracted_mask.size, arena.texture_size,
+            "mixed LOD in one arena — bucket by LOD"
+        );
+
+        // padded_data is one byte (0/1) per voxel from VisibilityField's
+        // byte-mirror ApronSample path — pack to 1 bit/voxel before
+        // upload. Each slot gets a word-aligned region (mask_words_per_chunk
+        // words), matching sdf_buffer/material_buffer's fixed-stride-per-slot
+        // layout — never a flat global bit-packing, which would let
+        // adjacent slots' writes clobber each other's boundary words.
+        let mask_words_per_chunk = (arena.sdf_elems_per_chunk as usize).div_ceil(32);
+        let mut packed = vec![0u32; mask_words_per_chunk];
+        for (i, &b) in extracted_mask.padded_data.iter().enumerate() {
+            if b != 0 {
+                packed[i / 32] |= 1 << (i % 32);
+            }
+        }
+
+        let byte_offset = slot as u64 * mask_words_per_chunk as u64 * 4;
+        render_queue.write_buffer(
+            &arena.visibility_mask_buffer,
+            byte_offset,
+            bytemuck::cast_slice(&packed),
+        );
+
+        arena.set_slot_has_mask(slot, true);
+        commands.entity(extracted_entity).despawn();
+    }
+}
 pub fn dispatch_voxel_compute_passes_batched(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -672,49 +737,78 @@ const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 1, 1),
 ];
 
+/// Nearest-neighbor apron sampling for categorical byte data — material
+/// ids, visibility bits. Shared by MaterialField's and VisibilityField's
+/// ApronSample impls rather than duplicated: unlike SDF distances, these
+/// values must never be blended across a chunk boundary.
+pub fn nearest_neighbor_sample(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
+    let max_coord = (size - 1) as f32;
+    let xi = x.round().clamp(0.0, max_coord) as usize;
+    let yi = y.round().clamp(0.0, max_coord) as usize;
+    let zi = z.round().clamp(0.0, max_coord) as usize;
+    let s = size as usize;
+    data[(zi * s + yi) * s + xi]
+}
+
 pub fn extract_voxel_chunks<T>(
     mut commands: Commands,
     chunk_manager: Extract<Res<ChunkManager>>,
-    query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
+    query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD, &VisibilityField)>>,
     mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
 ) where
-    T: Send + Sync + 'static + Component + Versionable + ApronSample,
+    T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
-    for (entity, pos, field, lod) in query.iter() {
+    for (entity, pos, field, lod, visibility) in query.iter() {
+        // Fully-invisible chunk — nothing downstream is worth extracting.
+        // NOTE: does not yet stop this chunk from being drawn if it was
+        // already active from a previous frame — see the active_slots gap
+        // flagged separately. This only prevents new/changed uploads.
+        if visibility.is_uniform() == Some(false) {
+            continue;
+        }
+
         let size = lod.size();
 
         let mut versions = [0u64; 8];
         versions[0] = field.version();
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
-                if let Ok((_, _, n_field, _)) = query.get(n_entity) {
+                if let Ok((_, _, n_field, _, _)) = query.get(n_entity) {
                     versions[i + 1] = n_field.version();
                 }
             }
         }
 
         if last_versions.get(&pos.0) == Some(&versions) {
-            continue;
+            continue; // genuinely unchanged — leave whatever state exists alone
         }
         last_versions.insert(pos.0, versions);
 
         let padded_size = size + PADDING;
-        let mut vol = vec![T::Elem::default(); (padded_size * padded_size * padded_size) as usize];
 
-        let raw = field.data_slice();
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    let src = ((z * size + y) * size + x) as usize;
-                    let dst = ((z * padded_size + y) * padded_size + x) as usize;
-                    vol[dst] = raw[src];
+        // Field-level opt-out from the expensive padding/apron work —
+        // still spawns an artifact (with empty payload) so the Prepare
+        // side gets an explicit "this chunk's state changed to uniform"
+        // signal, distinct from the unchanged-case continue above.
+        let padded_data: Vec<u8> = if field.should_extract() {
+            let mut vol =
+                vec![T::Elem::default(); (padded_size * padded_size * padded_size) as usize];
+            let raw = field.data_slice();
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
+                        let src = ((z * size + y) * size + x) as usize;
+                        let dst = ((z * padded_size + y) * padded_size + x) as usize;
+                        vol[dst] = raw[src];
+                    }
                 }
             }
-        }
+            fill_apron::<T>(&mut vol, pos.0, &chunk_manager, &query);
+            bytemuck::cast_slice(&vol).to_vec()
+        } else {
+            Vec::new()
+        };
 
-        fill_apron::<T>(&mut vol, pos.0, &chunk_manager, &query);
-
-        let padded_data: Vec<u8> = bytemuck::cast_slice(&vol).to_vec();
         commands.spawn(ExtractedChunkField::<T> {
             main_entity: entity.into(),
             chunk_pos: pos.0,

@@ -15,7 +15,7 @@ use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 use systems::extract_voxel_chunks;
 
 use crate::{
-    SDFField,
+    SDFField, VisibilityField,
     voxel::{
         arena::{VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{
@@ -23,8 +23,8 @@ use crate::{
             update_voxel_material_bind_group,
         },
         systems::{
-            dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_voxel_arena,
-            queue_mesh_readback_maps, voxel_raster_pass,
+            dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_visibility_for_arena,
+            prepare_voxel_arena, queue_mesh_readback_maps, voxel_raster_pass,
         },
         types::{MeshReadbackChannel, MeshReadbackChannelReceiver},
     },
@@ -87,13 +87,20 @@ impl Plugin for VoxelRenderPlugin {
 
         render_app
             .init_resource::<VoxelChunkArenaSet>()
-            .add_systems(ExtractSchedule, extract_voxel_chunks::<SDFField>)
+            .add_systems(
+                ExtractSchedule,
+                (
+                    extract_voxel_chunks::<SDFField>,
+                    extract_voxel_chunks::<VisibilityField>,
+                ),
+            )
             .add_systems(
                 Render,
                 (
                     (
                         init_voxel_arena::<SDFField>,
                         prepare_voxel_arena::<SDFField>,
+                        prepare_visibility_for_arena,
                     )
                         .chain()
                         .in_set(RenderSystems::Prepare),
