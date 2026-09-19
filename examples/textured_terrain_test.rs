@@ -1,5 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
+    camera::visibility,
     input::mouse::MouseMotion,
     prelude::*,
     render::{
@@ -8,8 +9,10 @@ use bevy::{
         settings::{RenderCreation, WgpuLimits, WgpuSettings},
     },
 };
+use tarasaur::editor::WorldEditor;
 use tarasaur::{
-    Field, LOD, MaterialField, SDFField, TarasaurPlugin, VoxelDataSlice, VoxelMaterial,
+    Field, LOD, MaterialField, SDFField, TarasaurPlugin, VisibilityField, VoxelDataSlice,
+    VoxelMaterial,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::plugin::MaterialFieldPlugin,
     ops::{AccumulateExt, BlendExt},
@@ -447,6 +450,7 @@ fn generate_terrain(
         &mut SDFField,
         &mut MaterialField<TerrainMaterial>,
     )>,
+    mut visibility_editor: WorldEditor<VisibilityField, bool>,
 ) {
     if *generated || query.iter().count() as i32 != chunk_count() {
         return;
@@ -464,7 +468,6 @@ fn generate_terrain(
                     let world = chunk_origin + Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
                     let height = terrain_height(world.x, world.z);
                     let value = if world.y < height { -1.0 } else { 1.0 };
-
                     let mat = determine_material(height, world.y);
 
                     sdf.set(x, y, z, value);
@@ -476,6 +479,26 @@ fn generate_terrain(
         sdf.reinit();
     }
 
+    // Both edits use fill_box — same message type (EditFieldMessage
+    // VisibilityField, Cuboid, bool>), same processing system
+    // (process_box_edits), which drains its MessageReader in write order.
+    // That guarantees "mark everything visible" applies before "hide this
+    // region" within this one frame — no race, no delay needed. Mixing
+    // box + sphere would put the two edits in different systems with no
+    // defined relative order.
+    let world_min = Vec3::new(
+        -GRID_RADIUS as f32 * CHUNK_SIZE,
+        0.0,
+        -GRID_RADIUS as f32 * CHUNK_SIZE,
+    );
+    let world_max = Vec3::new(
+        (GRID_RADIUS + 1) as f32 * CHUNK_SIZE,
+        2.0 * CHUNK_SIZE,
+        (GRID_RADIUS + 1) as f32 * CHUNK_SIZE,
+    );
+    let world_center = (world_min + world_max) * 0.5;
+    let world_half_extent = (world_max - world_min) * 0.5;
+    visibility_editor.fill_box(world_center, world_half_extent, true);
     ready.0 = true;
     info!(
         "[lod_terrain_test] terrain generated across all {} chunks",

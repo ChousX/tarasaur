@@ -96,9 +96,9 @@ pub struct VoxelChunkArena {
     pub pass3_bind_group: BindGroup,
     pub compaction_bind_group: BindGroup,
 
-    mask_slots: Vec<bool>,
-    free_slots: Vec<u32>,
-    slot_of_main_entity: HashMap<MainEntity, u32>,
+    pub mask_slots: Vec<bool>,
+    pub free_slots: Vec<u32>,
+    pub slot_of_main_entity: HashMap<MainEntity, u32>,
     pub active_slots: Vec<u32>, // stable order used for this frame's batched dispatch
     pub dirty_slots: Vec<u32>,  // slots whose ChunkMeta/SDF changed since last upload
 

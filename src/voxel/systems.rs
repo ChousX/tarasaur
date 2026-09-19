@@ -260,6 +260,20 @@ pub fn prepare_visibility_for_arena(
         arena.set_slot_has_mask(slot, true);
         commands.entity(extracted_entity).despawn();
     }
+    for arena in arena_set.arenas.values() {
+        let word_count = (arena.max_chunks as usize).div_ceil(32);
+        let mut packed = vec![0u32; word_count];
+        for (slot, &has_mask) in arena.mask_slots.iter().enumerate() {
+            if has_mask {
+                packed[slot / 32] |= 1 << (slot % 32);
+            }
+        }
+        render_queue.write_buffer(
+            &arena.chunk_has_mask_buffer,
+            0,
+            bytemuck::cast_slice(&packed),
+        );
+    }
 }
 pub fn dispatch_voxel_compute_passes_batched(
     render_device: Res<RenderDevice>,
