@@ -92,7 +92,11 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
     ]
 }
 
-/// Binding layout for `surface_nets_pass3`.
+/// Binding layout for `surface_nets_pass3`. Back to 12 entries — visibility
+/// is no longer sampled here. Pass3 only needs to know *which slot* each
+/// vertex belongs to (packed into the vertex itself, see pack_material_b in
+/// the shader); the actual visibility test now happens per-fragment in
+/// voxel_raster.wgsl against raster_chunk_visibility_entries() below.
 pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: now array<f32>, not a texture
@@ -127,5 +131,25 @@ pub fn chunk_bases_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(4, ShaderStages::COMPUTE, false), // chunk_index_base
         storage_buffer_entry(5, ShaderStages::COMPUTE, false), // indirect_args
         storage_buffer_entry(6, ShaderStages::COMPUTE, false), // overflow_flag
+    ]
+}
+
+/// Binding layout for group 2 of the raster pipeline — per-fragment
+/// visibility sampling. Bound once per arena (all buffers here are
+/// per-arena, not per-material), alongside group 0 (view) and group 1
+/// (material). All FRAGMENT-only: the vertex stage doesn't need any of
+/// this, it only carries `real_slot` through as a packed flat attribute.
+///
+/// Binding 3 reuses the same BatchUniforms layout as pass3's own uniform
+/// (cell_count, texture_size, wg_per_chunk_z, voxel_size) — only
+/// texture_size/voxel_size are read here, but no reason to duplicate the
+/// buffer when pass3's `batch_uniform_buffer_pass3` already holds the
+/// right values for this arena and never changes after arena creation.
+pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
+    vec![
+        storage_buffer_entry(0, ShaderStages::FRAGMENT, true), // chunk_meta
+        storage_buffer_entry(1, ShaderStages::FRAGMENT, true), // visibility_mask_buffer
+        storage_buffer_entry(2, ShaderStages::FRAGMENT, true), // chunk_has_mask_buffer
+        uniform_buffer_entry(3, ShaderStages::FRAGMENT, NonZeroU64::new(16)), // BatchUniforms
     ]
 }

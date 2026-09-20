@@ -207,3 +207,33 @@ fn fly_cam_system(
                 fly_cam.pitch = fly_cam.pitch.clamp(-1.54, 1.54);
             }
             transform.rotation = Quat::from_euler(EulerRot::YXZ, fly_cam.yaw, fly_cam.pitch, 0.0);
+        }
+
+        let mut velocity = Vec3::ZERO;
+        let forward = transform.forward();
+        let right = transform.right();
+
+        if keyboard.pressed(KeyCode::KeyW) {
+            velocity += *forward;
+        }
+        if keyboard.pressed(KeyCode::KeyS) {
+            velocity -= *forward;
+        }
+        if keyboard.pressed(KeyCode::KeyA) {
+            velocity -= *right;
+        }
+        if keyboard.pressed(KeyCode::KeyD) {
+            velocity += *right;
+        }
+        if keyboard.pressed(KeyCode::Space) {
+            velocity += Vec3::Y;
+        }
+        if keyboard.pressed(KeyCode::ShiftLeft) {
+            velocity -= Vec3::Y;
+        }
+
+        if velocity != Vec3::ZERO {
+            transform.translation += velocity.normalize() * fly_cam.move_speed * delta_time;
+        }
+    }
+}

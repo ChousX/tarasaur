@@ -95,6 +95,7 @@ pub struct VoxelChunkArena {
     pub pass1_bind_group: BindGroup,
     pub pass3_bind_group: BindGroup,
     pub compaction_bind_group: BindGroup,
+    pub raster_chunk_bind_group: BindGroup,
 
     pub mask_slots: Vec<bool>,
     pub free_slots: Vec<u32>,
@@ -431,6 +432,7 @@ impl VoxelChunkArena {
                 },
             ],
         );
+
         let pass3_bind_group = render_device.create_bind_group(
             Some("arena_pass3_bind_group"),
             &layouts.pass3_surface_layout,
@@ -484,6 +486,14 @@ impl VoxelChunkArena {
                     binding: 11,
                     resource: material_buffer.as_entire_binding(),
                 },
+                //BindGroupEntry {
+                //binding: 12,
+                //resource: visibility_mask_buffer.as_entire_binding(),
+                //},
+                //BindGroupEntry {
+                //binding: 13,
+                //resource: chunk_has_mask_buffer.as_entire_binding(),
+                //},
             ],
         );
         let compaction_bind_group = render_device.create_bind_group(
@@ -509,6 +519,29 @@ impl VoxelChunkArena {
                 BindGroupEntry {
                     binding: 4,
                     resource: chunk_active_counts_buffer.as_entire_binding(),
+                },
+            ],
+        );
+
+        let raster_chunk_bind_group = render_device.create_bind_group(
+            Some("arena_raster_chunk_bind_group"),
+            &layouts.raster_chunk_visibility_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: chunk_meta_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: visibility_mask_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: chunk_has_mask_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: batch_uniform_buffer_pass3.as_entire_binding(),
                 },
             ],
         );
@@ -589,7 +622,8 @@ impl VoxelChunkArena {
             material_buffer,
             visibility_mask_buffer,
             chunk_has_mask_buffer,
-            mask_slots: default(),
+            mask_slots: vec![false; max as usize],
+            raster_chunk_bind_group,
         }
     }
 

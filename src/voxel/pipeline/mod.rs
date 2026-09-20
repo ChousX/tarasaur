@@ -19,12 +19,14 @@ use crate::{
         SURFACE_NETS_PASS1_SHADER_HANDLE, SURFACE_NETS_PASS3_SHADER_HANDLE,
     },
 };
+
 #[derive(Resource)]
 pub struct VoxelPipelineLayouts {
     pub pass1_surface_layout: BindGroupLayout,
     pub pass3_surface_layout: BindGroupLayout,
     pub compaction_bind_group_layout: BindGroupLayout,
     pub chunk_bases_layout: BindGroupLayout,
+    pub raster_chunk_visibility_layout: BindGroupLayout, // NEW
 }
 
 impl FromWorld for VoxelPipelineLayouts {
@@ -51,11 +53,17 @@ impl FromWorld for VoxelPipelineLayouts {
             &layouts::chunk_bases_entries(),
         );
 
+        let raster_chunk_visibility_layout = render_device.create_bind_group_layout(
+            Some("voxel_raster_chunk_visibility_layout"),
+            &layouts::raster_chunk_visibility_entries(),
+        );
+
         Self {
             pass1_surface_layout,
             pass3_surface_layout,
             compaction_bind_group_layout,
             chunk_bases_layout,
+            raster_chunk_visibility_layout,
         }
     }
 }
@@ -369,6 +377,10 @@ impl FromWorld for VoxelRasterPipeline {
                 BindGroupLayoutDescriptor {
                     label: Cow::Borrowed("voxel_material_layout"),
                     entries: material_layout_entries,
+                },
+                BindGroupLayoutDescriptor {
+                    label: Cow::Borrowed("voxel_raster_chunk_visibility_layout"),
+                    entries: layouts::raster_chunk_visibility_entries(),
                 },
             ],
             vertex: VertexState {

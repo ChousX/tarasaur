@@ -644,6 +644,7 @@ pub fn voxel_raster_pass(
 
         render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
         render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
+        render_pass.set_bind_group(2, &arena.raster_chunk_bind_group, &[]);
 
         for &slot in arena.active_slots.iter() {
             let offset = slot as u64 * ARGS_STRIDE;

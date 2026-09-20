@@ -18,25 +18,15 @@ struct BatchUniforms {
 @group(0) @binding(6) var<uniform> uniforms: BatchUniforms;
 
 @group(0) @binding(8) var<storage, read> active_slot_map: array<u32>;
+
+// visibility_mask_buffer / chunk_has_mask_buffer stay bound at 9/10 (arena.rs
+// still wires them up) but are no longer read here — visibility no longer
+// gates geometry generation, only fragment discard in the raster shader.
+// Left declared-but-idle rather than removed, so the pass1_bind_group layout
+// doesn't need to change.
 @group(0) @binding(9) var<storage, read> visibility_mask_buffer: array<u32>;
 @group(0) @binding(10) var<storage, read> chunk_has_mask_buffer: array<u32>;
 
-fn mask_words_per_chunk() -> u32 {
-    let elems = uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
-    return (elems + 31u) / 32u;
-}
-
-fn chunk_has_mask(slot: u32) -> bool {
-    let word = chunk_has_mask_buffer[slot / 32u];
-    return ((word >> (slot % 32u)) & 1u) != 0u;
-}
-
-fn sample_visibility(slot: u32, coord: vec3<u32>) -> bool {
-    let local_bit = flatten_sdf_idx(coord, uniforms.texture_size);
-    let word_idx = slot * mask_words_per_chunk() + local_bit / 32u;
-    let word = visibility_mask_buffer[word_idx];
-    return ((word >> (local_bit % 32u)) & 1u) != 0u;
-}
 // chunk_meta (binding 7) is no longer read by this pass — sdf_offset and
 // cell_offset are derived below from real_slot + the constants above, and
 // pass1 never needed chunk_world_origin/active_list_pos. The Rust-side
@@ -92,24 +82,20 @@ fn cs_main(
     );
 
     var inside_count = 0u;
-    var visible_count = 0u;
-    let has_mask = chunk_has_mask(real_slot);
     for (var i = 0u; i < 8u; i = i + 1u) {
         let pos = cell_coord + offsets[i];
         let val = sdf_buffer[sdf_base + flatten_sdf_idx(pos, uniforms.texture_size)];
         if (val <= 0.0) {
             inside_count = inside_count + 1u;
         }
-        // has_mask == false means this chunk is uniformly visible — the
-        // Some(false) case never reaches pass1 (extraction/dispatch skips
-        // those chunks upstream, once the active_slots gap above is
-        // resolved), so "no mask" here always means "fully visible," not
-        // "fully invisible."
-        if (!has_mask || sample_visibility(real_slot, pos)) {
-            visible_count = visible_count + 1u;
-        }
     }
 
+    // Flags depend ONLY on the sign crossing, same as before visibility
+    // existed. This guarantees every cell pass3's Part 2 references (via a
+    // sign-crossing edge test) was actually flagged and has a valid
+    // compacted_offsets slot — visibility is handled downstream by fragment
+    // discard instead, so it can never desync flags_buffer from what pass3
+    // assumes is present.
     let flat_idx = cell_base + flatten_cell_idx(cell_coord, cell_count);
-    flags_buffer[flat_idx] = select(0u, 1u, inside_count > 0u && inside_count < 8u && visible_count > 0u);
+    flags_buffer[flat_idx] = select(0u, 1u, inside_count > 0u && inside_count < 8u);
 }

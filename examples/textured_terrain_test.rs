@@ -497,8 +497,9 @@ fn generate_terrain(
         (GRID_RADIUS + 1) as f32 * CHUNK_SIZE,
     );
     let world_center = (world_min + world_max) * 0.5;
-    let world_half_extent = (world_max - world_min) * 0.5;
-    visibility_editor.fill_box(world_center, world_half_extent, true);
+    //let world_half_extent = (world_max - world_min) * 0.5;
+    //visibility_editor.fill_box(world_center, world_half_extent, true);
+    visibility_editor.fill_sphere(world_center, 10.0, true);
     ready.0 = true;
     info!(
         "[lod_terrain_test] terrain generated across all {} chunks",

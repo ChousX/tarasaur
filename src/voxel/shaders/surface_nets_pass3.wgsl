@@ -1,6 +1,6 @@
 struct Vertex {
     position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
-    normal: vec4<f32>,   // .xyz = normal, .w = bitcast-packed material_id_b (low byte)
+    normal: vec4<f32>,   // .xyz = normal, .w = bitcast-packed material_id_b (low byte) + real_slot (next 15 bits)
 }
 
 struct IndirectDrawArgs {
@@ -18,11 +18,6 @@ struct BatchUniforms {
     voxel_size: f32, // per-arena constant — every chunk here shares one LOD
 }
 
-// Shrunk from 6 fields to 2: sdf_offset, cell_offset, and voxel_size were
-// all pure functions of slot/arena constants and moved out (see
-// sdf_offset_for/cell_offset_for below and uniforms.voxel_size). Only
-// chunk_world_origin (per-chunk) and active_list_pos (per-chunk-per-frame)
-// remain — the only two fields that actually can't be derived.
 struct ChunkMeta {
     chunk_world_origin: vec3<f32>,
     active_list_pos: u32,
@@ -51,15 +46,10 @@ fn index_buffer_base(cell_offset: u32) -> u32 {
     return cell_offset * 18u;
 }
 
-// Pure functions of slot + per-arena constants — replaces ChunkMeta's old
-// sdf_offset / cell_offset fields.
 fn sdf_offset_for(slot: u32) -> u32 {
     return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
 }
 
-// material_base is a byte-granular element offset (same units as
-// sdf_offset_for), always a multiple of 4 — see arena sizing invariant.
-// Unpacks one material id (0-255) from its packed u32 word.
 fn sample_material_id(material_base: u32, elem_idx: u32) -> u32 {
     let word_idx = (material_base + elem_idx) / 4u;
     let byte_shift = ((material_base + elem_idx) % 4u) * 8u;
@@ -118,10 +108,6 @@ struct MaterialBlend {
     weight_u8: u32, // weight of id_a, 0-255; id_b implicitly gets (255 - weight_u8)
 }
 
-// Samples material at the 8 cell corners, weights each by the same
-// trilinear shape used to place vert_pos itself, and collapses to the
-// top-2 ids by accumulated weight — the rest are discarded and the pair
-// renormalized (design: 2-material blend per vertex, not N-way).
 fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) -> MaterialBlend {
     let corners = array<vec3<u32>, 8>(
         vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
@@ -139,8 +125,6 @@ fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) ->
         corner_weights[i] = wx * wy * wz;
     }
 
-    // At most 8 distinct ids possible (one per corner) — fixed-size
-    // arrays, no dynamic allocation needed.
     var uniq_ids: array<u32, 8>;
     var uniq_weights: array<f32, 8>;
     var uniq_count = 0u;
@@ -185,11 +169,6 @@ fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) ->
     let id_a = uniq_ids[best_idx];
     var id_b = id_a;
     var weight_u8 = 255u;
-    // Only one distinct id among the 8 corners (common in solid interior
-    // cells) — no second material to blend against. id_b duplicates id_a
-    // and weight_u8 saturates to 255, which the fragment shader's blend
-    // (a future step) will handle correctly with zero special-casing:
-    // blending a material with itself at full weight is a no-op.
     if (second_w >= 0.0 && (best_w + second_w) > 0.00001) {
         id_b = uniq_ids[second_idx];
         let norm_a = best_w / (best_w + second_w);
@@ -204,8 +183,14 @@ fn pack_material_a(id_a: u32, weight_u8: u32) -> f32 {
     return bitcast<f32>(packed);
 }
 
-fn pack_material_b(id_b: u32) -> f32 {
-    return bitcast<f32>((id_b & 0xFFu) | 0x3F800000u);
+// real_slot occupies bits 8-22 (15 bits, up to 32767 slots — comfortably
+// above any realistic max_chunks). id_b keeps bits 0-7 as before. The
+// fragment shader in voxel_raster.wgsl unpacks real_slot to know which
+// arena chunk's visibility data to sample for its per-pixel discard test —
+// this replaces the per-vertex visible flag from the previous approach.
+fn pack_material_b(id_b: u32, real_slot: u32) -> f32 {
+    let packed = (id_b & 0xFFu) | ((real_slot & 0x7FFFu) << 8u) | 0x3F800000u;
+    return bitcast<f32>(packed);
 }
 
 @compute @workgroup_size(8, 8, 8)
@@ -279,13 +264,16 @@ fn cs_main(
 
         let frac = vert_pos - vec3<f32>(id);
         let blend = tally_corner_materials(sdf_base, id, frac);
+
         vertex_buffer[vert_idx] = Vertex(
             vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8)),
-            vec4<f32>(normal, pack_material_b(blend.id_b))
+            vec4<f32>(normal, pack_material_b(blend.id_b, real_slot))
         );
     }
 
     // --- PART 2: INDEX GENERATION FOR ACTIVE EDGES ---
+    // Unconditioned — geometry is always fully generated; visibility is
+    // resolved per-fragment in voxel_raster.wgsl instead.
     let sdf_curr = sample_sdf(sdf_base, vec3<i32>(id));
     let curr_inside = sdf_curr <= 0.0;
 
