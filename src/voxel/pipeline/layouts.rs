@@ -153,3 +153,17 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
         uniform_buffer_entry(3, ShaderStages::FRAGMENT, NonZeroU64::new(16)), // BatchUniforms
     ]
 }
+
+/// Binding layout for the cursor/raycast query pass (`cursor_query.wgsl`).
+/// Binding 1 (hits) is read_write since the shader writes results in
+/// place. Everything else is read-only from the shader's perspective.
+pub fn query_entries() -> Vec<BindGroupLayoutEntry> {
+    vec![
+        storage_buffer_entry(0, ShaderStages::COMPUTE, true), // queries
+        storage_buffer_entry(1, ShaderStages::COMPUTE, false), // hits
+        uniform_buffer_entry(2, ShaderStages::COMPUTE, NonZeroU64::new(32)),
+        storage_buffer_entry(3, ShaderStages::COMPUTE, true), // chunk_lookup
+        storage_buffer_entry(4, ShaderStages::COMPUTE, true), // sdf_buffer
+        storage_buffer_entry(5, ShaderStages::COMPUTE, true), // chunk_meta
+    ]
+}

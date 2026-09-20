@@ -1,6 +1,7 @@
 mod arena;
 pub mod buffers;
 pub mod pipeline;
+pub mod query;
 pub mod systems;
 pub mod types;
 
@@ -22,6 +23,13 @@ use crate::{
             VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
             update_voxel_material_bind_group,
         },
+        query::{
+            CollisionLOD, ExtractedVoxelQueries, FrameParity, PendingVoxelQueries,
+            VoxelQueryBuffers, VoxelQueryResultChannel, VoxelQueryResultReceiver,
+            VoxelQueryResults, clear_pending_voxel_queries, dispatch_voxel_query_pass,
+            drain_voxel_query_results, extract_voxel_queries, map_voxel_query_results,
+            prepare_voxel_queries,
+        },
         systems::{
             dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_visibility_for_arena,
             prepare_voxel_arena, queue_mesh_readback_maps, voxel_raster_pass,
@@ -31,7 +39,7 @@ use crate::{
 };
 
 pub const SURFACE_NETS_PASS1_SHADER_HANDLE: Handle<Shader> =
-    uuid_handle!("9f3a1b2c-4d5e-6f70-8192-a3b4c5d6e7f8"); // any valid UUIDv4
+    uuid_handle!("9f3a1b2c-4d5e-6f70-8192-a3b4c5d6e7f8");
 pub const STREAM_COMPACTION_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809");
 pub const SURFACE_NETS_PASS3_SHADER_HANDLE: Handle<Shader> =
@@ -40,7 +48,8 @@ pub const VOXEL_RASTER_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("3c4d5e6f-7081-92a3-b4c5-d6e7f8091a2b");
 pub const COMPUTE_CHUNK_BASES_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("4d5e6f70-8192-a3b4-c5d6-e7f8091a2b3c");
-
+pub const CURSOR_QUERY_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("5e6f7081-92a3-b4c5-d6e7-f8091a2b3c4d");
 pub struct VoxelRenderPlugin;
 
 impl Plugin for VoxelRenderPlugin {
@@ -78,12 +87,33 @@ impl Plugin for VoxelRenderPlugin {
             Shader::from_wgsl
         );
 
+        load_internal_asset!(
+            app,
+            CURSOR_QUERY_SHADER_HANDLE,
+            "shaders/cursor_query.wgsl",
+            Shader::from_wgsl
+        );
+
         let (tx, rx) = crossbeam_channel::unbounded();
         app.insert_resource(MeshReadbackChannelReceiver { receiver: rx });
+
+        let (query_tx, query_rx) = crossbeam_channel::unbounded();
+        app.insert_resource(VoxelQueryResultReceiver { receiver: query_rx });
+        app.insert_resource(PendingVoxelQueries::default());
+        app.insert_resource(VoxelQueryResults::default());
+        app.add_systems(
+            First,
+            (clear_pending_voxel_queries, drain_voxel_query_results),
+        );
+
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app.insert_resource(MeshReadbackChannel { sender: tx });
+        render_app.insert_resource(VoxelQueryResultChannel { sender: query_tx });
+        render_app.init_resource::<CollisionLOD>();
+        render_app.init_resource::<ExtractedVoxelQueries>();
+        render_app.init_resource::<FrameParity>();
 
         render_app
             .init_resource::<VoxelChunkArenaSet>()
@@ -92,6 +122,7 @@ impl Plugin for VoxelRenderPlugin {
                 (
                     extract_voxel_chunks::<SDFField>,
                     extract_voxel_chunks::<VisibilityField>,
+                    extract_voxel_queries,
                 ),
             )
             .add_systems(
@@ -104,9 +135,16 @@ impl Plugin for VoxelRenderPlugin {
                     )
                         .chain()
                         .in_set(RenderSystems::Prepare),
-                    update_voxel_material_bind_group.in_set(RenderSystems::Prepare), // NEW — independent of arena prep, no ordering needed
+                    update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
+                    prepare_voxel_queries
+                        .in_set(RenderSystems::Prepare)
+                        .after(prepare_visibility_for_arena),
                     dispatch_voxel_compute_passes_batched.in_set(RenderSystems::Queue),
+                    dispatch_voxel_query_pass
+                        .in_set(RenderSystems::Queue)
+                        .after(dispatch_voxel_compute_passes_batched),
                     queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
+                    map_voxel_query_results.in_set(RenderSystems::Cleanup),
                 ),
             )
             .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass));
@@ -122,6 +160,7 @@ impl Plugin for VoxelRenderPlugin {
             .init_resource::<VoxelDummyMaterial>()
             .init_resource::<VoxelMaterialBindGroup>()
             .init_resource::<VoxelPipelineLayouts>()
-            .init_resource::<VoxelComputePipeline>();
+            .init_resource::<VoxelComputePipeline>()
+            .init_resource::<VoxelQueryBuffers>();
     }
 }

@@ -69,7 +69,7 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
         if !arena.active_slots.contains(&slot) {
             arena.active_slots.push(slot);
         }
-
+        arena.register_chunk_pos(slot, extracted_sdf.chunk_pos);
         let size = extracted_sdf.size;
         debug_assert_eq!(
             size, arena.texture_size,

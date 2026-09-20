@@ -15,8 +15,9 @@ use std::borrow::Cow;
 use crate::{
     texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
     voxel::{
-        COMPUTE_CHUNK_BASES_SHADER_HANDLE, STREAM_COMPACTION_SHADER_HANDLE,
-        SURFACE_NETS_PASS1_SHADER_HANDLE, SURFACE_NETS_PASS3_SHADER_HANDLE,
+        COMPUTE_CHUNK_BASES_SHADER_HANDLE, CURSOR_QUERY_SHADER_HANDLE,
+        STREAM_COMPACTION_SHADER_HANDLE, SURFACE_NETS_PASS1_SHADER_HANDLE,
+        SURFACE_NETS_PASS3_SHADER_HANDLE,
     },
 };
 
@@ -26,7 +27,8 @@ pub struct VoxelPipelineLayouts {
     pub pass3_surface_layout: BindGroupLayout,
     pub compaction_bind_group_layout: BindGroupLayout,
     pub chunk_bases_layout: BindGroupLayout,
-    pub raster_chunk_visibility_layout: BindGroupLayout, // NEW
+    pub raster_chunk_visibility_layout: BindGroupLayout,
+    pub query_layout: BindGroupLayout,
 }
 
 impl FromWorld for VoxelPipelineLayouts {
@@ -58,12 +60,16 @@ impl FromWorld for VoxelPipelineLayouts {
             &layouts::raster_chunk_visibility_entries(),
         );
 
+        let query_layout = render_device
+            .create_bind_group_layout(Some("voxel_query_layout"), &layouts::query_entries());
+
         Self {
             pass1_surface_layout,
             pass3_surface_layout,
             compaction_bind_group_layout,
             chunk_bases_layout,
             raster_chunk_visibility_layout,
+            query_layout,
         }
     }
 }
@@ -77,6 +83,7 @@ pub struct VoxelComputePipeline {
     pub write_chunk_active_count_pipeline_id: CachedComputePipelineId,
     pub chunk_bases_pipeline_id: CachedComputePipelineId,
     pub pass3_pipeline_id: CachedComputePipelineId,
+    pub query_pipeline_id: CachedComputePipelineId,
 }
 
 impl FromWorld for VoxelComputePipeline {
@@ -186,6 +193,21 @@ impl FromWorld for VoxelComputePipeline {
             zero_initialize_workgroup_memory: false,
         });
 
+        // 5. Cursor/raycast query pipeline (single-thread workgroups, one
+        // per query — see MAX_QUERIES_PER_FRAME in voxel/query.rs).
+        let query_pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(Cow::Borrowed("voxel_cursor_query_pipeline")),
+            layout: vec![BindGroupLayoutDescriptor {
+                label: Cow::Borrowed("voxel_query_pipeline_layout"),
+                entries: layouts::query_entries(),
+            }],
+            shader: CURSOR_QUERY_SHADER_HANDLE,
+            entry_point: Some(Cow::Borrowed("cs_main")),
+            shader_defs: vec![],
+            immediate_size: 0,
+            zero_initialize_workgroup_memory: false,
+        });
+
         Self {
             pass1_pipeline_id,
             stream_compaction_pipeline_id,
@@ -194,6 +216,7 @@ impl FromWorld for VoxelComputePipeline {
             write_chunk_active_count_pipeline_id,
             chunk_bases_pipeline_id,
             pass3_pipeline_id,
+            query_pipeline_id,
         }
     }
 }

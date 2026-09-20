@@ -55,6 +55,23 @@ fn max_chunks(
     capped
 }
 
+/// Multiplicative hash over a signed chunk coordinate. Must match
+/// `hash_chunk` in cursor_query.wgsl exactly.
+fn hash_chunk_pos(pos: IVec3) -> u32 {
+    let x = pos.x as u32;
+    let y = pos.y as u32;
+    let z = pos.z as u32;
+    (x.wrapping_mul(0x9E37_79B1)) ^ (y.wrapping_mul(0x85EB_CA77)) ^ (z.wrapping_mul(0xC2B2_AE3D))
+}
+
+fn next_pow2(x: u32) -> u32 {
+    if x <= 1 {
+        1
+    } else {
+        1u32 << (32 - (x - 1).leading_zeros())
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub struct ChunkMeta {
@@ -111,6 +128,14 @@ pub struct VoxelChunkArena {
     pub overflow_readback_buffer: Buffer, // CPU-mapped copy for telemetry/next-frame drop
     pub chunk_bases_uniform_buffer: Buffer, // active_count + budget constants
     pub chunk_bases_bind_group: BindGroup,
+
+    // --- GPU-resident chunk_pos -> slot lookup, for the collision query
+    // pass's DDA (see voxel/query.rs). Rebuilt CPU-side every frame from
+    // slot_of_chunk_pos and re-uploaded — cheap at these table sizes.
+    pub slot_of_chunk_pos: HashMap<IVec3, u32>,
+    pub chunk_pos_of_slot: Vec<Option<IVec3>>, // len == max_chunks, O(1) release
+    pub chunk_lookup_buffer: Buffer,
+    pub lookup_capacity: u32,
 }
 
 impl VoxelChunkArena {
@@ -131,6 +156,7 @@ impl VoxelChunkArena {
             budget_cells_per_chunk,
         ) as u64;
 
+        let lookup_capacity = next_pow2((max as u32).saturating_mul(2)).max(4);
         let sdf_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_sdf_buffer"),
             size: sdf_elems_per_chunk as u64 * 4 * max,
@@ -581,6 +607,13 @@ impl VoxelChunkArena {
             ],
         );
 
+        let empty_lookup: Vec<[u32; 4]> = vec![[u32::MAX; 4]; lookup_capacity as usize];
+        let chunk_lookup_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("arena_chunk_lookup_buffer"),
+            contents: bytemuck::cast_slice(&empty_lookup),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+
         Self {
             max_chunks: max as u32,
             cell_count,
@@ -624,6 +657,10 @@ impl VoxelChunkArena {
             chunk_has_mask_buffer,
             mask_slots: vec![false; max as usize],
             raster_chunk_bind_group,
+            slot_of_chunk_pos: HashMap::new(),
+            chunk_pos_of_slot: vec![None; max as usize],
+            chunk_lookup_buffer,
+            lookup_capacity,
         }
     }
 
@@ -635,6 +672,37 @@ impl VoxelChunkArena {
         if (slot as usize) < self.mask_slots.len() {
             self.mask_slots[slot as usize] = has_mask;
         }
+    }
+    /// Records/updates which chunk coordinate owns `slot`, keeping
+    /// `slot_of_chunk_pos` and `chunk_pos_of_slot` in sync. Called from
+    /// `prepare_voxel_arena` right after slot allocation.
+    pub fn register_chunk_pos(&mut self, slot: u32, chunk_pos: IVec3) {
+        if self.chunk_pos_of_slot[slot as usize] == Some(chunk_pos) {
+            return;
+        }
+        if let Some(old) = self.chunk_pos_of_slot[slot as usize].take() {
+            self.slot_of_chunk_pos.remove(&old);
+        }
+        self.slot_of_chunk_pos.insert(chunk_pos, slot);
+        self.chunk_pos_of_slot[slot as usize] = Some(chunk_pos);
+    }
+
+    /// Rebuilds and re-uploads the GPU-resident open-addressing
+    /// `chunk_pos -> slot` table from `slot_of_chunk_pos`. Called once per
+    /// frame from `prepare_voxel_queries`, not from the main arena prepare
+    /// path — only the collision LOD's arena needs this.
+    pub fn rebuild_chunk_lookup(&self, render_queue: &bevy::render::renderer::RenderQueue) {
+        const EMPTY: u32 = u32::MAX;
+        let cap = self.lookup_capacity as usize;
+        let mut table = vec![[EMPTY; 4]; cap];
+        for (&pos, &slot) in self.slot_of_chunk_pos.iter() {
+            let mut idx = (hash_chunk_pos(pos) as usize) % cap;
+            while table[idx][3] != EMPTY {
+                idx = (idx + 1) % cap;
+            }
+            table[idx] = [pos.x as u32, pos.y as u32, pos.z as u32, slot];
+        }
+        render_queue.write_buffer(&self.chunk_lookup_buffer, 0, bytemuck::cast_slice(&table));
     }
 
     /// Returns the slot for this chunk, allocating a fresh one if it's new.
@@ -652,6 +720,9 @@ impl VoxelChunkArena {
             self.free_slots.push(slot);
             self.active_slots.retain(|&s| s != slot);
             self.mask_slots[slot as usize] = false;
+            if let Some(pos) = self.chunk_pos_of_slot[slot as usize].take() {
+                self.slot_of_chunk_pos.remove(&pos);
+            }
         }
     }
 

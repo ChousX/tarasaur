@@ -1,5 +1,6 @@
+use bytemuck::{Pod, Zeroable};
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct DrawIndexedIndirectArgs {
     pub index_count: u32,
     pub instance_count: u32,
@@ -9,7 +10,7 @@ pub struct DrawIndexedIndirectArgs {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Pass1Uniforms {
     pub cell_count: u32,
     pub texture_size: u32,
@@ -18,7 +19,7 @@ pub struct Pass1Uniforms {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 struct BatchCompactionUniforms {
     chunk_size: u32,
     total_cells: u32,
@@ -27,7 +28,7 @@ struct BatchCompactionUniforms {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Pass3Uniforms {
     pub cell_count: u32,
     pub texture_size: u32,
@@ -37,7 +38,7 @@ pub struct Pass3Uniforms {
     pub _pad1: u32, // pad struct to 32 bytes (multiple of 16)
 }
 
-#[derive(bevy::ecs::component::Component)]
+#[derive(Component)]
 pub struct PendingMeshReadback(u64);
 
 impl PendingMeshReadback {
@@ -74,4 +75,24 @@ pub struct MeshReadbackChannel {
 #[derive(Resource)]
 pub struct MeshReadbackChannelReceiver {
     pub receiver: Receiver<CollisionMeshData>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct RayQuery {
+    pub origin: [f32; 3],
+    pub max_distance: f32,
+    pub direction: [f32; 3],
+    pub user_id: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct HitResult {
+    pub hit_pos_world: [f32; 3],
+    pub hit_distance: f32,
+    pub hit_normal: [f32; 3],
+    pub did_hit: u32,
+    pub voxel_coord: [u32; 3],
+    pub chunk_slot: u32,
 }
