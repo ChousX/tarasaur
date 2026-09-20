@@ -408,30 +408,6 @@ pub fn dispatch_voxel_compute_passes_batched(
     render_queue.submit(std::iter::once(encoder.finish()));
 }
 
-/// Runs one GPU compute pass across every chunk in `chunks`, reusing the
-/// same pipeline for all of them. `bind_group_of` and `workgroups_of` let
-/// each of the five voxel passes plug in its own per-chunk bind group and
-/// dispatch size while sharing the begin/set-pipeline/loop/dispatch shape.
-fn run_compute_pass<'a>(
-    command_encoder: &mut CommandEncoder,
-    label: &'static str,
-    pipeline: &ComputePipeline,
-    chunks: impl Iterator<Item = &'a GpuVoxelChunkBuffers>,
-    bind_group_of: impl Fn(&'a GpuVoxelChunkBuffers) -> &'a BindGroup,
-    workgroups_of: impl Fn(&'a GpuVoxelChunkBuffers) -> (u32, u32, u32),
-) {
-    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some(label),
-        timestamp_writes: None,
-    });
-    compute_pass.set_pipeline(pipeline);
-    for chunk in chunks {
-        let (x, y, z) = workgroups_of(chunk);
-        compute_pass.set_bind_group(0, bind_group_of(chunk), &[]);
-        compute_pass.dispatch_workgroups(x, y, z);
-    }
-}
-
 pub fn voxel_raster_pass(
     view: ViewQuery<(
         &ExtractedCamera,
