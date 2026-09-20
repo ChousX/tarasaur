@@ -14,13 +14,10 @@ use bevy::{
 
 use crate::{
     ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField,
-    Versionable, VisibilityField, VoxelDataSlice, VoxelMaterial,
+    Versionable, VisibilityField, VoxelMaterial,
     voxel::{
         arena::{ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
-        pipeline::{
-            VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline,
-        },
-        types::{CollisionMeshData, MeshReadbackChannel, PendingMeshReadback},
+        pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
     },
 };
 
@@ -399,29 +396,6 @@ pub fn dispatch_voxel_compute_passes_batched(
             );
         }
 
-        // Single readback copy per resource type per arena, covering every
-        // active slot's span at once.
-        encoder.copy_buffer_to_buffer(
-            &arena.indirect_args_buffer,
-            0,
-            &arena.readback_indirect_buffer,
-            0,
-            4 * arena.max_chunks as u64,
-        );
-        encoder.copy_buffer_to_buffer(
-            &arena.final_vertex_buffer,
-            0,
-            &arena.readback_vertex_buffer,
-            0,
-            arena.final_vertex_buffer.size(),
-        );
-        encoder.copy_buffer_to_buffer(
-            &arena.index_buffer,
-            0,
-            &arena.readback_index_buffer,
-            0,
-            arena.index_buffer.size(),
-        );
         encoder.copy_buffer_to_buffer(
             &arena.overflow_flag_buffer,
             0,
@@ -456,125 +430,6 @@ fn run_compute_pass<'a>(
         compute_pass.set_bind_group(0, bind_group_of(chunk), &[]);
         compute_pass.dispatch_workgroups(x, y, z);
     }
-}
-
-pub fn dispatch_voxel_compute_passes(
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
-    pipeline_cache: Res<PipelineCache>,
-    pipeline: Res<VoxelComputePipeline>,
-    chunk_buffers: Query<&GpuVoxelChunkBuffers>,
-    pending_readback: Query<&GpuVoxelChunkBuffers, With<PendingMeshReadback>>,
-) {
-    if chunk_buffers.is_empty() {
-        return;
-    }
-
-    let (
-        Some(pass1_pipeline),
-        Some(stream_compaction_pipeline),
-        Some(scan_block_sums_pipeline),
-        Some(stream_compaction_resolve_pipeline),
-        Some(pass3_pipeline),
-    ) = (
-        pipeline_cache.get_compute_pipeline(pipeline.pass1_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.scan_block_sums_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_resolve_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
-    )
-    else {
-        warn!(
-            "[dispatch_voxel_compute_passes] one or more pipelines not yet compiled, skipping dispatch"
-        );
-        return;
-    };
-
-    let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("voxel_compute_encoder"),
-    });
-
-    // Reset index_count to 0 for every chunk, recorded into this same command
-    // encoder so it's strictly ordered before the compute passes below.
-    //for chunk in chunk_buffers.iter() {
-    //command_encoder.clear_buffer(&chunk.indirect_args_buffer, 0, Some(4));
-    //}
-
-    // --- Pass 1: surface_nets_pass1, all chunks ---
-    run_compute_pass(
-        &mut command_encoder,
-        "surface_nets_pass1_all_chunks",
-        pass1_pipeline,
-        chunk_buffers.iter(),
-        |c| &c.pass1_surface_bind_group,
-        |c| c.dispatch_grid_3d(4).into(),
-    );
-
-    // --- Pass 2: stream_compaction_scan, all chunks ---
-    run_compute_pass(
-        &mut command_encoder,
-        "stream_compaction_scan_all_chunks",
-        stream_compaction_pipeline,
-        chunk_buffers.iter(),
-        |c| &c.compaction_bind_group,
-        |c| (c.dispatch_blocks_1d(512), 1, 1),
-    );
-
-    // --- Pass 2.5: scan_block_sums, all chunks ---
-    run_compute_pass(
-        &mut command_encoder,
-        "stream_compaction_scan_block_sums_all_chunks",
-        scan_block_sums_pipeline,
-        chunk_buffers.iter(),
-        |c| &c.compaction_bind_group,
-        |_| (1, 1, 1),
-    );
-
-    // --- Pass 3: stream_compaction_resolve, all chunks ---
-    run_compute_pass(
-        &mut command_encoder,
-        "stream_compaction_resolve_all_chunks",
-        stream_compaction_resolve_pipeline,
-        chunk_buffers.iter(),
-        |c| &c.compaction_bind_group,
-        |c| (c.dispatch_blocks_1d(512), 1, 1),
-    );
-
-    // --- Pass 4: surface_nets_pass3, all chunks ---
-    run_compute_pass(
-        &mut command_encoder,
-        "surface_nets_pass3_all_chunks",
-        pass3_pipeline,
-        chunk_buffers.iter(),
-        |c| &c.pass3_surface_bind_group,
-        |c| c.dispatch_grid_3d(8).into(),
-    );
-
-    for chunk in pending_readback.iter() {
-        command_encoder.copy_buffer_to_buffer(
-            &chunk.indirect_args_buffer,
-            0,
-            &chunk.readback_indirect_buffer,
-            0,
-            4,
-        );
-        command_encoder.copy_buffer_to_buffer(
-            &chunk.final_vertex_buffer,
-            0,
-            &chunk.readback_vertex_buffer,
-            0,
-            chunk.final_vertex_buffer.size(),
-        );
-        command_encoder.copy_buffer_to_buffer(
-            &chunk.index_buffer,
-            0,
-            &chunk.readback_index_buffer,
-            0,
-            chunk.index_buffer.size(),
-        );
-    }
-
-    render_queue.submit(std::iter::once(command_encoder.finish()));
 }
 
 pub fn voxel_raster_pass(
@@ -650,95 +505,6 @@ pub fn voxel_raster_pass(
             let offset = slot as u64 * ARGS_STRIDE;
             render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, offset);
         }
-    }
-}
-
-pub fn queue_mesh_readback_maps(
-    mut commands: Commands,
-    chunk_buffers: Query<(
-        Entity,
-        &GpuVoxelChunkBuffers,
-        &PendingMeshReadback,
-        &crate::chunk::ChunkPosition,
-    )>,
-    channel: Res<MeshReadbackChannel>,
-) {
-    for (entity, chunk, pending, pos) in chunk_buffers.iter() {
-        let sender = channel.sender.clone();
-        let chunk_pos = pos.0;
-        let generation = pending.get_val();
-
-        let vb = chunk.readback_vertex_buffer.clone();
-        let ib = chunk.readback_index_buffer.clone();
-        let cb = chunk.readback_indirect_buffer.clone();
-
-        let cb_for_slice = cb.clone();
-        cb_for_slice
-            .slice(..)
-            .map_async(MapMode::Read, move |result| {
-                if result.is_err() {
-                    return;
-                }
-                let index_count = {
-                    let data = cb.slice(..).get_mapped_range();
-                    u32::from_ne_bytes(data[0..4].try_into().unwrap())
-                };
-                cb.unmap();
-
-                let vb2 = vb.clone();
-                let ib2 = ib.clone();
-                let sender2 = sender.clone();
-
-                let ib2_for_slice = ib2.clone();
-                ib2_for_slice.slice(..(index_count as u64 * 4)).map_async(
-                    MapMode::Read,
-                    move |r| {
-                        if r.is_err() {
-                            return;
-                        }
-                        let indices: Vec<u32> = {
-                            let data = ib2.slice(..(index_count as u64 * 4)).get_mapped_range();
-                            bytemuck::cast_slice(&data).to_vec()
-                        };
-                        ib2.unmap();
-
-                        let max_vert = indices.iter().copied().max().unwrap_or(0) as u64 + 1;
-                        let vb3 = vb2.clone();
-                        let sender3 = sender2.clone();
-
-                        let vb3_for_slice = vb3.clone();
-                        vb3_for_slice
-                            .slice(..(max_vert * 32))
-                            .map_async(MapMode::Read, move |r| {
-                                if r.is_err() {
-                                    return;
-                                }
-                                let vertices: Vec<[f32; 3]> = {
-                                    let data = vb3.slice(..(max_vert * 32)).get_mapped_range();
-                                    data.chunks_exact(32)
-                                        .map(|v| {
-                                            let x = f32::from_ne_bytes(v[0..4].try_into().unwrap());
-                                            let y = f32::from_ne_bytes(v[4..8].try_into().unwrap());
-                                            let z =
-                                                f32::from_ne_bytes(v[8..12].try_into().unwrap());
-                                            [x, y, z]
-                                        })
-                                        .collect()
-                                };
-                                vb3.unmap();
-
-                                let _ = sender3.send(CollisionMeshData {
-                                    chunk_pos,
-                                    generation,
-                                    vertices,
-                                    indices: indices.clone(),
-                                });
-                            });
-                    },
-                );
-            });
-
-        commands.entity(entity).remove::<PendingMeshReadback>();
     }
 }
 

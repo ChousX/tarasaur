@@ -18,7 +18,7 @@ use systems::extract_voxel_chunks;
 use crate::{
     SDFField, VisibilityField,
     voxel::{
-        arena::{VoxelChunkArena, VoxelChunkArenaSet},
+        arena::VoxelChunkArenaSet,
         pipeline::{
             VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
             update_voxel_material_bind_group,
@@ -32,9 +32,8 @@ use crate::{
         },
         systems::{
             dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_visibility_for_arena,
-            prepare_voxel_arena, queue_mesh_readback_maps, voxel_raster_pass,
+            prepare_voxel_arena, voxel_raster_pass,
         },
-        types::{MeshReadbackChannel, MeshReadbackChannelReceiver},
     },
 };
 
@@ -94,9 +93,6 @@ impl Plugin for VoxelRenderPlugin {
             Shader::from_wgsl
         );
 
-        let (tx, rx) = crossbeam_channel::unbounded();
-        app.insert_resource(MeshReadbackChannelReceiver { receiver: rx });
-
         let (query_tx, query_rx) = crossbeam_channel::unbounded();
         app.insert_resource(VoxelQueryResultReceiver { receiver: query_rx });
         app.insert_resource(PendingVoxelQueries::default());
@@ -109,7 +105,6 @@ impl Plugin for VoxelRenderPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.insert_resource(MeshReadbackChannel { sender: tx });
         render_app.insert_resource(VoxelQueryResultChannel { sender: query_tx });
         render_app.init_resource::<CollisionLOD>();
         render_app.init_resource::<ExtractedVoxelQueries>();
@@ -143,7 +138,6 @@ impl Plugin for VoxelRenderPlugin {
                     dispatch_voxel_query_pass
                         .in_set(RenderSystems::Queue)
                         .after(dispatch_voxel_compute_passes_batched),
-                    queue_mesh_readback_maps.in_set(RenderSystems::Cleanup),
                     map_voxel_query_results.in_set(RenderSystems::Cleanup),
                 ),
             )

@@ -39,11 +39,6 @@ fn main() {
                 ..default()
             }),
         )
-        // Deliberately no MaterialFieldPlugin/PalettePlugin — this test is
-        // scoped to visibility only. Rendering falls back to
-        // VoxelDummyMaterial's flat dummy texture, which is exactly what
-        // we want here: if geometry shows up wrong, it's not a materials
-        // question.
         .add_plugins(TarasaurPlugin)
         .init_resource::<TestReady>()
         .add_systems(Startup, (spawn_camera_and_light, spawn_test_chunks))

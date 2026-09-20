@@ -40,25 +40,6 @@ pub fn uniform_buffer_entry(
     }
 }
 
-/// A 3D storage texture binding (used for the SDF volume across all passes).
-pub fn storage_texture_3d_entry(
-    binding: u32,
-    visibility: ShaderStages,
-    format: TextureFormat,
-    access: StorageTextureAccess,
-) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility,
-        ty: BindingType::StorageTexture {
-            access,
-            format,
-            view_dimension: TextureViewDimension::D3,
-        },
-        count: None,
-    }
-}
-
 /// Binding layout shared by all four stream-compaction shader entry points
 /// (`scan_workgroup`, `scan_block_sums`, `resolve_block_offsets`,
 /// `write_chunk_active_count`). Binding 4 (chunk_active_counts) is only

@@ -62,3 +62,6 @@ impl GpuVoxelChunkBuffers {
         (total + wg_size - 1) / wg_size
     }
 }
+
+unsafe impl Sync for GpuVoxelChunkBuffers {}
+unsafe impl Send for GpuVoxelChunkBuffers {}

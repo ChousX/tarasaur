@@ -105,10 +105,6 @@ pub struct VoxelChunkArena {
     pub batch_uniform_buffer: Buffer,
     pub batch_uniform_buffer_pass3: Buffer, // pass3 uses workgroup_size(8,8,8), needs its own wg_per_chunk_z stride
 
-    pub readback_vertex_buffer: Buffer,
-    pub readback_index_buffer: Buffer,
-    pub readback_indirect_buffer: Buffer,
-
     pub pass1_bind_group: BindGroup,
     pub pass3_bind_group: BindGroup,
     pub compaction_bind_group: BindGroup,
@@ -222,14 +218,14 @@ impl VoxelChunkArena {
         let final_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_final_vertex_buffer"),
             size: budget_cells_per_chunk as u64 * 32 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::VERTEX | BufferUsages::COPY_SRC,
+            usage: BufferUsages::STORAGE | BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
 
         let index_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("arena_index_buffer"),
             size: budget_cells_per_chunk as u64 * 18 * 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::INDEX | BufferUsages::COPY_SRC,
+            usage: BufferUsages::STORAGE | BufferUsages::INDEX,
             mapped_at_creation: false,
         });
 
@@ -328,25 +324,6 @@ impl VoxelChunkArena {
                 }),
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             });
-
-        let readback_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_readback_vertex_buffer"),
-            size: budget_cells_per_chunk as u64 * 32 * max,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let readback_index_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_readback_index_buffer"),
-            size: budget_cells_per_chunk as u64 * 18 * 4 * max,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let readback_indirect_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_readback_indirect_buffer"),
-            size: 4 * max, // index_count only, per slot
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
 
         // --- Dynamic bump-allocation buffers (created before the bind groups
         // that reference them, since compaction_bind_group and
@@ -633,9 +610,6 @@ impl VoxelChunkArena {
             compaction_uniform_buffer,
             batch_uniform_buffer,
             batch_uniform_buffer_pass3,
-            readback_vertex_buffer,
-            readback_index_buffer,
-            readback_indirect_buffer,
             pass1_bind_group,
             pass3_bind_group,
             compaction_bind_group,
@@ -740,3 +714,6 @@ use crate::LOD;
 pub struct VoxelChunkArenaSet {
     pub arenas: HashMap<LOD, VoxelChunkArena>,
 }
+
+unsafe impl Send for VoxelChunkArena {}
+unsafe impl Sync for VoxelChunkArena {}

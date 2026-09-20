@@ -73,6 +73,8 @@ impl FromWorld for VoxelPipelineLayouts {
         }
     }
 }
+unsafe impl Send for VoxelPipelineLayouts {}
+unsafe impl Sync for VoxelPipelineLayouts {}
 
 #[derive(Resource)]
 pub struct VoxelComputePipeline {
