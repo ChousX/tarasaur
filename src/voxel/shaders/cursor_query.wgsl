@@ -135,7 +135,7 @@ fn sphere_trace_chunk(slot: u32, chunk_origin: vec3<f32>, ray_origin: vec3<f32>,
             return result;
         }
 
-        t = t + max(d * voxel_size, voxel_size * 0.25);
+        t = t + max(d * voxel_size, voxel_size * 0.1);
         if (t > t_max) {
             result.hit_distance = t_max;
             return result;

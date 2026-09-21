@@ -24,7 +24,7 @@ use crate::{
             update_voxel_material_bind_group,
         },
         query::{
-            CollisionLOD, ExtractedVoxelQueries, FrameParity, PendingVoxelQueries,
+            CollisionLOD, ExtractedVoxelQueries, FrameParity, NextQuerySlot, PendingVoxelQueries,
             VoxelQueryBuffers, VoxelQueryResultChannel, VoxelQueryResultReceiver,
             VoxelQueryResults, clear_pending_voxel_queries, dispatch_voxel_query_pass,
             drain_voxel_query_results, extract_voxel_queries, map_voxel_query_results,
@@ -108,7 +108,7 @@ impl Plugin for VoxelRenderPlugin {
         render_app.insert_resource(VoxelQueryResultChannel { sender: query_tx });
         render_app.init_resource::<CollisionLOD>();
         render_app.init_resource::<ExtractedVoxelQueries>();
-        render_app.init_resource::<FrameParity>();
+        render_app.init_resource::<NextQuerySlot>();
 
         render_app
             .init_resource::<VoxelChunkArenaSet>()
