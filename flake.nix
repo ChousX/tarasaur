@@ -1,12 +1,8 @@
 {
-        description = "A flake using Oxalica's rust-overlay wrapped with bevy-flake.";
+        description = "A flake using Oxalica's rust-overlay for Bevy development.";
 
         inputs = {
                 nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-                bevy-flake = {
-                        url = "github:swagtop/bevy-flake";
-                        inputs.nixpkgs.follows = "nixpkgs";
-                };
                 rust-overlay = {
                         url = "github:oxalica/rust-overlay";
                         inputs.nixpkgs.follows = "nixpkgs";
@@ -16,62 +12,59 @@
         outputs =
                 {
                         nixpkgs,
-                        bevy-flake,
                         rust-overlay,
                         ...
                 }:
                 let
-                        bf = bevy-flake.lib.configure (
-                                { pkgs, ... }:
-                                {
-                                        src = ./.;
-                                        rustToolchain =
-                                                targets:
-                                                let
-                                                        pkgs-with-overlay = (
-                                                                import nixpkgs {
-                                                                        inherit (pkgs.stdenv.hostPlatform) system;
-                                                                        overlays = [ (import rust-overlay) ];
-                                                                }
-                                                        );
-                                                        channel = "nightly"; # For stable, use "stable".
-                                                in
-                                                pkgs-with-overlay.rust-bin.${channel}.latest.default.override {
-                                                        inherit targets;
-                                                        extensions = [
-                                                                "rust-src"
-                                                                "rust-analyzer"
-                                                        ];
-                                                };
-                                }
-                        );
+                        supportedSystems = [
+                                "x86_64-linux"
+                                "aarch64-linux"
+                        ];
+                        forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
                 in
                 {
-                        inherit (bf) packages formatter;
-
-                        devShells = bf.lib.forSystems (
+                        devShells = forAllSystems (
                                 system:
                                 let
-                                        pkgs = import nixpkgs { inherit system; };
-                                        runtimeLibs = with pkgs; [
-                                                libxkbcommon
-                                                vulkan-loader
+                                        pkgs = import nixpkgs {
+                                                inherit system;
+                                                overlays = [ (import rust-overlay) ];
+                                        };
+
+                                        rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
+                                                extensions = [
+                                                        "rust-src"
+                                                        "rust-analyzer"
+                                                ];
+                                        };
+
+                                        buildInputs = with pkgs; [
+                                                udev
+                                                alsa-lib
                                                 wayland
-                                                libX11
-                                                libXcursor
-                                                libXrandr
-                                                libXi
+                                                libxkbcommon
                                         ];
+
+                                        runtimeLibs =
+                                                with pkgs;
+                                                [
+                                                        vulkan-loader
+                                                        libX11
+                                                        libXcursor
+                                                        libXrandr
+                                                        libXi
+                                                ]
+                                                ++ buildInputs;
                                 in
                                 {
                                         default = pkgs.mkShell {
                                                 name = "bevy";
+                                                nativeBuildInputs = [ pkgs.pkg-config ];
+                                                buildInputs = buildInputs;
                                                 packages = [
-                                                        bf.packages.${system}.rust-toolchain
+                                                        rustToolchain
                                                         pkgs.bacon
                                                         pkgs.renderdoc
-                                                        #bf.packages.${system}.dioxus-cli
-                                                        #bf.packages.${system}.bevy-cli
                                                 ];
                                                 LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
                                         };

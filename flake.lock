@@ -1,25 +1,5 @@
 {
   "nodes": {
-    "bevy-flake": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1789408214,
-        "narHash": "sha256-HxaLRruUgxiudW5XlCD5hCtm/BcWcJZbNHr8un7XKbc=",
-        "owner": "swagtop",
-        "repo": "bevy-flake",
-        "rev": "cc2e6213f2e1efe6af91488d2890ad3688aa0903",
-        "type": "github"
-      },
-      "original": {
-        "owner": "swagtop",
-        "repo": "bevy-flake",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1789684949,
@@ -38,7 +18,6 @@
     },
     "root": {
       "inputs": {
-        "bevy-flake": "bevy-flake",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }
