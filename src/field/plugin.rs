@@ -9,6 +9,7 @@ use crate::LOD;
 use crate::chunk::NewChunkSpawned;
 use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDFField, VisibilityField};
+use crate::persistence::RegisterSaveableFieldExt;
 use crate::voxel::systems::{
     extract_voxel_chunks, prepare_material_for_arena, prepare_voxel_arena,
 };
@@ -51,7 +52,7 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
         app.add_field::<MaterialField<M>, M>();
         app.add_observer(material_build_on_chunk_spawn::<M>);
-
+        app.register_saveable_field::<MaterialField<M>>();
         // extract_voxel_chunks<T> was already generalized to any
         // T: Versionable + ApronSample, so this is the whole extraction
         // side for free — MaterialField<M> already satisfies the bound.

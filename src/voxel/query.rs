@@ -19,6 +19,7 @@ use crate::{
         arena::VoxelChunkArenaSet,
         pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
         types::{HitResult, RayQuery},
+        util::next_pow2,
     },
 };
 
@@ -33,14 +34,6 @@ pub const QUERY_BUFFER_SLOTS: usize = 3;
 const SLOT_FREE: u8 = 0;
 const SLOT_COPIED: u8 = 1; // GPU copy submitted, ready to map
 const SLOT_MAPPED: u8 = 2; // map_async in flight, do not touch buffer
-
-fn next_pow2(x: u32) -> u32 {
-    if x <= 1 {
-        1
-    } else {
-        1u32 << (32 - (x - 1).leading_zeros())
-    }
-}
 
 /// Round-robin index into the QUERY_BUFFER_SLOTS pool. Replaces the old
 /// 2-buffer FrameParity scheme, which reused a buffer every 2 frames
@@ -491,14 +484,4 @@ pub fn map_voxel_query_results(
             state.store(SLOT_FREE, Ordering::Release);
         });
     }
-}
-
-/// Multiplicative hash over a signed chunk coordinate, used both to build
-/// and to probe the GPU chunk-lookup table — must match `hash_chunk` in
-/// cursor_query.wgsl exactly.
-pub fn hash_chunk_pos(pos: IVec3) -> u32 {
-    let x = pos.x as u32;
-    let y = pos.y as u32;
-    let z = pos.z as u32;
-    (x.wrapping_mul(0x9E37_79B1)) ^ (y.wrapping_mul(0x85EB_CA77)) ^ (z.wrapping_mul(0xC2B2_AE3D))
 }

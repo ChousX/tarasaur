@@ -4,6 +4,7 @@ pub mod pipeline;
 pub mod query;
 pub mod systems;
 pub mod types;
+pub mod util;
 
 use bevy::{
     asset::{load_internal_asset, uuid_handle},

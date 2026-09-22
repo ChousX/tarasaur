@@ -1,4 +1,6 @@
-use crate::{ApronSample, ExtractGate, LOD, Versionable, VoxelDataSlice, flatten_with_size};
+use crate::{
+    ApronSample, ExtractGate, FieldLOD, LOD, Versionable, VoxelDataSlice, flatten_with_size,
+};
 // fields/visibility.rs
 use super::Field;
 use bevy::prelude::*;
@@ -163,4 +165,10 @@ impl ExtractGate for VisibilityField {
 /// Number of u64 words needed to store one bit per voxel at the given LOD.
 fn words_for_lod(lod: LOD) -> usize {
     lod.volume().div_ceil(64)
+}
+
+impl FieldLOD for VisibilityField {
+    fn lod(&self) -> LOD {
+        self.lod
+    }
 }

@@ -6,6 +6,7 @@ pub mod editor;
 pub mod lod;
 pub mod material;
 pub mod ops;
+pub mod persistence;
 pub mod plugin;
 pub mod sdf;
 pub mod systems;
@@ -86,4 +87,8 @@ pub trait ExtractGate {
     fn should_extract(&self) -> bool {
         true
     }
+}
+
+pub trait FieldLOD {
+    fn lod(&self) -> LOD;
 }

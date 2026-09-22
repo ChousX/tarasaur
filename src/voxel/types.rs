@@ -1,4 +1,10 @@
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    render::{
+        render_resource::{Buffer, BufferUsages},
+        renderer::RenderDevice,
+    },
+};
 use bytemuck::{Pod, Zeroable};
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
@@ -64,4 +70,20 @@ pub struct HitResult {
     pub did_hit: u32,
     pub voxel_coord: [u32; 3],
     pub chunk_slot: u32,
+}
+use bevy::render::render_resource::*;
+
+pub trait CreateStorage {
+    fn storage(&self, label: &'static str, size: u64, usage: BufferUsages) -> Buffer;
+}
+
+impl CreateStorage for RenderDevice {
+    fn storage(&self, label: &'static str, size: u64, usage: BufferUsages) -> Buffer {
+        self.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
 }

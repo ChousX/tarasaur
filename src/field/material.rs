@@ -1,5 +1,5 @@
 use crate::{
-    ApronSample, ExtractGate, Versionable, VoxelDataSlice,
+    ApronSample, ExtractGate, FieldLOD, Versionable, VoxelDataSlice,
     ops::{AccumulateExt, BlendExt},
     voxel::systems::nearest_neighbor_sample,
 };
@@ -97,5 +97,10 @@ impl<M: VoxelMaterial> Versionable for MaterialField<M> {
     }
     fn incorment_version(&mut self) {
         self.version += 1;
+    }
+}
+impl<M: VoxelMaterial> FieldLOD for MaterialField<M> {
+    fn lod(&self) -> LOD {
+        self.lod
     }
 }

@@ -6,7 +6,13 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::voxel::types::DrawIndexedIndirectArgs;
+use crate::{
+    LOD,
+    voxel::{
+        types::{CreateStorage, DrawIndexedIndirectArgs},
+        util::{hash_chunk_pos, next_pow2},
+    },
+};
 
 const ACTIVE_FRACTION_ESTIMATE: f32 = 0.20; // tune from telemetry
 
@@ -53,23 +59,6 @@ fn max_chunks(
         total_cells
     );
     capped
-}
-
-/// Multiplicative hash over a signed chunk coordinate. Must match
-/// `hash_chunk` in cursor_query.wgsl exactly.
-fn hash_chunk_pos(pos: IVec3) -> u32 {
-    let x = pos.x as u32;
-    let y = pos.y as u32;
-    let z = pos.z as u32;
-    (x.wrapping_mul(0x9E37_79B1)) ^ (y.wrapping_mul(0x85EB_CA77)) ^ (z.wrapping_mul(0xC2B2_AE3D))
-}
-
-fn next_pow2(x: u32) -> u32 {
-    if x <= 1 {
-        1
-    } else {
-        1u32 << (32 - (x - 1).leading_zeros())
-    }
 }
 
 #[repr(C)]
@@ -153,18 +142,16 @@ impl VoxelChunkArena {
         ) as u64;
 
         let lookup_capacity = next_pow2((max as u32).saturating_mul(2)).max(4);
-        let sdf_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_sdf_buffer"),
-            size: sdf_elems_per_chunk as u64 * 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let material_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_material_buffer"),
-            size: sdf_elems_per_chunk as u64 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let sdf_buffer = render_device.storage(
+            "arena_sdf_buffer",
+            sdf_elems_per_chunk as u64 * 4 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
+        let material_buffer = render_device.storage(
+            "arena_material_buffer",
+            sdf_elems_per_chunk as u64 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
 
         // 1 bit/voxel, same element count as sdf_buffer/material_buffer, but each
         // slot gets its OWN word-aligned region (mask_words_per_chunk words) —
@@ -173,12 +160,11 @@ impl VoxelChunkArena {
         // whenever texture_size^3 isn't a multiple of 32 (it never is, for the
         // LOD sizes in use).
         let mask_words_per_chunk = sdf_elems_per_chunk.div_ceil(32);
-        let visibility_mask_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_visibility_mask_buffer"),
-            size: mask_words_per_chunk as u64 * 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let visibility_mask_buffer = render_device.storage(
+            "arena_visibility_mask_buffer",
+            mask_words_per_chunk as u64 * 4 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
 
         // Tiny: 1 bit per SLOT (not per voxel), packed 32 slots/word. Kept
         // deliberately separate from ChunkMeta rather than a bit stolen from
@@ -188,46 +174,40 @@ impl VoxelChunkArena {
         // there. This buffer is orders of magnitude smaller than ChunkMeta per
         // slot and keeps pass3 completely untouched by visibility work.
         let has_mask_words = (max as u32).div_ceil(32);
-        let chunk_has_mask_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_chunk_has_mask_buffer"),
-            size: has_mask_words as u64 * 4,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let chunk_has_mask_buffer = render_device.storage(
+            "arena_chunk_has_mask_buffer",
+            has_mask_words as u64 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
 
-        let flags_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_flags_buffer"),
-            size: total_cells as u64 * 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let flags_buffer = render_device.storage(
+            "arena_flags_buffer",
+            total_cells as u64 * 4 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
 
-        let compacted_offsets_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_compacted_offsets_buffer"),
-            size: total_cells as u64 * 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let compacted_offsets_buffer = render_device.storage(
+            "arena_compacted_offsets_buffer",
+            total_cells as u64 * 4 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
 
-        let scattered_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_scattered_vertex_buffer"),
-            size: budget_cells_per_chunk as u64 * 32 * max, // was total_cells — shrunk to match the dynamic budget
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let final_vertex_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_final_vertex_buffer"),
-            size: budget_cells_per_chunk as u64 * 32 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::VERTEX,
-            mapped_at_creation: false,
-        });
+        let scattered_vertex_buffer = render_device.storage(
+            "arena_scattered_vertex_buffer",
+            budget_cells_per_chunk as u64 * 32 * max, // was total_cells — shrunk to match the dynamic budget
+            BufferUsages::STORAGE,
+        );
+        let final_vertex_buffer = render_device.storage(
+            "arena_final_vertex_buffer",
+            budget_cells_per_chunk as u64 * 32 * max,
+            BufferUsages::STORAGE | BufferUsages::VERTEX,
+        );
 
-        let index_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_index_buffer"),
-            size: budget_cells_per_chunk as u64 * 18 * 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::INDEX,
-            mapped_at_creation: false,
-        });
+        let index_buffer = render_device.storage(
+            "arena_index_buffer",
+            budget_cells_per_chunk as u64 * 18 * 4 * max,
+            BufferUsages::STORAGE | BufferUsages::INDEX,
+        );
 
         let zeroed_args: Vec<DrawIndexedIndirectArgs> = (0..max as u32)
             .map(|_| DrawIndexedIndirectArgs {
@@ -249,19 +229,17 @@ impl VoxelChunkArena {
 
         let workgroup_capacity = 512u32; // WORKGROUP_SIZE * 2
         let blocks_per_chunk = (total_cells + workgroup_capacity - 1) / workgroup_capacity;
-        let block_sums_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_block_sums_buffer"),
-            size: (blocks_per_chunk as u64 * max) * 4,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+        let block_sums_buffer = render_device.storage(
+            "arena_block_sums_buffer",
+            (blocks_per_chunk as u64 * max) * 4,
+            BufferUsages::STORAGE,
+        );
 
-        let chunk_meta_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_chunk_meta_buffer"),
-            size: std::mem::size_of::<ChunkMeta>() as u64 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let chunk_meta_buffer = render_device.storage(
+            "arena_chunk_meta_buffer",
+            std::mem::size_of::<ChunkMeta>() as u64 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
 
         #[repr(C)]
         #[derive(Clone, Copy, Pod, Zeroable)]
@@ -328,42 +306,36 @@ impl VoxelChunkArena {
         // --- Dynamic bump-allocation buffers (created before the bind groups
         // that reference them, since compaction_bind_group and
         // chunk_bases_bind_group both need chunk_active_counts_buffer et al.) ---
-        let chunk_active_counts_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_chunk_active_counts_buffer"),
-            size: 4 * max,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let chunk_vertex_base_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_chunk_vertex_base_buffer"),
-            size: 4 * max,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let chunk_index_base_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_chunk_index_base_buffer"),
-            size: 4 * max,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let active_slot_map_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_active_slot_map_buffer"),
-            size: 4 * max,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let overflow_flag_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_overflow_flag_buffer"),
-            size: 4,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let overflow_readback_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("arena_overflow_readback_buffer"),
-            size: 4,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let chunk_active_counts_buffer = render_device.storage(
+            "arena_chunk_active_counts_buffer",
+            4 * max,
+            BufferUsages::STORAGE,
+        );
+        let chunk_vertex_base_buffer = render_device.storage(
+            "arena_chunk_vertex_base_buffer",
+            4 * max,
+            BufferUsages::STORAGE,
+        );
+        let chunk_index_base_buffer = render_device.storage(
+            "arena_chunk_index_base_buffer",
+            4 * max,
+            BufferUsages::STORAGE,
+        );
+        let active_slot_map_buffer = render_device.storage(
+            "arena_active_slot_map_buffer",
+            4 * max,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
+        let overflow_flag_buffer = render_device.storage(
+            "arena_overflow_flag_buffer",
+            4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        );
+        let overflow_readback_buffer = render_device.storage(
+            "arena_overflow_readback_buffer",
+            4,
+            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        );
 
         #[repr(C)]
         #[derive(Clone, Copy, Pod, Zeroable)]
@@ -707,8 +679,6 @@ impl VoxelChunkArena {
         self.slot_of_main_entity.get(&main_entity).copied()
     }
 }
-
-use crate::LOD;
 
 #[derive(Resource, Default)]
 pub struct VoxelChunkArenaSet {

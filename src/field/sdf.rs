@@ -1,4 +1,4 @@
-use crate::{ApronSample, ExtractGate, Versionable, VoxelDataSlice};
+use crate::{ApronSample, ExtractGate, FieldLOD, Versionable, VoxelDataSlice};
 
 use super::{Field, LOD};
 use bevy::prelude::*;
@@ -32,13 +32,19 @@ impl PackedCoord {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Component, Clone, Default)]
+#[derive(Component, Clone)]
 pub struct SDFField {
     pub lod: LOD,
     data: Box<[f32]>,
     seeds: Box<[PackedCoord]>,
     scratch: Vec<PackedCoord>,
     pub version: u64,
+}
+
+impl Default for SDFField {
+    fn default() -> Self {
+        Self::new(LOD::default())
+    }
 }
 
 impl SDFField {
@@ -76,6 +82,13 @@ impl SDFField {
         let size = self.lod.size();
         let volume = self.lod.volume();
 
+        // Guarantee buffers match the expected volume before sampling
+        if self.data.len() != volume {
+            self.data = vec![f32::MAX; volume].into_boxed_slice();
+        }
+        if self.seeds.len() != volume {
+            self.seeds = vec![PackedCoord::EMPTY; volume].into_boxed_slice();
+        }
         // Ensure the scratchpad buffer matches current LOD dimensions
         if self.scratch.len() != volume {
             self.scratch.resize(volume, PackedCoord::EMPTY);
@@ -306,3 +319,9 @@ impl ApronSample for SDFField {
 }
 
 impl ExtractGate for SDFField {}
+
+impl FieldLOD for SDFField {
+    fn lod(&self) -> LOD {
+        self.lod
+    }
+}
