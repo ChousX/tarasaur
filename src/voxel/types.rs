@@ -87,3 +87,12 @@ impl CreateStorage for RenderDevice {
         })
     }
 }
+
+pub fn entries<'a>(bufs: &[(u32, &'a Buffer)]) -> Vec<BindGroupEntry<'a>> {
+    bufs.iter()
+        .map(|&(binding, buf)| BindGroupEntry {
+            binding,
+            resource: buf.as_entire_binding(),
+        })
+        .collect()
+}

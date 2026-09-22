@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::{
     LOD,
     voxel::{
-        types::{CreateStorage, DrawIndexedIndirectArgs},
+        types::{CreateStorage, DrawIndexedIndirectArgs, entries},
         util::{hash_chunk_pos, next_pow2},
     },
 };
@@ -360,200 +360,74 @@ impl VoxelChunkArena {
         let pass1_bind_group = render_device.create_bind_group(
             Some("arena_pass1_bind_group"),
             &layouts.pass1_surface_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: sdf_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: flags_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: compacted_offsets_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: scattered_vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: final_vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    resource: indirect_args_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 6,
-                    resource: batch_uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 7,
-                    resource: chunk_meta_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 8,
-                    resource: active_slot_map_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 9,
-                    resource: visibility_mask_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 10,
-                    resource: chunk_has_mask_buffer.as_entire_binding(),
-                },
-            ],
+            &entries(&[
+                (0, &sdf_buffer),
+                (1, &flags_buffer),
+                (2, &compacted_offsets_buffer),
+                (3, &scattered_vertex_buffer),
+                (4, &final_vertex_buffer),
+                (5, &indirect_args_buffer),
+                (6, &batch_uniform_buffer),
+                (7, &chunk_meta_buffer),
+                (8, &active_slot_map_buffer),
+                (9, &visibility_mask_buffer),
+                (10, &chunk_has_mask_buffer),
+            ]),
         );
 
         let pass3_bind_group = render_device.create_bind_group(
             Some("arena_pass3_bind_group"),
             &layouts.pass3_surface_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: sdf_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: flags_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: compacted_offsets_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: final_vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: index_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    resource: indirect_args_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 6,
-                    // NOTE: pass3's own uniform buffer, not batch_uniform_buffer.
-                    resource: batch_uniform_buffer_pass3.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 7,
-                    resource: chunk_meta_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 8,
-                    resource: chunk_vertex_base_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 9,
-                    resource: chunk_index_base_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 10,
-                    resource: active_slot_map_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 11,
-                    resource: material_buffer.as_entire_binding(),
-                },
-                //BindGroupEntry {
-                //binding: 12,
-                //resource: visibility_mask_buffer.as_entire_binding(),
-                //},
-                //BindGroupEntry {
-                //binding: 13,
-                //resource: chunk_has_mask_buffer.as_entire_binding(),
-                //},
-            ],
+            &entries(&[
+                (0, &sdf_buffer),
+                (1, &flags_buffer),
+                (2, &compacted_offsets_buffer),
+                (3, &final_vertex_buffer),
+                (4, &index_buffer),
+                (5, &indirect_args_buffer),
+                (6, &batch_uniform_buffer_pass3),
+                (7, &chunk_meta_buffer),
+                (8, &chunk_vertex_base_buffer),
+                (9, &chunk_index_base_buffer),
+                (10, &active_slot_map_buffer),
+                (11, &material_buffer),
+            ]),
         );
         let compaction_bind_group = render_device.create_bind_group(
             Some("arena_compaction_bind_group"),
             &layouts.compaction_bind_group_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: compaction_uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: flags_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: compacted_offsets_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: block_sums_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: chunk_active_counts_buffer.as_entire_binding(),
-                },
-            ],
+            &entries(&[
+                (0, &compaction_uniform_buffer),
+                (1, &flags_buffer),
+                (2, &compacted_offsets_buffer),
+                (3, &block_sums_buffer),
+                (4, &chunk_active_counts_buffer),
+            ]),
         );
 
         let raster_chunk_bind_group = render_device.create_bind_group(
             Some("arena_raster_chunk_bind_group"),
             &layouts.raster_chunk_visibility_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: chunk_meta_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: visibility_mask_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: chunk_has_mask_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: batch_uniform_buffer_pass3.as_entire_binding(),
-                },
-            ],
+            &entries(&[
+                (0, &chunk_meta_buffer),
+                (1, &chunk_meta_buffer),
+                (2, &chunk_has_mask_buffer),
+                (3, &batch_uniform_buffer_pass3),
+            ]),
         );
 
         let chunk_bases_bind_group = render_device.create_bind_group(
             Some("arena_chunk_bases_bind_group"),
             &layouts.chunk_bases_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: chunk_bases_uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: chunk_active_counts_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: active_slot_map_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: chunk_vertex_base_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: chunk_index_base_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    resource: indirect_args_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 6,
-                    resource: overflow_flag_buffer.as_entire_binding(),
-                },
-            ],
+            &entries(&[
+                (0, &chunk_bases_uniform_buffer),
+                (1, &chunk_active_counts_buffer),
+                (2, &active_slot_map_buffer),
+                (3, &chunk_vertex_base_buffer),
+                (4, &chunk_index_base_buffer),
+                (5, &indirect_args_buffer),
+                (6, &overflow_flag_buffer),
+            ]),
         );
 
         let empty_lookup: Vec<[u32; 4]> = vec![[u32::MAX; 4]; lookup_capacity as usize];
