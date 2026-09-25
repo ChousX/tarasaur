@@ -9,7 +9,7 @@ use tarasaur::chunk::{ChunkManager, ChunkPosition, NewChunkSpawned};
 use tarasaur::field::persistence::{
     ChunkPersistencePlugin, RegisterSaveableFieldExt, SaveChunkMessage,
 };
-use tarasaur::field::{Field, FieldLOD, SDFField, VoxelDataSlice};
+use tarasaur::field::{Field, FieldLOD, SDFField};
 
 fn main() {
     let mut app = App::new();

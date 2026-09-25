@@ -2,6 +2,8 @@ use std::num::NonZeroU64;
 
 use bevy::render::render_resource::*;
 
+use crate::LOD;
+
 /// A read-write or read-only storage buffer binding, bound to `ShaderStages`.
 pub fn storage_buffer_entry(
     binding: u32,
@@ -139,12 +141,16 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
 /// Binding 1 (hits) is read_write since the shader writes results in
 /// place. Everything else is read-only from the shader's perspective.
 pub fn query_entries() -> Vec<BindGroupLayoutEntry> {
-    vec![
+    let mut entries = vec![
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // queries
         storage_buffer_entry(1, ShaderStages::COMPUTE, false), // hits
-        uniform_buffer_entry(2, ShaderStages::COMPUTE, NonZeroU64::new(32)),
-        storage_buffer_entry(3, ShaderStages::COMPUTE, true), // chunk_lookup
-        storage_buffer_entry(4, ShaderStages::COMPUTE, true), // sdf_buffer
-        storage_buffer_entry(5, ShaderStages::COMPUTE, true), // chunk_meta
-    ]
+        uniform_buffer_entry(2, ShaderStages::COMPUTE, NonZeroU64::new(80)), // QueryUniforms, grew
+        storage_buffer_entry(3, ShaderStages::COMPUTE, true), // merged chunk_lookup
+    ];
+    for lod_rank in 0..LOD::COUNT as u32 {
+        let base = 4 + lod_rank * 2;
+        entries.push(storage_buffer_entry(base, ShaderStages::COMPUTE, true)); // sdf_buffer[lod]
+        entries.push(storage_buffer_entry(base + 1, ShaderStages::COMPUTE, true)); // chunk_meta[lod]
+    }
+    entries
 }

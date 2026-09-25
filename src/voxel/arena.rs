@@ -2,15 +2,20 @@ use std::collections::HashMap;
 
 use bevy::{
     prelude::*,
-    render::{render_resource::*, renderer::RenderDevice, sync_world::MainEntity},
+    render::{
+        render_resource::*,
+        renderer::{RenderDevice, RenderQueue},
+        sync_world::MainEntity,
+    },
 };
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
     LOD,
     voxel::{
+        systems::ExtractedChunkField,
         types::{CreateStorage, DrawIndexedIndirectArgs, entries},
-        util::{hash_chunk_pos, next_pow2},
+        util::{hash_chunk_pos, make_batch_uniform_buffer, next_pow2},
     },
 };
 
@@ -264,45 +269,25 @@ impl VoxelChunkArena {
         let chunk_voxels = texture_size - 2;
         let voxel_size = crate::CHUNK_SIZE / chunk_voxels as f32;
 
-        #[repr(C)]
-        #[derive(Clone, Copy, Pod, Zeroable)]
-        struct BatchUniforms {
-            cell_count: u32,
-            texture_size: u32,
-            wg_per_chunk_z: u32,
-            voxel_size: f32,
-        }
-
         // Pass 1 uses @workgroup_size(4, 4, 4) -> its own z-stride.
-        let wg_per_chunk_z_pass1 = cell_count.div_ceil(4);
-        let batch_uniform_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("arena_batch_uniform_buffer"),
-            contents: bytemuck::bytes_of(&BatchUniforms {
-                cell_count,
-                texture_size,
-                wg_per_chunk_z: wg_per_chunk_z_pass1,
-                voxel_size,
-            }),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
+        let batch_uniform_buffer = make_batch_uniform_buffer(
+            render_device,
+            "arena_batch_uniform_buffer",
+            cell_count,
+            texture_size,
+            4,
+            voxel_size,
+        );
 
         // Pass 3 uses @workgroup_size(8, 8, 8) -> a different z-stride.
-        // Must NOT share batch_uniform_buffer with pass 1, or chunk_idx
-        // resolution in surface_nets_pass3.wgsl divides by the wrong stride
-        // and every chunk after the first aliases chunk 0's data.
-        let wg_per_chunk_z_pass3 = cell_count.div_ceil(8);
-        let batch_uniform_buffer_pass3 =
-            render_device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("arena_batch_uniform_buffer_pass3"),
-                contents: bytemuck::bytes_of(&BatchUniforms {
-                    cell_count,
-                    texture_size,
-                    wg_per_chunk_z: wg_per_chunk_z_pass3,
-                    voxel_size,
-                }),
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            });
-
+        let batch_uniform_buffer_pass3 = make_batch_uniform_buffer(
+            render_device,
+            "arena_batch_uniform_buffer_pass3",
+            cell_count,
+            texture_size,
+            8,
+            voxel_size,
+        );
         // --- Dynamic bump-allocation buffers (created before the bind groups
         // that reference them, since compaction_bind_group and
         // chunk_bases_bind_group both need chunk_active_counts_buffer et al.) ---
@@ -558,6 +543,53 @@ impl VoxelChunkArena {
 pub struct VoxelChunkArenaSet {
     pub arenas: HashMap<LOD, VoxelChunkArena>,
 }
+impl VoxelChunkArenaSet {
+    pub fn total_max_chunks(&self) -> u32 {
+        self.arenas.values().map(|a| a.max_chunks).sum()
+    }
 
+    /// Rebuilds a combined chunk_pos -> (lod_rank, slot) table across every
+    /// live LOD arena. Unlike each arena's own lookup (which only knows
+    /// about its own slots), this is what the query shader now walks so a
+    /// ray resolves whatever LOD is actually resident at a position.
+    pub fn rebuild_merged_lookup(
+        &self,
+        render_queue: &RenderQueue,
+        buffer: &Buffer,
+        capacity: u32,
+    ) {
+        const EMPTY: u32 = u32::MAX;
+        let cap = capacity as usize;
+        let mut table = vec![[EMPTY; 4]; cap];
+        for (&lod, arena) in self.arenas.iter() {
+            let rank = lod.rank();
+            for (&pos, &slot) in arena.slot_of_chunk_pos.iter() {
+                let packed = (rank << 28) | slot;
+                let mut idx = (hash_chunk_pos(pos) as usize) % cap;
+                while table[idx][3] != EMPTY {
+                    idx = (idx + 1) % cap;
+                }
+                table[idx] = [pos.x as u32, pos.y as u32, pos.z as u32, packed];
+            }
+        }
+        render_queue.write_buffer(buffer, 0, bytemuck::cast_slice(&table));
+    }
+}
 unsafe impl Send for VoxelChunkArena {}
 unsafe impl Sync for VoxelChunkArena {}
+
+fn dispatch(
+    encoder: &mut CommandEncoder,
+    label: &'static str,
+    pipeline: &ComputePipeline,
+    bind_group: &BindGroup,
+    (x, y, z): (u32, u32, u32),
+) {
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.dispatch_workgroups(x, y, z);
+}

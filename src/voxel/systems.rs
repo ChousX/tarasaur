@@ -240,13 +240,7 @@ pub fn prepare_visibility_for_arena(
         // layout — never a flat global bit-packing, which would let
         // adjacent slots' writes clobber each other's boundary words.
         let mask_words_per_chunk = (arena.sdf_elems_per_chunk as usize).div_ceil(32);
-        let mut packed = vec![0u32; mask_words_per_chunk];
-        for (i, &b) in extracted_mask.padded_data.iter().enumerate() {
-            if b != 0 {
-                packed[i / 32] |= 1 << (i % 32);
-            }
-        }
-
+        let mut packed = pack_bits(extracted_mask.padded_data.iter().map(|&b| b != 0));
         let byte_offset = slot as u64 * mask_words_per_chunk as u64 * 4;
         render_queue.write_buffer(
             &arena.visibility_mask_buffer,
@@ -258,13 +252,7 @@ pub fn prepare_visibility_for_arena(
         commands.entity(extracted_entity).despawn();
     }
     for arena in arena_set.arenas.values() {
-        let word_count = (arena.max_chunks as usize).div_ceil(32);
-        let mut packed = vec![0u32; word_count];
-        for (slot, &has_mask) in arena.mask_slots.iter().enumerate() {
-            if has_mask {
-                packed[slot / 32] |= 1 << (slot % 32);
-            }
-        }
+        let packed = pack_bits(arena.mask_slots.iter().copied());
         render_queue.write_buffer(
             &arena.chunk_has_mask_buffer,
             0,
@@ -856,4 +844,14 @@ pub fn init_voxel_arena<T: Send + Sync + 'static>(
             VoxelChunkArena::new(&render_device, &layouts, cell_count, size),
         );
     }
+}
+
+fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
+    let mut packed = vec![0u32; bits.len().div_ceil(32)];
+    for (i, b) in bits.enumerate() {
+        if b {
+            packed[i / 32] |= 1 << (i % 32);
+        }
+    }
+    packed
 }
