@@ -5,11 +5,11 @@ use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
-use crate::LOD;
 use crate::chunk::NewChunkSpawned;
 use crate::editor::SdfSphereStamp;
 use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDF, VisibilityField};
+use crate::lod_sync::sync_field_lod;
 use crate::persistence::RegisterSaveableFieldExt;
 use crate::systems::{
     clear_dirty_visibility, detect_topology_desync, process_sdf_sphere_stamps,
@@ -18,6 +18,7 @@ use crate::systems::{
 use crate::voxel::systems::{
     extract_voxel_chunks, prepare_material_for_arena, prepare_voxel_arena,
 };
+use crate::{FieldLOD, FieldNew, LOD};
 
 use super::{
     Field,
@@ -108,14 +109,14 @@ impl Plugin for FieldsPlugin {
 pub trait AppFieldExt {
     fn add_field<F, V>(&mut self) -> &mut Self
     where
-        F: Field<V> + Component<Mutability = Mutable>,
+        F: Field<V> + FieldLOD + FieldNew + Component<Mutability = Mutable>,
         V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt;
 }
 
 impl AppFieldExt for App {
     fn add_field<F, V>(&mut self) -> &mut Self
     where
-        F: Field<V> + Component<Mutability = Mutable>,
+        F: Field<V> + FieldLOD + FieldNew + Component<Mutability = Mutable>,
         V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt,
     {
         self.add_message::<EditFieldMessage<F, Sphere, V>>()
@@ -124,6 +125,7 @@ impl AppFieldExt for App {
         self.add_systems(
             Update,
             (
+                sync_field_lod::<F>,
                 process_shape_edits::<F, Sphere, V>,
                 process_shape_edits::<F, Cuboid, V>,
             )

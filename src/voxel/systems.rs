@@ -482,18 +482,34 @@ pub fn extract_voxel_chunks<T>(
         let Ok(visibility) = visibility_query.get(entity) else {
             continue; // FieldsPlugin guarantees this on every chunk; defensive only
         };
-        // /*
+        /*
         info!(
             "[extract] chunk {:?} visibility uniform = {:?}",
             pos.0,
             visibility.is_uniform()
         );
-        // */
+         */
         if visibility.is_uniform() == Some(false) {
             continue;
         }
 
         let size = lod.size();
+        let expected_elems = (size * size * size) as usize;
+        if field.data_slice().len() != expected_elems {
+            // LOD component changed this frame but the field hasn't caught up
+            // yet (sync_field_lod runs in the main world's Update; this system
+            // runs in the render world's ExtractSchedule — the two aren't
+            // guaranteed ordered relative to each other on the same frame).
+            // Skip this chunk for one frame rather than reading out of bounds;
+            // sync_field_lod will have resized it by the next extraction pass.
+            warn!(
+                "[extract_voxel_chunks] chunk {:?} LOD/field size mismatch (LOD wants {} elems, field has {}), skipping this frame",
+                pos.0,
+                expected_elems,
+                field.data_slice().len()
+            );
+            continue;
+        }
 
         let mut versions = [0u64; 8];
         versions[0] = field.version();
@@ -570,8 +586,20 @@ pub fn fill_apron<T>(
         let Ok((_, _, n_field, n_lod)) = query.get(n_entity) else {
             return None;
         };
+        let n_size = n_lod.size();
+        let expected = (n_size * n_size * n_size) as usize;
+        if n_field.data_slice().len() != expected {
+            // Same LOD/field race as extract_voxel_chunks's own guard, one
+            // hop over: this neighbor's LOD was bumped but its field hasn't
+            // been resized by sync_field_lod yet this frame. Treat as "no
+            // neighbor data available" for this frame — fill_region's None
+            // branch already handles that by falling back to the current
+            // chunk's own edge data, which is a safe (if slightly less
+            // accurate for one frame) apron value.
+            return None;
+        }
         let data = n_field.data_slice().to_vec().into_boxed_slice();
-        Some((data, n_lod.size()))
+        Some((data, n_size))
     };
 
     // --- Faces: +x, +y, +z ---

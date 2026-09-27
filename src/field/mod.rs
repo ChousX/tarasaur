@@ -3,9 +3,10 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 
 pub mod editor;
-mod generator;
+pub mod generator;
 mod loading;
 pub mod lod;
+pub mod lod_sync;
 pub mod material;
 pub mod ops;
 pub mod persistence;
@@ -93,4 +94,28 @@ pub trait ExtractGate {
 
 pub trait FieldLOD {
     fn lod(&self) -> LOD;
+}
+
+/// Reconstructs a field at a given LOD with default/empty contents —
+/// the same shape every field type's `new(lod)` already provides. Exists
+/// so the LOD-sync system (see field/lod_sync.rs) can reset any field
+/// type generically without knowing its concrete type.
+pub trait FieldNew {
+    fn new_for_lod(lod: LOD) -> Self;
+}
+
+impl FieldNew for SDF {
+    fn new_for_lod(lod: LOD) -> Self {
+        Self::new(lod)
+    }
+}
+impl FieldNew for VisibilityField {
+    fn new_for_lod(lod: LOD) -> Self {
+        Self::new(lod)
+    }
+}
+impl<M: VoxelMaterial> FieldNew for MaterialField<M> {
+    fn new_for_lod(lod: LOD) -> Self {
+        Self::new(lod)
+    }
 }
