@@ -17,7 +17,7 @@ use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 use systems::extract_voxel_chunks;
 
 use crate::{
-    SDFField, VisibilityField,
+    SDF, VisibilityField,
     voxel::{
         arena::VoxelChunkArenaSet,
         pipeline::{
@@ -25,7 +25,7 @@ use crate::{
             update_voxel_material_bind_group,
         },
         query::{
-            CollisionLOD, ExtractedVoxelQueries, FrameParity, NextQuerySlot, PendingVoxelQueries,
+            CollisionLOD, ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries,
             VoxelQueryBuffers, VoxelQueryResultChannel, VoxelQueryResultReceiver,
             VoxelQueryResults, clear_pending_voxel_queries, dispatch_voxel_query_pass,
             drain_voxel_query_results, extract_voxel_queries, map_voxel_query_results,
@@ -116,7 +116,7 @@ impl Plugin for VoxelRenderPlugin {
             .add_systems(
                 ExtractSchedule,
                 (
-                    extract_voxel_chunks::<SDFField>,
+                    extract_voxel_chunks::<SDF>,
                     extract_voxel_chunks::<VisibilityField>,
                     extract_voxel_queries,
                 ),
@@ -125,8 +125,8 @@ impl Plugin for VoxelRenderPlugin {
                 Render,
                 (
                     (
-                        init_voxel_arena::<SDFField>,
-                        prepare_voxel_arena::<SDFField>,
+                        init_voxel_arena::<SDF>,
+                        prepare_voxel_arena::<SDF>,
                         prepare_visibility_for_arena,
                     )
                         .chain()

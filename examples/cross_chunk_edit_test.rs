@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 use tarasaur::{
-    LOD, SDFField, TarasaurPlugin,
+    LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::editor::WorldEditor,
 };
@@ -76,7 +76,7 @@ fn spawn_two_chunks(mut commands: Commands) {
     commands.spawn((Chunk, ChunkPosition(IVec3::new(1, 0, 0)), LOD::Medium));
 }
 
-fn all_chunks_ready(sdf_q: &Query<&SDFField>) -> bool {
+fn all_chunks_ready(sdf_q: &Query<&SDF>) -> bool {
     sdf_q.iter().count() == 2
 }
 
@@ -85,8 +85,8 @@ fn all_chunks_ready(sdf_q: &Query<&SDFField>) -> bool {
 /// mentions chunk position or entity — just world coordinates.
 fn carve_across_boundary(
     mut fired: Local<bool>,
-    sdf_q: Query<&SDFField>,
-    mut editor: WorldEditor<SDFField, f32>,
+    sdf_q: Query<&SDF>,
+    mut editor: WorldEditor<SDF, f32>,
 ) {
     if *fired || !all_chunks_ready(&sdf_q) {
         return;
@@ -103,7 +103,7 @@ fn carve_across_boundary(
 
 /// Confirms both chunks were actually touched, by checking that voxels near
 /// the shared face went solid on *both* sides.
-fn log_both_chunks(mut logged: Local<bool>, query: Query<(&ChunkPosition, &SDFField)>) {
+fn log_both_chunks(mut logged: Local<bool>, query: Query<(&ChunkPosition, &SDF)>) {
     if *logged || query.iter().count() != 2 {
         return;
     }

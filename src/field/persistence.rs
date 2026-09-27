@@ -1,19 +1,18 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use bevy::ecs::component::Mutable;
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
-use bevy::tasks::AsyncComputeTaskPool;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use serde::{Deserialize, Serialize};
 
 use crate::LOD;
-use crate::chunk::{ChunkManager, ChunkPosition, NewChunkSpawned};
+use crate::chunk::{ChunkManager, NewChunkSpawned};
+use crate::field::generator::ChunkGeneratorRegistry;
 use crate::field::material::VoxelMaterial;
 use crate::field::{
-    Field, FieldLOD, MaterialField, SDFField, Versionable, VisibilityField, VoxelDataSlice,
+    Field, FieldLOD, MaterialField, SDF, Versionable, VisibilityField, VoxelDataSlice,
 };
 
 // ============================================================================
@@ -76,9 +75,9 @@ where
 // Field Restorable Implementations
 // ============================================================================
 
-impl RestorableField for SDFField {
+impl RestorableField for SDF {
     fn field_type_id() -> &'static str {
-        std::any::type_name::<SDFField>()
+        std::any::type_name::<SDF>()
     }
 
     fn restore_from_bytes(&mut self, bytes: &[u8]) {
@@ -143,7 +142,7 @@ impl<M: VoxelMaterial> RestorableField for MaterialField<M> {
 // ============================================================================
 
 type FieldSaverFn = fn(&World, Entity) -> Option<FieldSavePayload>;
-type FieldLoaderFn = fn(&mut World, Entity, &[u8]);
+pub(crate) type FieldLoaderFn = fn(&mut World, Entity, &[u8]);
 
 #[derive(Resource, Default)]
 pub struct ChunkPersistenceRegistry {
@@ -172,6 +171,13 @@ impl ChunkPersistenceRegistry {
             },
         );
     }
+
+    /// Looks up the loader closure for a given field type id — used by
+    /// `resolve_chunk_data_tasks` to apply both loaded and generated
+    /// payloads through the same path.
+    pub fn loader_for(&self, field_type_id: &str) -> Option<FieldLoaderFn> {
+        self.loaders.get(field_type_id).copied()
+    }
 }
 
 // ============================================================================
@@ -185,13 +191,10 @@ fn should_overwrite_save(file_path: &Path, candidate_lod: LOD) -> bool {
         return true;
     }
 
-    if let Ok(mut file) = File::open(file_path) {
-        let mut buffer = Vec::new();
-        if file.read_to_end(&mut buffer).is_ok() {
-            if let Ok(existing_data) = postcard::from_bytes::<ChunkSaveData>(&buffer) {
-                if existing_data.header.lod.size() > candidate_lod.size() {
-                    return false;
-                }
+    if let Ok(bytes) = std::fs::read(file_path) {
+        if let Ok(existing_data) = postcard::from_bytes::<ChunkSaveData>(&bytes) {
+            if existing_data.header.lod.size() > candidate_lod.size() {
+                return false;
             }
         }
     }
@@ -200,7 +203,7 @@ fn should_overwrite_save(file_path: &Path, candidate_lod: LOD) -> bool {
 }
 
 // ============================================================================
-// Systems & Observers
+// Systems & Observers — saving
 // ============================================================================
 
 #[derive(Message)]
@@ -262,8 +265,8 @@ pub fn generic_save_chunk_system(
                 }
 
                 if let Ok(bytes) = postcard::to_allocvec(&save_data) {
-                    if let Ok(mut file) = File::create(file_path) {
-                        let _ = file.write_all(&bytes);
+                    if let Err(e) = std::fs::write(file_path, bytes) {
+                        eprintln!("Failed to write chunk save: {e}");
                     }
                 }
             })
@@ -271,52 +274,81 @@ pub fn generic_save_chunk_system(
     }
 }
 
-/// Observer triggering automatic payload restoration when a chunk spawns
-pub fn load_chunk_on_spawn(
+// ============================================================================
+// Systems & Observers — loading / generating
+// ============================================================================
+
+/// Attached to a chunk entity while its initial data (loaded from disk, or
+/// produced by `ChunkGeneratorRegistry` when no save exists) is being
+/// resolved off the main thread. Removed by `resolve_chunk_data_tasks`
+/// once the task completes and its payloads have been applied.
+#[derive(Component)]
+pub struct ChunkDataTask(Task<Vec<FieldSavePayload>>);
+
+/// Fires on every new chunk. Spawns a background task that checks disk
+/// first and falls back to generation — both branches are pure I/O/CPU
+/// work with no ECS access, so both run off the main thread identically.
+/// Nothing here blocks: the observer just kicks the task off and returns.
+pub fn spawn_chunk_data_task(
     trigger: On<NewChunkSpawned>,
-    chunk_q: Query<&ChunkPosition>,
-    _registry: Res<ChunkPersistenceRegistry>,
+    lod_q: Query<&LOD>,
+    generators: Res<ChunkGeneratorRegistry>,
     mut commands: Commands,
 ) {
     let NewChunkSpawned {
         entity,
-        chunk_position: chunk_pos,
+        chunk_position,
         ..
-    } = trigger.event();
+    } = *trigger.event();
 
-    if chunk_q.get(*entity).is_err() {
+    let Ok(&lod) = lod_q.get(entity) else {
         return;
-    }
+    };
 
+    let generators = generators.clone(); // Arc<dyn Fn> clones are cheap
     let save_path = PathBuf::from(format!(
         "./saves/chunks/chunk_{}_{}_{}.bin",
-        chunk_pos.x, chunk_pos.y, chunk_pos.z
+        chunk_position.x, chunk_position.y, chunk_position.z
     ));
 
-    if !save_path.exists() {
-        return;
-    }
-
-    if let Ok(mut file) = File::open(&save_path) {
-        let mut buffer = Vec::new();
-        if file.read_to_end(&mut buffer).is_ok() {
-            if let Ok(save_data) = postcard::from_bytes::<ChunkSaveData>(&buffer) {
-                let entity_id = *entity;
-                commands.queue(move |world: &mut World| {
-                    for field_payload in save_data.fields {
-                        let loader = world
-                            .resource::<ChunkPersistenceRegistry>()
-                            .loaders
-                            .get(field_payload.field_type_id.as_str())
-                            .copied();
-
-                        if let Some(loader_fn) = loader {
-                            loader_fn(world, entity_id, &field_payload.bytes);
-                        }
-                    }
-                });
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        if let Ok(bytes) = std::fs::read(&save_path) {
+            if let Ok(save_data) = postcard::from_bytes::<ChunkSaveData>(&bytes) {
+                return save_data.fields;
             }
         }
+        generators.generate_all(chunk_position, lod)
+    });
+
+    commands.entity(entity).insert(ChunkDataTask(task));
+}
+
+/// Runs every frame. Non-blocking poll of every in-flight
+/// `ChunkDataTask`; on completion, applies each payload through the same
+/// `ChunkPersistenceRegistry` loader closures a save-file restore uses —
+/// loaded and generated data are indistinguishable from this point on.
+pub fn resolve_chunk_data_tasks(
+    mut commands: Commands,
+    mut tasks: Query<(Entity, &mut ChunkDataTask)>,
+    registry: Res<ChunkPersistenceRegistry>,
+) {
+    for (entity, mut task) in tasks.iter_mut() {
+        let Some(payloads) = block_on(poll_once(&mut task.0)) else {
+            continue;
+        };
+
+        for payload in payloads {
+            if let Some(loader) = registry.loader_for(&payload.field_type_id) {
+                commands.queue(move |world: &mut World| loader(world, entity, &payload.bytes));
+            } else {
+                warn!(
+                    "[resolve_chunk_data_tasks] no loader registered for field type {:?}, dropping payload",
+                    payload.field_type_id
+                );
+            }
+        }
+
+        commands.entity(entity).remove::<ChunkDataTask>();
     }
 }
 
@@ -352,8 +384,12 @@ pub struct ChunkPersistencePlugin;
 impl Plugin for ChunkPersistencePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkPersistenceRegistry>()
+            .init_resource::<ChunkGeneratorRegistry>()
             .add_message::<SaveChunkMessage>()
-            .add_systems(Update, generic_save_chunk_system)
-            .add_observer(load_chunk_on_spawn);
+            .add_systems(
+                Update,
+                (generic_save_chunk_system, resolve_chunk_data_tasks),
+            )
+            .add_observer(spawn_chunk_data_task);
     }
 }

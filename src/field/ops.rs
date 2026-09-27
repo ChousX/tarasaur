@@ -63,6 +63,20 @@ impl BlendExt for bool {
     }
 }
 
+/// Lets a field type be written directly from a signed-distance value —
+/// only meaningful for actual distance fields (f32), unlike AccumulateExt/
+/// BlendExt which apply to every field type.
+pub trait FromSignedDistance {
+    fn from_signed_distance(distance: f32) -> Self;
+}
+
+impl FromSignedDistance for f32 {
+    #[inline]
+    fn from_signed_distance(distance: f32) -> Self {
+        distance
+    }
+}
+
 /// Extension trait for fields that support spherical operations.
 pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// Applies an operation to all voxels within a sphere.
@@ -130,6 +144,25 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             let factor = falloff * rate;
             current.blend_towards(target_val, factor)
         });
+    }
+    /// Writes the exact analytic signed distance to this sphere's surface
+    /// for every voxel in range — negative inside, positive outside, a
+    /// real continuous gradient everywhere. `apply_sphere` already hands
+    /// us `dist` (grid-space distance from center), so the sphere SDF
+    /// formula is just `dist - radius`: no flat sentinel, no seam, no
+    /// waiting on JFA to fix a discontinuity that a constant stamp created
+    /// in the first place.
+    fn stamp_sdf_sphere(&mut self, center: Vec3, bound_radius: f32, sdf_radius: f32)
+    where
+        T: FromSignedDistance,
+    {
+        self.apply_sphere(
+            center,
+            Sphere {
+                radius: bound_radius,
+            },
+            |_, dist| T::from_signed_distance(dist - sdf_radius),
+        );
     }
 }
 
@@ -231,5 +264,50 @@ impl ShapeScale for Cuboid {
         Cuboid {
             half_size: self.half_size * factor,
         }
+    }
+}
+
+pub trait ShapeEditOps<T: Copy + Default, S>: Field<T> {
+    fn fill(&mut self, center: Vec3, shape: S, value: T);
+    fn accumulate(&mut self, center: Vec3, shape: S, delta: T)
+    where
+        T: AccumulateExt;
+    fn blend(&mut self, center: Vec3, shape: S, target: T, rate: f32)
+    where
+        T: BlendExt;
+}
+
+impl<T: Copy + Default, F: Field<T> + ?Sized> ShapeEditOps<T, Sphere> for F {
+    fn fill(&mut self, c: Vec3, s: Sphere, v: T) {
+        self.fill_sphere(c, s, v);
+    }
+    fn accumulate(&mut self, c: Vec3, s: Sphere, d: T)
+    where
+        T: AccumulateExt,
+    {
+        self.accumulate_sphere(c, s, d);
+    }
+    fn blend(&mut self, c: Vec3, s: Sphere, t: T, r: f32)
+    where
+        T: BlendExt,
+    {
+        self.blend_sphere(c, s, t, r);
+    }
+}
+impl<T: Copy + Default, F: Field<T> + ?Sized> ShapeEditOps<T, Cuboid> for F {
+    fn fill(&mut self, c: Vec3, s: Cuboid, v: T) {
+        self.fill_box(c, s, v);
+    }
+    fn accumulate(&mut self, c: Vec3, s: Cuboid, d: T)
+    where
+        T: AccumulateExt,
+    {
+        self.accumulate_box(c, s, d);
+    }
+    fn blend(&mut self, c: Vec3, s: Cuboid, t: T, r: f32)
+    where
+        T: BlendExt,
+    {
+        self.blend_box(c, s, t, r);
     }
 }

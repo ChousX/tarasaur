@@ -88,18 +88,6 @@ pub struct VoxelQueryResults(pub Vec<HitResult>);
 #[derive(Resource, Default)]
 pub struct ExtractedVoxelQueries(pub Vec<RayQuery>);
 
-/// 0 or 1, flips every render frame. Frame N dispatches into
-/// `hit_buffers[parity]`; the *other* readback buffer, copied a full
-/// frame earlier, is safe to `map_async` this frame with no stall.
-#[derive(Resource)]
-pub struct FrameParity(pub usize);
-
-impl Default for FrameParity {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-
 /// Render-world sender half. Mirrors `MeshReadbackChannel`'s pattern.
 #[derive(Resource)]
 pub struct VoxelQueryResultChannel {
@@ -534,20 +522,4 @@ pub fn map_voxel_query_results(
             state.store(SLOT_FREE, Ordering::Release);
         });
     }
-}
-
-fn dispatch(
-    encoder: &mut CommandEncoder,
-    label: &'static str,
-    pipeline: &ComputePipeline,
-    bind_group: &BindGroup,
-    (x, y, z): (u32, u32, u32),
-) {
-    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some(label),
-        timestamp_writes: None,
-    });
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, bind_group, &[]);
-    pass.dispatch_workgroups(x, y, z);
 }

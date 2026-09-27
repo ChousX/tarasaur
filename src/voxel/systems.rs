@@ -1,3 +1,4 @@
+use super::util::dispatch;
 use std::marker::PhantomData;
 
 use bevy::{
@@ -21,7 +22,7 @@ use crate::{
     },
 };
 
-use super::{buffers::GpuVoxelChunkBuffers, pipeline::VoxelComputePipeline};
+use super::pipeline::VoxelComputePipeline;
 
 #[derive(Component)]
 pub struct ExtractedChunkField<T: Send + Sync + 'static> {
@@ -240,7 +241,7 @@ pub fn prepare_visibility_for_arena(
         // layout — never a flat global bit-packing, which would let
         // adjacent slots' writes clobber each other's boundary words.
         let mask_words_per_chunk = (arena.sdf_elems_per_chunk as usize).div_ceil(32);
-        let mut packed = pack_bits(extracted_mask.padded_data.iter().map(|&b| b != 0));
+        let packed = pack_bits(extracted_mask.padded_data.iter().map(|&b| b != 0));
         let byte_offset = slot as u64 * mask_words_per_chunk as u64 * 4;
         render_queue.write_buffer(
             &arena.visibility_mask_buffer,
@@ -303,86 +304,60 @@ pub fn dispatch_voxel_compute_passes_batched(
             continue;
         }
 
-        let wg_per_chunk_pass1 = arena.cell_count.div_ceil(4);
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("surface_nets_pass1_batched"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pass1_pipeline);
-            pass.set_bind_group(0, &arena.pass1_bind_group, &[]);
-            pass.dispatch_workgroups(
-                wg_per_chunk_pass1,
-                wg_per_chunk_pass1,
-                wg_per_chunk_pass1 * active,
-            );
-        }
+        let wg1 = arena.cell_count.div_ceil(4);
+        dispatch(
+            &mut encoder,
+            "surface_nets_pass1_batched",
+            pass1_pipeline,
+            &arena.pass1_bind_group,
+            (wg1, wg1, wg1 * active),
+        );
 
-        let wg_per_chunk_scan = arena.blocks_per_chunk;
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_scan_batched"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(stream_compaction_pipeline);
-            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-            pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
-        }
+        let wg_scan = arena.blocks_per_chunk;
+        dispatch(
+            &mut encoder,
+            "stream_compaction_scan_batched",
+            stream_compaction_pipeline,
+            &arena.compaction_bind_group,
+            (wg_scan * active, 1, 1),
+        );
+        dispatch(
+            &mut encoder,
+            "stream_compaction_scan_block_sums_batched",
+            scan_block_sums_pipeline,
+            &arena.compaction_bind_group,
+            (active, 1, 1),
+        );
+        dispatch(
+            &mut encoder,
+            "stream_compaction_resolve_batched",
+            stream_compaction_resolve_pipeline,
+            &arena.compaction_bind_group,
+            (wg_scan * active, 1, 1),
+        );
+        dispatch(
+            &mut encoder,
+            "stream_compaction_write_active_counts",
+            write_chunk_active_count_pipeline,
+            &arena.compaction_bind_group,
+            (active, 1, 1),
+        );
+        dispatch(
+            &mut encoder,
+            "compute_chunk_bases",
+            chunk_bases_pipeline,
+            &arena.chunk_bases_bind_group,
+            (1, 1, 1),
+        );
 
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_scan_block_sums_batched"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(scan_block_sums_pipeline);
-            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-            pass.dispatch_workgroups(active, 1, 1); // one block-sum scan per chunk, indexed by workgroup_id.x
-        }
-
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_resolve_batched"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(stream_compaction_resolve_pipeline);
-            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-            pass.dispatch_workgroups(wg_per_chunk_scan * active, 1, 1);
-        }
-
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("stream_compaction_write_active_counts"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(write_chunk_active_count_pipeline);
-            pass.set_bind_group(0, &arena.compaction_bind_group, &[]);
-            pass.dispatch_workgroups(active, 1, 1);
-        }
-
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("compute_chunk_bases"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(chunk_bases_pipeline);
-            pass.set_bind_group(0, &arena.chunk_bases_bind_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-
-        let wg_per_chunk_pass3 = arena.cell_count.div_ceil(8);
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("surface_nets_pass3_batched"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pass3_pipeline);
-            pass.set_bind_group(0, &arena.pass3_bind_group, &[]);
-            pass.dispatch_workgroups(
-                wg_per_chunk_pass3,
-                wg_per_chunk_pass3,
-                wg_per_chunk_pass3 * active,
-            );
-        }
+        let wg3 = arena.cell_count.div_ceil(8);
+        dispatch(
+            &mut encoder,
+            "surface_nets_pass3_batched",
+            pass3_pipeline,
+            &arena.pass3_bind_group,
+            (wg3, wg3, wg3 * active),
+        );
 
         encoder.copy_buffer_to_buffer(
             &arena.overflow_flag_buffer,
@@ -392,7 +367,6 @@ pub fn dispatch_voxel_compute_passes_batched(
             4,
         );
     }
-
     render_queue.submit(std::iter::once(encoder.finish()));
 }
 
@@ -508,7 +482,13 @@ pub fn extract_voxel_chunks<T>(
         let Ok(visibility) = visibility_query.get(entity) else {
             continue; // FieldsPlugin guarantees this on every chunk; defensive only
         };
-
+        // /*
+        info!(
+            "[extract] chunk {:?} visibility uniform = {:?}",
+            pos.0,
+            visibility.is_uniform()
+        );
+        // */
         if visibility.is_uniform() == Some(false) {
             continue;
         }
@@ -854,4 +834,24 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
         }
     }
     packed
+}
+
+fn arena_or_drop<'a>(
+    arena_set: &'a mut VoxelChunkArenaSet,
+    lod: LOD,
+    chunk_pos: IVec3,
+    entity: Entity,
+    system: &str,
+    commands: &mut Commands,
+) -> Option<&'a mut VoxelChunkArena> {
+    if arena_set.arenas.contains_key(&lod) {
+        arena_set.arenas.get_mut(&lod)
+    } else {
+        warn!(
+            "[{system}] no arena for LOD {:?}, dropping chunk {:?}",
+            lod, chunk_pos
+        );
+        commands.entity(entity).despawn();
+        None
+    }
 }

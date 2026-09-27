@@ -7,7 +7,7 @@ use bevy::{
     },
 };
 use tarasaur::{
-    Field, LOD, SDFField, TarasaurPlugin,
+    Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
 };
 
@@ -246,7 +246,7 @@ fn terrain_height(world_x: f32, world_z: f32) -> f32 {
 fn generate_terrain(
     mut generated: Local<bool>,
     mut ready: ResMut<TerrainReady>,
-    mut query: Query<(&ChunkPosition, &mut SDFField)>,
+    mut query: Query<(&ChunkPosition, &mut SDF)>,
 ) {
     if *generated || query.iter().count() as i32 != chunk_count() {
         return;
@@ -283,7 +283,7 @@ fn log_lod_distribution(
     mut frame: Local<u32>,
     mut logged: Local<bool>,
     ready: Res<TerrainReady>,
-    query: Query<(&ChunkPosition, &LOD, &SDFField)>,
+    query: Query<(&ChunkPosition, &LOD, &SDF)>,
 ) {
     if *logged || !ready.0 {
         return;

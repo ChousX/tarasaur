@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use tarasaur::DirtyField;
 use tarasaur::{
-    Field, LOD, SDFField, TarasaurPlugin,
+    Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     voxel::buffers::GpuVoxelChunkBuffers,
 };
@@ -77,7 +77,7 @@ fn spawn_sphere_chunks(mut commands: Commands) {
                 let chunk_pos = IVec3::new(x, y, z);
                 let lod = LOD::Medium; //LODS[i];
                 i = (i + 1) % 3;
-                let mut sdf = SDFField::new(lod);
+                let mut sdf = SDF::new(lod);
                 let stats = fill_sphere_sdf(&mut sdf, chunk_pos, SPHERE_CENTER, SPHERE_RADIUS);
 
                 info!(
@@ -95,7 +95,7 @@ fn spawn_sphere_chunks(mut commands: Commands) {
                     ChunkPosition(chunk_pos),
                     lod,
                     sdf,
-                    DirtyField::<SDFField, f32>::default(),
+                    DirtyField::<SDF, f32>::default(),
                 ));
                 spawned.push(chunk_pos);
             }
@@ -123,7 +123,7 @@ struct SphereFillStats {
 }
 
 fn fill_sphere_sdf(
-    field: &mut SDFField,
+    field: &mut SDF,
     chunk_pos: IVec3,
     center: Vec3,
     radius: f32,

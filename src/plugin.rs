@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::{
     chunk::ChunkPlugin,
     field::{
-        FieldsPlugin, SDFField, VisibilityField,
+        FieldsPlugin, SDF, VisibilityField,
         persistence::{ChunkPersistencePlugin, RegisterSaveableFieldExt},
     },
     voxel::VoxelRenderPlugin,
@@ -19,7 +19,7 @@ impl Plugin for TarasaurPlugin {
             FieldsPlugin,
             ChunkPersistencePlugin,
         ))
-        .register_saveable_field::<SDFField>()
+        .register_saveable_field::<SDF>()
         .register_saveable_field::<VisibilityField>();
     }
 }

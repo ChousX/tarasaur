@@ -3,20 +3,21 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 
 pub mod editor;
+mod generator;
+mod loading;
 pub mod lod;
 pub mod material;
 pub mod ops;
 pub mod persistence;
-pub mod plugin;
+mod plugin;
 pub mod sdf;
 pub mod systems;
 pub mod visibility;
 pub use lod::LOD;
 pub use material::MaterialField;
 pub use material::VoxelMaterial;
-pub use plugin::AppFieldExt;
-pub use plugin::{FieldSet, FieldsPlugin};
-pub use sdf::SDFField;
+pub use plugin::*;
+pub use sdf::SDF;
 pub use visibility::VisibilityField;
 
 #[derive(Component, Clone, Copy)]
@@ -45,7 +46,8 @@ pub trait Field<T: Copy + Default>: Component {
 }
 
 pub trait FieldGen<T: Copy + Default>: Field<T> {
-    fn build(&mut self, pos: UVec3) -> T;
+    /// `chunk_pos` is in chunk-grid coordinates; `local` is 0..size() per axis.
+    fn build(&mut self, chunk_pos: IVec3, local: UVec3) -> T;
 }
 
 #[inline]

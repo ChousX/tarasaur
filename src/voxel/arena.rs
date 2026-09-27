@@ -13,7 +13,6 @@ use bytemuck::{Pod, Zeroable};
 use crate::{
     LOD,
     voxel::{
-        systems::ExtractedChunkField,
         types::{CreateStorage, DrawIndexedIndirectArgs, entries},
         util::{hash_chunk_pos, make_batch_uniform_buffer, next_pow2},
     },
@@ -577,19 +576,3 @@ impl VoxelChunkArenaSet {
 }
 unsafe impl Send for VoxelChunkArena {}
 unsafe impl Sync for VoxelChunkArena {}
-
-fn dispatch(
-    encoder: &mut CommandEncoder,
-    label: &'static str,
-    pipeline: &ComputePipeline,
-    bind_group: &BindGroup,
-    (x, y, z): (u32, u32, u32),
-) {
-    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some(label),
-        timestamp_writes: None,
-    });
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, bind_group, &[]);
-    pass.dispatch_workgroups(x, y, z);
-}

@@ -328,6 +328,10 @@ impl FromWorld for VoxelDummyMaterial {
         }
     }
 }
+
+unsafe impl Send for VoxelDummyMaterial {}
+unsafe impl Sync for VoxelDummyMaterial {}
+
 #[derive(Resource)]
 pub struct VoxelRasterPipeline {
     pub pipeline_id: CachedRenderPipelineId,

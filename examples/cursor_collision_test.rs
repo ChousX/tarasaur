@@ -9,7 +9,7 @@ use bevy::render::{RenderApp, RenderPlugin};
 use bevy::window::PrimaryWindow;
 use tarasaur::{DirtyField, VisibilityField};
 use tarasaur::{
-    Field, LOD, SDFField, TarasaurPlugin,
+    Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     voxel::query::{CollisionLOD, PendingVoxelQueries, VoxelQueryResults},
     voxel::types::RayQuery,
@@ -122,7 +122,7 @@ fn spawn_sphere_chunks(mut commands: Commands) {
                 // the query pass only tests one arena, so a mismatch here
                 // means every cursor query silently misses.
                 let lod = LOD::Medium;
-                let mut sdf = SDFField::new(lod);
+                let mut sdf = SDF::new(lod);
                 fill_sphere_sdf(&mut sdf, chunk_pos, SPHERE_CENTER, SPHERE_RADIUS);
 
                 commands.spawn((
@@ -130,7 +130,7 @@ fn spawn_sphere_chunks(mut commands: Commands) {
                     ChunkPosition(chunk_pos),
                     lod,
                     sdf,
-                    DirtyField::<SDFField, f32>::default(),
+                    DirtyField::<SDF, f32>::default(),
                 ));
                 spawned.push(chunk_pos);
             }
@@ -145,7 +145,7 @@ fn spawn_sphere_chunks(mut commands: Commands) {
     assert_eq!(spawned.len(), 8);
 }
 
-fn fill_sphere_sdf(field: &mut SDFField, chunk_pos: IVec3, center: Vec3, radius: f32) {
+fn fill_sphere_sdf(field: &mut SDF, chunk_pos: IVec3, center: Vec3, radius: f32) {
     let dims = field.size();
     let voxel_size = CHUNK_SIZE / dims.x as f32;
     let chunk_origin = chunk_pos.as_vec3() * CHUNK_SIZE;

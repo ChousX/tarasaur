@@ -18,8 +18,11 @@ pub enum EditMode<V> {
 }
 
 #[derive(Message)]
-pub struct EditFieldMessage<F: Field<V>, S: Primitive3d, V: Copy + Default + Send + Sync + 'static>
-{
+pub struct EditFieldMessage<
+    F: Field<V>,
+    S: Primitive3d + Send + Sync + 'static,
+    V: Copy + Default + Send + Sync + 'static,
+> {
     pub center: Vec3,
     pub shape: S,
     pub val: V,
@@ -27,7 +30,7 @@ pub struct EditFieldMessage<F: Field<V>, S: Primitive3d, V: Copy + Default + Sen
     phantom: PhantomData<F>,
 }
 
-impl<F: Field<V>, S: Primitive3d, V: Copy + Default + Send + Sync + 'static>
+impl<F: Field<V>, S: Primitive3d + Send + Sync + 'static, V: Copy + Default + Send + Sync + 'static>
     EditFieldMessage<F, S, V>
 {
     pub fn new(center: Vec3, shape: S, val: V, mode: EditMode<V>) -> Self {
@@ -124,4 +127,11 @@ where
     pub fn blend_box(&mut self, center: Vec3, half_size: Vec3, target: V, rate: f32) {
         self.cuboid(center, half_size, target, EditMode::Blend { rate });
     }
+}
+
+#[derive(Message, Clone, Copy)]
+pub struct SdfSphereStamp {
+    pub center: Vec3,
+    pub bound_radius: f32,
+    pub sdf_radius: f32,
 }

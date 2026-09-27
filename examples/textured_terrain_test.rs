@@ -1,6 +1,5 @@
 use bevy::{
     asset::RenderAssetUsages,
-    camera::visibility,
     input::mouse::MouseMotion,
     prelude::*,
     render::{
@@ -11,10 +10,9 @@ use bevy::{
 };
 use tarasaur::editor::WorldEditor;
 use tarasaur::{
-    Field, LOD, MaterialField, SDFField, TarasaurPlugin, VisibilityField, VoxelDataSlice,
-    VoxelMaterial,
+    Field, LOD, MaterialField, SDF, TarasaurPlugin, VisibilityField, VoxelDataSlice, VoxelMaterial,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
-    field::plugin::MaterialFieldPlugin,
+    field::MaterialFieldPlugin,
     ops::{AccumulateExt, BlendExt},
     texture_palette::{
         asset::TexturePalette,
@@ -447,7 +445,7 @@ fn generate_terrain(
     mut ready: ResMut<TerrainReady>,
     mut query: Query<(
         &ChunkPosition,
-        &mut SDFField,
+        &mut SDF,
         &mut MaterialField<TerrainMaterial>,
     )>,
     mut visibility_editor: WorldEditor<VisibilityField, bool>,
@@ -511,7 +509,7 @@ fn log_lod_distribution(
     mut frame: Local<u32>,
     mut logged: Local<bool>,
     ready: Res<TerrainReady>,
-    query: Query<(&ChunkPosition, &LOD, &SDFField)>,
+    query: Query<(&ChunkPosition, &LOD, &SDF)>,
 ) {
     if *logged || !ready.0 {
         return;

@@ -8,7 +8,7 @@ use bevy::{
     },
 };
 use tarasaur::{
-    Field, LOD, SDFField, TarasaurPlugin, VisibilityField, VoxelDataSlice,
+    Field, LOD, SDF, TarasaurPlugin, VisibilityField, VoxelDataSlice,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
 };
 
@@ -103,7 +103,7 @@ fn spawn_test_chunks(mut commands: Commands) {
 fn generate_test_chunks(
     mut generated: Local<bool>,
     mut ready: ResMut<TestReady>,
-    mut query: Query<(&VisibilityCase, &mut SDFField, &mut VisibilityField)>,
+    mut query: Query<(&VisibilityCase, &mut SDF, &mut VisibilityField)>,
 ) {
     if *generated || query.iter().count() < 3 {
         return;

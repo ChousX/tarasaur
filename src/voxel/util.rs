@@ -1,3 +1,4 @@
+use bevy::render::render_resource::*;
 use bevy::{
     prelude::*,
     render::{
@@ -59,4 +60,20 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
         }
     }
     packed
+}
+
+pub fn dispatch(
+    encoder: &mut CommandEncoder,
+    label: &'static str,
+    pipeline: &ComputePipeline,
+    bind_group: &BindGroup,
+    (x, y, z): (u32, u32, u32),
+) {
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.dispatch_workgroups(x, y, z);
 }

@@ -7,9 +7,14 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::LOD;
 use crate::chunk::NewChunkSpawned;
+use crate::editor::SdfSphereStamp;
 use crate::field::material::VoxelMaterial;
-use crate::field::{MaterialField, SDFField, VisibilityField};
+use crate::field::{MaterialField, SDF, VisibilityField};
 use crate::persistence::RegisterSaveableFieldExt;
+use crate::systems::{
+    clear_dirty_visibility, detect_topology_desync, process_sdf_sphere_stamps,
+    resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
+};
 use crate::voxel::systems::{
     extract_voxel_chunks, prepare_material_for_arena, prepare_voxel_arena,
 };
@@ -18,7 +23,7 @@ use super::{
     Field,
     editor::EditFieldMessage,
     ops::{AccumulateExt, BlendExt},
-    systems::{process_box_edits, process_sphere_edits, reinit_dirty_sdf},
+    systems::process_shape_edits,
 };
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,11 +58,7 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
         app.add_field::<MaterialField<M>, M>();
         app.add_observer(material_build_on_chunk_spawn::<M>);
         app.register_saveable_field::<MaterialField<M>>();
-        // extract_voxel_chunks<T> was already generalized to any
-        // T: Versionable + ApronSample, so this is the whole extraction
-        // side for free — MaterialField<M> already satisfies the bound.
-        // Its own Local<HashMap<...>> dirty-cache is independent of
-        // SDFField's, which is the point.
+
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -66,7 +67,7 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
             .add_systems(
                 Render,
                 prepare_material_for_arena::<M>
-                    .after(prepare_voxel_arena::<SDFField>)
+                    .after(prepare_voxel_arena::<SDF>)
                     .in_set(RenderSystems::Prepare),
             );
     }
@@ -80,13 +81,26 @@ pub struct FieldsPlugin;
 impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, (FieldSet::Edit, FieldSet::Reinit).chain());
-        app.add_systems(Update, reinit_dirty_sdf.in_set(FieldSet::Reinit));
+        app.add_systems(
+            Update,
+            (
+                detect_topology_desync,
+                spawn_sdf_reinit_tasks,
+                resolve_sdf_reinit_tasks,
+                clear_dirty_visibility,
+            )
+                .chain()
+                .in_set(FieldSet::Reinit),
+        );
 
-        app.add_field::<SDFField, f32>()
+        app.add_field::<SDF, f32>()
             .add_field::<VisibilityField, bool>();
 
         app.add_observer(sdf_build_on_chunk_spawn)
             .add_observer(visibility_build_on_chunk_spawn);
+
+        app.add_message::<SdfSphereStamp>()
+            .add_systems(Update, process_sdf_sphere_stamps.in_set(FieldSet::Edit));
     }
 }
 
@@ -109,7 +123,11 @@ impl AppFieldExt for App {
 
         self.add_systems(
             Update,
-            (process_sphere_edits::<F, V>, process_box_edits::<F, V>).in_set(FieldSet::Edit),
+            (
+                process_shape_edits::<F, Sphere, V>,
+                process_shape_edits::<F, Cuboid, V>,
+            )
+                .in_set(FieldSet::Edit),
         );
 
         self
@@ -120,14 +138,14 @@ fn sdf_build_on_chunk_spawn(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
     lod_q: Query<&LOD>,
-    chunk_q: Query<(), With<SDFField>>,
+    chunk_q: Query<(), With<SDF>>,
 ) {
     let NewChunkSpawned { entity, .. } = trigger.event();
     if chunk_q.get(*entity).is_ok() {
         return;
     }
     let lod = lod_q.get(*entity).copied().unwrap_or_default();
-    commands.entity(*entity).insert(SDFField::new(lod));
+    commands.entity(*entity).insert(SDF::new(lod));
 }
 
 fn visibility_build_on_chunk_spawn(

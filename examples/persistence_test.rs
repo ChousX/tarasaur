@@ -9,7 +9,7 @@ use tarasaur::chunk::{ChunkManager, ChunkPosition, NewChunkSpawned};
 use tarasaur::field::persistence::{
     ChunkPersistencePlugin, RegisterSaveableFieldExt, SaveChunkMessage,
 };
-use tarasaur::field::{Field, FieldLOD, SDFField};
+use tarasaur::field::{Field, FieldLOD, SDF};
 
 fn main() {
     let mut app = App::new();
@@ -17,11 +17,11 @@ fn main() {
     // 1. Add MinimalPlugins, the Persistence Plugin, and register SDFField
     app.add_plugins(MinimalPlugins)
         .add_plugins(ChunkPersistencePlugin)
-        .register_saveable_field::<SDFField>();
+        .register_saveable_field::<SDF>();
 
     // 2. Setup test chunk state
     let chunk_pos = IVec3::new(0, 0, 0);
-    let mut sdf_field = SDFField::default();
+    let mut sdf_field = SDF::default();
 
     // Initialize underlying buffer before setting voxels
     sdf_field.reinit();
@@ -73,7 +73,7 @@ fn main() {
 
     // 5. Spawn new empty entity with initialized SDFField and trigger `NewChunkSpawned`
     println!("\n--- Step 3: Triggering reload on new chunk spawn ---");
-    let mut new_sdf_field = SDFField::default();
+    let mut new_sdf_field = SDF::default();
     new_sdf_field.reinit();
     let new_lod = new_sdf_field.lod();
 
@@ -94,7 +94,7 @@ fn main() {
     // 6. Verify restored data
     let restored_field = app
         .world()
-        .get::<SDFField>(new_entity)
+        .get::<SDF>(new_entity)
         .expect("SDFField should exist on restored entity");
 
     let restored_floats: &[f32] = bytemuck::cast_slice(restored_field.data_slice());

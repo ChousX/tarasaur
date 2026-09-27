@@ -9,7 +9,7 @@ use bevy::{
     },
 };
 use tarasaur::{
-    Field, LOD, SDFField, TarasaurPlugin,
+    Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::editor::WorldEditor,
 };
@@ -221,7 +221,7 @@ fn terrain_height(world_x: f32, world_z: f32) -> f32 {
 fn generate_terrain(
     mut generated: Local<bool>,
     mut ready: ResMut<TerrainReady>,
-    mut query: Query<(&ChunkPosition, &mut SDFField)>,
+    mut query: Query<(&ChunkPosition, &mut SDF)>,
 ) {
     if *generated || query.iter().count() as i32 != chunk_count() {
         return;
@@ -257,7 +257,7 @@ fn generate_terrain(
 fn verify_seam(
     mut checked: Local<bool>,
     ready: Res<TerrainReady>,
-    query: Query<(&ChunkPosition, &SDFField)>,
+    query: Query<(&ChunkPosition, &SDF)>,
 ) {
     if *checked || !ready.0 {
         return;
@@ -296,7 +296,7 @@ fn verify_seam(
 fn carve_valley_across_seam(
     mut fired: Local<bool>,
     ready: Res<TerrainReady>,
-    mut editor: WorldEditor<SDFField, f32>,
+    mut editor: WorldEditor<SDF, f32>,
 ) {
     if *fired || !ready.0 {
         return;
@@ -316,7 +316,7 @@ fn log_final_stats(
     mut frame: Local<u32>,
     mut logged: Local<bool>,
     ready: Res<TerrainReady>,
-    query: Query<(&ChunkPosition, &SDFField)>,
+    query: Query<(&ChunkPosition, &SDF)>,
 ) {
     if *logged || !ready.0 {
         return;
