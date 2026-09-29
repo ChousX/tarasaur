@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use super::generator::ChunkGeneratorRegistry;
 use crate::LOD;
-use crate::chunk::{ChunkPosition, NewChunkSpawned};
+use crate::chunk::NewChunkSpawned;
 use crate::persistence::{ChunkPersistenceRegistry, ChunkSaveData, FieldSavePayload};
 
 #[derive(Component)]

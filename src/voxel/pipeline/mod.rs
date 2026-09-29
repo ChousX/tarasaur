@@ -474,6 +474,9 @@ impl FromWorld for VoxelRasterPipeline {
     }
 }
 
+unsafe impl Send for VoxelRasterPipeline {}
+unsafe impl Sync for VoxelRasterPipeline {}
+
 /// The bind group actually used by `voxel_raster_pass`. Starts out cloned
 /// from `VoxelDummyMaterial`'s bind group; `update_voxel_material_bind_group`
 /// replaces it once a real palette's albedo texture has finished loading.
@@ -494,6 +497,9 @@ impl FromWorld for VoxelMaterialBindGroup {
         Self(dummy.bind_group.clone())
     }
 }
+
+unsafe impl Send for VoxelMaterialBindGroup {}
+unsafe impl Sync for VoxelMaterialBindGroup {}
 
 /// Runs in RenderSystems::Prepare. Rebuilds VoxelMaterialBindGroup once
 /// the active palette's albedo image is loaded, and never again after

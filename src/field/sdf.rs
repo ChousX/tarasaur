@@ -79,7 +79,6 @@ impl SDF {
 
     pub fn reinit(&mut self) {
         self.version += 1;
-        let size = self.lod.size();
         let volume = self.lod.volume();
 
         // Guarantee buffers match the expected volume before sampling
@@ -103,13 +102,6 @@ impl SDF {
         );
     }
 
-    #[inline]
-    fn dist_sq(&self, x1: u32, y1: u32, z1: u32, x2: u32, y2: u32, z2: u32) -> f32 {
-        let dx = x1 as f32 - x2 as f32;
-        let dy = y1 as f32 - y2 as f32;
-        let dz = z1 as f32 - z2 as f32;
-        dx * dx + dy * dy + dz * dz
-    }
     /// Snapshot for an async reinit: a clone of the current raw data plus
     /// the version it was cloned at. Cloning here (not moving) so the SDF
     /// stays fully readable — by extraction, by further edits — while the
