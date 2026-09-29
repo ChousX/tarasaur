@@ -1,8 +1,7 @@
+use super::Field;
 use crate::{
     ApronSample, ExtractGate, FieldLOD, LOD, Versionable, VoxelDataSlice, flatten_with_size,
 };
-// fields/visibility.rs
-use super::Field;
 use bevy::prelude::*;
 
 #[derive(Component, Clone)]
@@ -14,12 +13,18 @@ pub struct VisibilityField {
 }
 
 impl VisibilityField {
+    /// Controls the default initial state of the packed bits and byte mirror.
+    pub const DEFAULT_VALUE: bool = false;
+
     pub fn new(lod: LOD) -> Self {
         let volume = lod.volume();
+        let word_val = if Self::DEFAULT_VALUE { u64::MAX } else { 0 };
+        let byte_val = Self::DEFAULT_VALUE as u8;
+
         Self {
             lod,
-            words: vec![0u64; words_for_lod(lod)].into_boxed_slice(),
-            byte_mirror: vec![0u8; volume].into_boxed_slice(),
+            words: vec![word_val; words_for_lod(lod)].into_boxed_slice(),
+            byte_mirror: vec![byte_val; volume].into_boxed_slice(),
             version: 0,
         }
     }
