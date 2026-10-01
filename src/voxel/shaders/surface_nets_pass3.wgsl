@@ -242,12 +242,14 @@ fn cs_main(
             let c1 = edges[i].y;
             let v0 = sdfs[c0];
             let v1 = sdfs[c1];
-            let v0_inside = v0 <= 0.0;
-            let v1_inside = v1 <= 0.0;
-            if (v0_inside != v1_inside) {
+            if ((v0 <= 0.0) != (v1 <= 0.0)) {
                 let p0 = vec3<f32>(id + corners[c0]);
                 let p1 = vec3<f32>(id + corners[c1]);
-                let t = -v0 / (v1 - v0);
+    
+                // Prevent divide-by-zero or step artifacts
+                let diff = v1 - v0;
+                let t = select(0.5, -v0 / diff, abs(diff) > 0.00001);
+    
                 vert_pos += mix(p0, p1, clamp(t, 0.0, 1.0));
                 edge_count += 1.0;
             }

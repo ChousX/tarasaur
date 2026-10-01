@@ -392,32 +392,55 @@ pub fn jump_flood_distance_field(
         seeds.copy_from_slice(scratch);
     }
 
-    // 3. Final distance calculation & sign normalization pass.
+    // 3. Final distance pass. Reads `data` (still the original input) and writes
+    // to `out`, so seed offsets are read from unmodified values.
+    let mut out = vec![0.0f32; data.len()];
+
+    // Distance from a boundary voxel's centre to the surface, in voxels, by
+    // linear interpolation along the crossing edge.
+    let surface_offset = |x: u32, y: u32, z: u32| -> f32 {
+        let i = flatten(x, y, z, size);
+        let v = data[i];
+        let inside = v <= 0.0;
+        let mut best = 0.5f32;
+        for (dx, dy, dz) in CARDINAL_NEIGHBORS {
+            let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+            if nx < 0
+                || ny < 0
+                || nz < 0
+                || nx >= size as i32
+                || ny >= size as i32
+                || nz >= size as i32
+            {
+                continue;
+            }
+            let vn = data[flatten(nx as u32, ny as u32, nz as u32, size)];
+            if (vn <= 0.0) != inside {
+                let (a, b) = (v.abs(), vn.abs());
+                let d = if a + b > 0.0 { a / (a + b) } else { 0.5 };
+                best = best.min(d);
+            }
+        }
+        best
+    };
+
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
                 let idx = flatten(x, y, z, size);
-                let final_seed = seeds[idx];
-
-                if final_seed.is_empty() {
-                    data[idx] = if data[idx].is_sign_negative() {
-                        -(size as f32)
-                    } else {
-                        size as f32
-                    };
+                let inside = data[idx] <= 0.0;
+                let mag = if seeds[idx].is_empty() {
+                    size as f32
                 } else {
-                    let (sx, sy, sz) = final_seed.unpack();
-                    let distance = dist_sq(x, y, z, sx, sy, sz).sqrt();
-
-                    if data[idx].is_sign_negative() {
-                        data[idx] = -distance;
-                    } else {
-                        data[idx] = distance;
-                    }
-                }
+                    let (sx, sy, sz) = seeds[idx].unpack();
+                    dist_sq(x, y, z, sx, sy, sz).sqrt() + surface_offset(sx, sy, sz)
+                };
+                let mag = mag.max(1e-4); // never exactly zero
+                out[idx] = if inside { -mag } else { mag };
             }
         }
     }
+    data.copy_from_slice(&out);
 }
 
 /// `Some(true)` = every voxel negative-signed, `Some(false)` = every voxel

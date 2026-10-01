@@ -42,7 +42,7 @@ fn main() {
     // No VisibilityField generator: a chunk without one is fully visible.
     {
         let mut generators = app.world_mut().resource_mut::<ChunkGeneratorRegistry>();
-        generators.register_sdf(terrain_sdf);
+        generators.register_sdf_distance(terrain_sdf);
     }
 
     app.insert_resource(ShowChunkBounds) // color-codes each chunk's LOD in gizmos — remove once you trust the streaming

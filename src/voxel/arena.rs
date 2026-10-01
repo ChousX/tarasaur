@@ -108,9 +108,17 @@ pub struct VoxelChunkArena {
     pub slot_of_main_entity: HashMap<MainEntity, u32>,
     pub active_slots: Vec<u32>, // stable order used for this frame's batched dispatch
     pub dirty_slots: Vec<u32>,  // slots whose ChunkMeta/SDF changed since last upload
-    /// Set whenever a mesh input changes; cleared only after the compute
-    /// passes have actually been dispatched for this arena.
+
+    /// Set whenever a mesh input changes (SDF or material upload, or a slot
+    /// entering/leaving the active list). Cleared only after the compute
+    /// passes have actually been dispatched for this arena. Starts true so
+    /// a fresh arena always gets its first build.
     pub needs_remesh: bool,
+    /// Released slots whose `index_count` in `indirect_args_buffer` must be
+    /// zeroed so a multi-draw over `0..=max_slot` can't draw a ghost mesh.
+    /// Drained by `prepare_voxel_arena`.
+    pub pending_zero: Vec<u32>,
+
     pub chunk_active_counts_buffer: Buffer, // [active_list_pos] -> active cell count, GPU-written
     pub chunk_vertex_base_buffer: Buffer,   // [active_list_pos] -> exclusive prefix sum
     pub chunk_index_base_buffer: Buffer,    // [active_list_pos] -> vertex_base * 18
@@ -172,13 +180,7 @@ impl VoxelChunkArena {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
 
-        // Tiny: 1 bit per SLOT (not per voxel), packed 32 slots/word. Kept
-        // deliberately separate from ChunkMeta rather than a bit stolen from
-        // active_list_pos — pass1 doesn't read ChunkMeta at all since the
-        // earlier shrink, and pass3 uses active_list_pos as a raw array index in
-        // several places that would all need defensive masking if the flag lived
-        // there. This buffer is orders of magnitude smaller than ChunkMeta per
-        // slot and keeps pass3 completely untouched by visibility work.
+        // Tiny: 1 bit per SLOT (not per voxel), packed 32 slots/word.
         let has_mask_words = (max as u32).div_ceil(32);
         let chunk_has_mask_buffer = render_device.storage(
             "arena_chunk_has_mask_buffer",
@@ -198,9 +200,11 @@ impl VoxelChunkArena {
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
+        // Not read by any shader seen so far, but still bound at pass1
+        // binding 3; remove it together with that layout entry if dropping it.
         let scattered_vertex_buffer = render_device.storage(
             "arena_scattered_vertex_buffer",
-            budget_cells_per_chunk as u64 * 32 * max, // was total_cells — shrunk to match the dynamic budget
+            budget_cells_per_chunk as u64 * 32 * max,
             BufferUsages::STORAGE,
         );
         let final_vertex_buffer = render_device.storage(
@@ -219,7 +223,7 @@ impl VoxelChunkArena {
             .map(|_| DrawIndexedIndirectArgs {
                 index_count: 0,
                 instance_count: 1,
-                first_index: 0, // overwritten every frame by compute_chunk_bases
+                first_index: 0, // overwritten every remesh by compute_chunk_bases
                 base_vertex: 0,
                 first_instance: 0,
             })
@@ -289,9 +293,9 @@ impl VoxelChunkArena {
             8,
             voxel_size,
         );
+
         // --- Dynamic bump-allocation buffers (created before the bind groups
-        // that reference them, since compaction_bind_group and
-        // chunk_bases_bind_group both need chunk_active_counts_buffer et al.) ---
+        // that reference them) ---
         let chunk_active_counts_buffer = render_device.storage(
             "arena_chunk_active_counts_buffer",
             4 * max,
@@ -335,7 +339,7 @@ impl VoxelChunkArena {
             render_device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("arena_chunk_bases_uniform_buffer"),
                 contents: bytemuck::bytes_of(&ChunkBasesUniforms {
-                    active_count: 0, // updated per-frame via write_buffer
+                    active_count: 0, // updated via write_buffer when a remesh is pending
                     budget_cells_per_chunk,
                     total_budget_cells: budget_cells_per_chunk * max as u32,
                     _pad0: 0,
@@ -388,7 +392,7 @@ impl VoxelChunkArena {
                 (2, &compacted_offsets_buffer),
                 (3, &block_sums_buffer),
                 (4, &chunk_active_counts_buffer),
-                (5, &active_slot_map_buffer),
+                (5, &active_slot_map_buffer), // compaction addresses cells by real slot
             ]),
         );
 
@@ -397,7 +401,7 @@ impl VoxelChunkArena {
             &layouts.raster_chunk_visibility_layout,
             &entries(&[
                 (0, &chunk_meta_buffer),
-                (1, &visibility_mask_buffer),
+                (1, &visibility_mask_buffer), // was chunk_meta_buffer (bug)
                 (2, &chunk_has_mask_buffer),
                 (3, &batch_uniform_buffer_pass3),
             ]),
@@ -450,6 +454,8 @@ impl VoxelChunkArena {
             slot_of_main_entity: HashMap::new(),
             active_slots: Vec::new(),
             dirty_slots: Vec::new(),
+            needs_remesh: true,
+            pending_zero: Vec::new(),
             blocks_per_chunk,
             chunk_active_counts_buffer,
             chunk_vertex_base_buffer,
@@ -468,19 +474,18 @@ impl VoxelChunkArena {
             chunk_pos_of_slot: vec![None; max as usize],
             chunk_lookup_buffer,
             lookup_capacity,
-            needs_remesh: true,
         }
     }
 
     /// Marks whether `slot` currently has valid visibility-mask data
-    /// uploaded. Doesn't itself write chunk_has_mask_buffer — that upload
-    /// still needs to happen somewhere each frame; see the note in
-    /// prepare_visibility_for_arena's caller about wiring that write.
+    /// uploaded. The has-mask bits are uploaded each frame by
+    /// `prepare_visibility_for_arena`.
     pub fn set_slot_has_mask(&mut self, slot: u32, has_mask: bool) {
         if (slot as usize) < self.mask_slots.len() {
             self.mask_slots[slot as usize] = has_mask;
         }
     }
+
     /// Records/updates which chunk coordinate owns `slot`, keeping
     /// `slot_of_chunk_pos` and `chunk_pos_of_slot` in sync. Called from
     /// `prepare_voxel_arena` right after slot allocation.
@@ -496,9 +501,7 @@ impl VoxelChunkArena {
     }
 
     /// Rebuilds and re-uploads the GPU-resident open-addressing
-    /// `chunk_pos -> slot` table from `slot_of_chunk_pos`. Called once per
-    /// frame from `prepare_voxel_queries`, not from the main arena prepare
-    /// path — only the collision LOD's arena needs this.
+    /// `chunk_pos -> slot` table from `slot_of_chunk_pos`.
     pub fn rebuild_chunk_lookup(&self, render_queue: &bevy::render::renderer::RenderQueue) {
         const EMPTY: u32 = u32::MAX;
         let cap = self.lookup_capacity as usize;
@@ -526,12 +529,16 @@ impl VoxelChunkArena {
     pub fn release(&mut self, main_entity: MainEntity) {
         if let Some(slot) = self.slot_of_main_entity.remove(&main_entity) {
             self.free_slots.push(slot);
-            //self.pending_zero.push(slot);
+            // Its indirect args still hold the old index_count; zero it so a
+            // multi-draw over the whole slot range can't draw a ghost.
+            self.pending_zero.push(slot);
+
             let before = self.active_slots.len();
             self.active_slots.retain(|&s| s != slot);
             if self.active_slots.len() != before {
-                self.needs_remesh = true;
+                self.needs_remesh = true; // prefix-sum bases shift
             }
+
             self.mask_slots[slot as usize] = false;
             if let Some(pos) = self.chunk_pos_of_slot[slot as usize].take() {
                 self.slot_of_chunk_pos.remove(&pos);
@@ -554,6 +561,7 @@ impl VoxelChunkArena {
 pub struct ArenaConfig {
     pub max_arenas: [usize; LOD::COUNT],
 }
+
 impl Default for ArenaConfig {
     fn default() -> Self {
         Self {
@@ -561,6 +569,7 @@ impl Default for ArenaConfig {
         }
     }
 }
+
 /// How many arenas per LOD the cursor-query shader can currently address.
 /// cursor_query.wgsl / query_entries() bind exactly one sdf_buffer +
 /// chunk_meta per LOD, so only arena 0 is visible to queries for now.
@@ -594,6 +603,7 @@ impl VoxelChunkArenaSet {
             config,
         }
     }
+
     /// The query-visible arena for `lod` (the first one), if it exists.
     pub fn first_arena(&self, lod: LOD) -> Option<&VoxelChunkArena> {
         self.arenas[Self::lod_index(lod)].first()
@@ -606,8 +616,7 @@ impl VoxelChunkArenaSet {
             .enumerate()
             .filter_map(|(rank, v)| v.first().map(|a| (rank, a)))
     }
-    /// ASSUMPTION: LOD is a fieldless enum. If it already has an index/rank
-    /// method, call that here instead.
+
     #[inline]
     pub fn lod_index(lod: LOD) -> usize {
         lod.rank() as usize
@@ -646,7 +655,8 @@ impl VoxelChunkArenaSet {
     ///   1. already resident in one of this LOD's arenas -> reuse
     ///   2. resident in a *different* LOD's arena (LOD changed) -> evict it there
     ///   3. first arena of this LOD with a free slot (fills arenas in order)
-    ///   4. otherwise create a new arena via `make_arena`, up to MAX_ARENAS_PER_LOD
+    ///   4. otherwise create a new arena via `make_arena`, up to
+    ///      `config.max_arenas[lod]`
     /// `None` means every arena is full and the cap is hit.
     pub fn slot_for(
         &mut self,
@@ -694,7 +704,6 @@ impl VoxelChunkArenaSet {
     }
 
     /// Releases the entity from whichever arena holds it, across all LODs.
-    /// Use this wherever you currently call `arena.release(..)` on despawn.
     pub fn release(&mut self, main_entity: MainEntity) {
         for a in self.iter_mut() {
             a.release(main_entity);
@@ -706,7 +715,6 @@ impl VoxelChunkArenaSet {
     }
 
     /// Max entries `rebuild_merged_lookup` can emit (only query-visible arenas).
-    /// Size the merged lookup buffer from this rather than total_max_chunks().
     pub fn query_visible_max_chunks(&self) -> u32 {
         self.arenas
             .iter()

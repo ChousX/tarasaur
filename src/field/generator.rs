@@ -35,19 +35,21 @@ impl ChunkGeneratorRegistry {
             }));
     }
 
-    /// Convenience wrapper for `SDFField`: caller only supplies the raw
-    /// sign volume (negative = inside), and this runs the same Jump Flood
-    /// pass `SDFField::reinit` uses to turn signs into real distances —
-    /// so a generated chunk arrives with the same data shape a live edit
-    /// would produce, not a naive step function.
-    pub fn register_sdf(
+    /// For generators that already return an approximate signed distance in
+    /// WORLD units (negative inside). Converts to voxel units of the chunk's own
+    /// LOD and keeps the values as-is, so the surface keeps its sub-voxel
+    /// information. No jump flood runs on this path.
+    pub fn register_sdf_distance(
         &mut self,
-        generate_signs: impl Fn(IVec3, LOD) -> Vec<f32> + Send + Sync + 'static,
+        generate: impl Fn(IVec3, LOD) -> Vec<f32> + Send + Sync + 'static,
     ) {
         self.register::<f32>(std::any::type_name::<SDF>(), move |pos, lod| {
-            let mut data = generate_signs(pos, lod);
+            let inv_voxel = 1.0 / lod.voxel_size();
+            let mut data = generate(pos, lod);
             debug_assert_eq!(data.len(), lod.volume());
-            crate::field::sdf::compute_sdf_distances(&mut data, lod.size());
+            for v in data.iter_mut() {
+                *v *= inv_voxel;
+            }
             data
         });
     }

@@ -42,7 +42,7 @@ fn main() {
 
     {
         let mut g = app.world_mut().resource_mut::<ChunkGeneratorRegistry>();
-        g.register_sdf(terrain_sdf);
+        g.register_sdf_distance(terrain_sdf);
         // The key must equal the type_name the persistence registry uses for
         // this field (register_field::<F> uses std::any::type_name::<F>()).
         g.register::<u8>(
