@@ -1,5 +1,8 @@
 use super::util::dispatch;
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use bevy::{
     prelude::*,
@@ -17,7 +20,7 @@ use crate::{
     ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField,
     Versionable, VisibilityField, VoxelMaterial,
     voxel::{
-        arena::{ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
+        arena::{ArenaSlot, ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
     },
 };
@@ -36,39 +39,44 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
 
 pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
+    render_device: Res<RenderDevice>,
+    layouts: Res<VoxelPipelineLayouts>,
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<T>)>,
     mut commands: Commands,
 ) {
-    for arena in arena_set.arenas.values_mut() {
+    for arena in arena_set.iter_mut() {
         arena.dirty_slots.clear();
     }
 
     for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
-        let Some(arena) = arena_set.arenas.get_mut(&extracted_sdf.lod) else {
-            // init_voxel_arena runs earlier in the same Prepare set and creates
-            // an arena for every LOD seen this frame, so this shouldn't happen.
+        let lod = extracted_sdf.lod;
+        let size = extracted_sdf.size;
+
+        let Some(ArenaSlot { arena_idx, slot }) =
+            arena_set.slot_for(lod, extracted_sdf.main_entity, || {
+                info!(
+                    "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
+                    lod,
+                    size - 1,
+                    size
+                );
+                VoxelChunkArena::new(&render_device, &layouts, size - 1, size)
+            })
+        else {
             warn!(
-                "[prepare_voxel_arena] no arena for LOD {:?}, dropping chunk {:?}",
-                extracted_sdf.lod, extracted_sdf.chunk_pos
+                "[prepare_voxel_arena] all arenas for LOD {:?} full, dropping chunk {:?}",
+                lod, extracted_sdf.chunk_pos
             );
             commands.entity(extracted_entity).despawn();
             continue;
         };
-        let Some(slot) = arena.slot_for(extracted_sdf.main_entity) else {
-            warn!(
-                "[prepare_voxel_arena] arena full ({} slots), dropping chunk {:?}",
-                arena.max_chunks, extracted_sdf.chunk_pos
-            );
-            commands.entity(extracted_entity).despawn();
-            continue;
-        };
+        let arena = arena_set.arena_mut(lod, arena_idx);
 
         if !arena.active_slots.contains(&slot) {
             arena.active_slots.push(slot);
         }
         arena.register_chunk_pos(slot, extracted_sdf.chunk_pos);
-        let size = extracted_sdf.size;
         debug_assert_eq!(
             size, arena.texture_size,
             "mixed LOD in one arena — bucket by LOD"
@@ -105,7 +113,7 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
     // each active chunk's active_list_pos field (its index into active_slots),
     // populate active_slot_map (the inverse mapping used by compute_chunk_bases
     // and pass3), and refresh the bases-pass uniform's active_count.
-    for arena in arena_set.arenas.values_mut() {
+    for arena in arena_set.iter_mut() {
         const ACTIVE_LIST_POS_OFFSET: u64 = std::mem::offset_of!(ChunkMeta, active_list_pos) as u64;
 
         for (pos, &slot) in arena.active_slots.iter().enumerate() {
@@ -154,19 +162,17 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
     mut commands: Commands,
 ) {
     for (extracted_entity, extracted_material) in extracted_chunks.iter() {
-        let Some(arena) = arena_set.arenas.get_mut(&extracted_material.lod) else {
-            // Arena for this LOD doesn't exist yet (SDF extraction hasn't
-            // produced one). Drop this frame's upload — it'll be retried
-            // the next time this chunk's material data changes, which in
-            // practice is frame 1 for every chunk (material spawns
-            // alongside SDF, so both extract together the first time).
+        let Some(ArenaSlot { arena_idx, slot }) =
+            arena_set.find_slot(extracted_material.lod, extracted_material.main_entity)
+        else {
             warn!(
-                "[prepare_material_for_arena] no arena for LOD {:?}, dropping material for chunk {:?}",
-                extracted_material.lod, extracted_material.chunk_pos
+                "[prepare_material_for_arena] no slot yet for chunk {:?}, dropping this frame's material upload",
+                extracted_material.chunk_pos
             );
             commands.entity(extracted_entity).despawn();
             continue;
         };
+        let arena = arena_set.arena_mut(extracted_material.lod, arena_idx);
 
         let Some(slot) = arena.existing_slot(extracted_material.main_entity) else {
             warn!(
@@ -201,14 +207,19 @@ pub fn prepare_visibility_for_arena(
     mut commands: Commands,
 ) {
     for (extracted_entity, extracted_mask) in extracted_chunks.iter() {
-        let Some(arena) = arena_set.arenas.get_mut(&extracted_mask.lod) else {
-            warn!(
-                "[prepare_visibility_for_arena] no arena for LOD {:?}, dropping mask for chunk {:?}",
-                extracted_mask.lod, extracted_mask.chunk_pos
-            );
+        let Some(ArenaSlot { arena_idx, slot }) =
+            arena_set.find_slot(extracted_mask.lod, extracted_mask.main_entity)
+        else {
+            if !extracted_mask.padded_data.is_empty() {
+                warn!(
+                    "[prepare_visibility_for_arena] no slot yet for chunk {:?}, dropping this frame's mask",
+                    extracted_mask.chunk_pos
+                );
+            }
             commands.entity(extracted_entity).despawn();
             continue;
         };
+        let arena = arena_set.arena_mut(extracted_mask.lod, arena_idx);
 
         let Some(slot) = arena.existing_slot(extracted_mask.main_entity) else {
             warn!(
@@ -252,7 +263,7 @@ pub fn prepare_visibility_for_arena(
         arena.set_slot_has_mask(slot, true);
         commands.entity(extracted_entity).despawn();
     }
-    for arena in arena_set.arenas.values() {
+    for arena in arena_set.iter_mut() {
         let packed = pack_bits(arena.mask_slots.iter().copied());
         render_queue.write_buffer(
             &arena.chunk_has_mask_buffer,
@@ -290,7 +301,26 @@ pub fn dispatch_voxel_compute_passes_batched(
         pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
     )
     else {
-        warn!("[dispatch_voxel_compute_passes_batched] pipelines not yet compiled, skipping");
+        let ids = [
+            ("pass1", pipeline.pass1_pipeline_id),
+            ("scan", pipeline.stream_compaction_pipeline_id),
+            ("scan_block_sums", pipeline.scan_block_sums_pipeline_id),
+            ("resolve", pipeline.stream_compaction_resolve_pipeline_id),
+            (
+                "write_active_count",
+                pipeline.write_chunk_active_count_pipeline_id,
+            ),
+            ("chunk_bases", pipeline.chunk_bases_pipeline_id),
+            ("pass3", pipeline.pass3_pipeline_id),
+        ];
+        for (name, id) in ids {
+            if pipeline_cache.get_compute_pipeline(id).is_none() {
+                warn!(
+                    "[dispatch] {name} not ready: {:?}",
+                    pipeline_cache.get_compute_pipeline_state(id)
+                );
+            }
+        }
         return;
     };
 
@@ -298,8 +328,15 @@ pub fn dispatch_voxel_compute_passes_batched(
         label: Some("voxel_compute_encoder_batched"),
     });
 
-    for arena in arena_set.arenas.values() {
+    for arena in arena_set.iter() {
         let active = arena.active_chunk_count();
+        static LAST: AtomicU32 = AtomicU32::new(0);
+        if active != LAST.swap(active, Ordering::Relaxed) {
+            info!(
+                "[arena] texture_size={} active={} max={}",
+                arena.texture_size, active, arena.max_chunks
+            );
+        }
         if active == 0 {
             continue;
         }
@@ -388,7 +425,16 @@ pub fn voxel_raster_pass(
     let Some(arena_set) = arena_set else {
         return;
     };
-    if arena_set.arenas.values().all(|a| a.active_slots.is_empty()) {
+    if pipeline_cache
+        .get_render_pipeline(raster_pipeline.pipeline_id)
+        .is_none()
+    {
+        warn_once!(
+            "raster pipeline: {:?}",
+            pipeline_cache.get_render_pipeline_state(raster_pipeline.pipeline_id)
+        );
+    }
+    if arena_set.is_empty() {
         return;
     }
 
@@ -430,7 +476,7 @@ pub fn voxel_raster_pass(
     // Each LOD's arena has its own vertex/index buffers, so the bind-once
     // optimization from the single-arena version now happens once per arena
     // instead of once per frame.
-    for arena in arena_set.arenas.values() {
+    for arena in arena_set.iter() {
         if arena.active_slots.is_empty() {
             continue;
         }
@@ -446,7 +492,7 @@ pub fn voxel_raster_pass(
     }
 }
 
-const NEIGHBORS_MASK: [IVec3; 7] = [
+pub(crate) const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 0, 0),
     ivec3(0, 1, 0),
     ivec3(0, 0, 1),
@@ -469,62 +515,75 @@ pub fn nearest_neighbor_sample(data: &[u8], size: u32, x: f32, y: f32, z: f32) -
     data[(zi * s + yi) * s + xi]
 }
 
+pub fn extract_visibility_removed(
+    mut commands: Commands,
+    mut removed: Extract<RemovedComponents<VisibilityField>>,
+    chunks: Extract<Query<(&ChunkPosition, &LOD, Has<VisibilityField>)>>,
+) {
+    for entity in removed.read() {
+        let Ok((pos, lod, still_has)) = chunks.get(entity) else {
+            continue;
+        };
+        if still_has {
+            continue;
+        }
+        commands.spawn(ExtractedChunkField::<VisibilityField> {
+            main_entity: entity.into(),
+            chunk_pos: pos.0,
+            padded_data: Vec::new(),
+            size: lod.size() + PADDING,
+            lod: *lod,
+            _type: PhantomData,
+        });
+    }
+}
+
 pub fn extract_voxel_chunks<T>(
     mut commands: Commands,
     chunk_manager: Extract<Res<ChunkManager>>,
     query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
-    visibility_query: Extract<Query<&VisibilityField>>,
-    mut last_versions: Local<std::collections::HashMap<IVec3, [u64; 8]>>,
+    visibility_query: Extract<Query<Option<&VisibilityField>>>,
+    mut last_versions: Local<std::collections::HashMap<IVec3, (LOD, [u64; 8])>>,
+    surface_query: Extract<Query<(), With<crate::field::surface::HasSurface>>>,
 ) where
     T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
     for (entity, pos, field, lod) in query.iter() {
-        let Ok(visibility) = visibility_query.get(entity) else {
-            continue; // FieldsPlugin guarantees this on every chunk; defensive only
-        };
-        /*
-        info!(
-            "[extract] chunk {:?} visibility uniform = {:?}",
-            pos.0,
-            visibility.is_uniform()
-        );
-         */
-        if visibility.is_uniform() == Some(false) {
+        if !surface_query.contains(entity) {
+            last_versions.remove(&pos.0); // so gaining a surface re-extracts
+            continue;
+        }
+        if visibility_query
+            .get(entity)
+            .is_ok_and(|v| v.is_some_and(|vv| vv.is_all_full() == false))
+        {
+            last_versions.remove(&pos.0); // so un-hiding re-extracts
+            //       I am not sure about this ^
             continue;
         }
 
         let size = lod.size();
-        let expected_elems = (size * size * size) as usize;
+        let expected_elems = lod.volume();
         if field.data_slice().len() != expected_elems {
-            // LOD component changed this frame but the field hasn't caught up
-            // yet (sync_field_lod runs in the main world's Update; this system
-            // runs in the render world's ExtractSchedule — the two aren't
-            // guaranteed ordered relative to each other on the same frame).
-            // Skip this chunk for one frame rather than reading out of bounds;
-            // sync_field_lod will have resized it by the next extraction pass.
-            warn!(
-                "[extract_voxel_chunks] chunk {:?} LOD/field size mismatch (LOD wants {} elems, field has {}), skipping this frame",
-                pos.0,
-                expected_elems,
-                field.data_slice().len()
-            );
-            continue;
+            unreachable!("can't happen now (LOD and fields install together); defensive");
         }
 
         let mut versions = [0u64; 8];
         versions[0] = field.version();
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
-                if let Ok((_, _, n_field, _)) = query.get(n_entity) {
-                    versions[i + 1] = n_field.version();
+                if let Ok((_, _, n_field, n_lod)) = query.get(n_entity) {
+                    // fold neighbour LOD in: a reload resets version to 0
+                    versions[i + 1] = n_field.version() ^ ((n_lod.rank() as u64 + 1) << 56);
                 }
             }
         }
 
-        if last_versions.get(&pos.0) == Some(&versions) {
+        let key = (*lod, versions);
+        if last_versions.get(&pos.0) == Some(&key) {
             continue;
         }
-        last_versions.insert(pos.0, versions);
+        last_versions.insert(pos.0, key);
 
         let padded_size = size + PADDING;
 
@@ -766,8 +825,10 @@ fn fill_region<T: ApronSample>(
             let nx_coord = local_x * scale_ratio;
             let ny_coord = local_y * scale_ratio;
             let nz_coord = local_z * scale_ratio;
-
-            let val = T::sample_apron(&nx_data, n_size, nx_coord, ny_coord, nz_coord);
+            let val = T::rescale(
+                T::sample_apron(&nx_data, n_size, nx_coord, ny_coord, nz_coord),
+                scale_ratio,
+            );
             vol[idx(cx, cy, cz)] = val;
         }
     } else {
@@ -826,34 +887,6 @@ pub fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
     c0 * (1.0 - tz) + c1 * tz
 }
 
-/// Runs before `prepare_voxel_arena`. Creates and inserts `VoxelChunkArena`
-/// the first time chunk data appears — we can't build it earlier because
-/// `cell_count`/`texture_size` come from the chunk's `size`, which isn't
-/// known until extraction has produced at least one `ExtractedChunkField`.
-pub fn init_voxel_arena<T: Send + Sync + 'static>(
-    render_device: Res<RenderDevice>,
-    layouts: Res<VoxelPipelineLayouts>,
-    extracted_chunks: Query<&ExtractedChunkField<T>>,
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
-) {
-    for chunk in extracted_chunks.iter() {
-        if arena_set.arenas.contains_key(&chunk.lod) {
-            continue;
-        }
-        let size = chunk.size;
-        let chunk_voxels = size - 2;
-        let cell_count = chunk_voxels + 1;
-        info!(
-            "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
-            chunk.lod, cell_count, size
-        );
-        arena_set.arenas.insert(
-            chunk.lod,
-            VoxelChunkArena::new(&render_device, &layouts, cell_count, size),
-        );
-    }
-}
-
 fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
     let mut packed = vec![0u32; bits.len().div_ceil(32)];
     for (i, b) in bits.enumerate() {
@@ -864,22 +897,33 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
     packed
 }
 
-fn arena_or_drop<'a>(
-    arena_set: &'a mut VoxelChunkArenaSet,
-    lod: LOD,
-    chunk_pos: IVec3,
-    entity: Entity,
-    system: &str,
-    commands: &mut Commands,
-) -> Option<&'a mut VoxelChunkArena> {
-    if arena_set.arenas.contains_key(&lod) {
-        arena_set.arenas.get_mut(&lod)
-    } else {
-        warn!(
-            "[{system}] no arena for LOD {:?}, dropping chunk {:?}",
-            lod, chunk_pos
-        );
-        commands.entity(entity).despawn();
-        None
+pub fn release_despawned_chunks(
+    live: Extract<
+        Query<
+            (Entity, Option<&VisibilityField>),
+            (
+                With<crate::Chunk>,
+                With<LOD>,
+                With<crate::field::surface::HasSurface>,
+            ),
+        >,
+    >,
+    arena_set: Option<ResMut<VoxelChunkArenaSet>>,
+) {
+    let Some(mut arena_set) = arena_set else {
+        return;
+    };
+    let wanted: std::collections::HashSet<MainEntity> = live
+        .iter()
+        .filter(|(_, v)| !v.is_some_and(|v| v.is_all_empty()))
+        .map(|(e, _)| MainEntity::from(e))
+        .collect();
+    let stale: Vec<MainEntity> = arena_set
+        .iter()
+        .flat_map(|a| a.slot_of_main_entity.keys().copied())
+        .filter(|e| !wanted.contains(e))
+        .collect();
+    for e in stale {
+        arena_set.release(e);
     }
 }

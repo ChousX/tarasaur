@@ -213,7 +213,7 @@ fn cs_main(
     let cell_base = cell_offset_for(real_slot);
     let cell_idx = get_cell_index(id, cell_base);
     let idx_base = chunk_index_base[cmeta.active_list_pos];
-
+    if (chunk_vertex_base[cmeta.active_list_pos] == 0xFFFFFFFFu) { return; }
     // --- PART 1: VERTEX GENERATION FOR ACTIVE DUAL CELLS ---
     if (flags_buffer[cell_idx] == 1u) {
         let vert_idx = chunk_vertex_base[cmeta.active_list_pos] + compacted_offsets[cell_idx];
@@ -293,7 +293,7 @@ fn cs_main(
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
                 if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
@@ -328,7 +328,7 @@ fn cs_main(
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
 
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
@@ -364,7 +364,7 @@ fn cs_main(
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
 
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;

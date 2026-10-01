@@ -344,8 +344,7 @@ pub fn prepare_voxel_queries(
     let mut lod_active_mask = 0u32;
     let mut current_presence = [false; LOD::COUNT];
 
-    for (&lod, arena) in arena_set.arenas.iter() {
-        let r = lod.rank() as usize;
+    for (r, arena) in arena_set.query_arenas() {
         let voxel_size = CHUNK_SIZE / (arena.texture_size - 2) as f32;
         lod_voxel_size[r] = voxel_size;
         lod_texture_size[r] = arena.texture_size;
@@ -398,7 +397,7 @@ pub fn prepare_voxel_queries(
                 },
             ];
             for r in 0..LOD::COUNT as u32 {
-                let arena = LOD::from_rank(r).and_then(|lod| arena_set.arenas.get(&lod));
+                let arena = LOD::from_rank(r).and_then(|lod| arena_set.first_arena(lod));
                 let (sdf, meta) = match arena {
                     Some(a) => (&a.sdf_buffer, &a.chunk_meta_buffer),
                     None => (

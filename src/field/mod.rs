@@ -1,20 +1,21 @@
-use std::marker::PhantomData;
-
+use bevy::ecs::component::Mutable;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use std::marker::PhantomData;
 
 pub mod editor;
 pub mod generator;
-mod loading;
+pub mod loading;
 pub mod lod;
-pub mod lod_sync;
 pub mod material;
 pub mod ops;
 pub mod persistence;
 mod plugin;
 pub mod sdf;
+pub mod surface;
 pub mod systems;
 pub mod visibility;
-pub use lod::LOD;
+pub use lod::{LOD, MaxEditLod, TargetLOD};
 pub use material::MaterialField;
 pub use material::VoxelMaterial;
 pub use plugin::*;
@@ -70,6 +71,15 @@ pub trait Versionable: Component {
 pub trait VoxelDataSlice {
     type Elem: bytemuck::Pod + Default;
     fn data_slice(&self) -> &[Self::Elem];
+    #[inline]
+    /// Converts a value sampled from a grid `ratio`x finer (or, if <1,
+    /// coarser) than the destination. Only distances care: SDF values are
+    /// in voxels of their own LOD, so they divide by `ratio`. Categorical
+    /// data is unchanged. Used by downsampling AND by the neighbour apron.
+
+    fn rescale(v: Self::Elem, _ratio: f32) -> Self::Elem {
+        v
+    }
 }
 
 /// How a field samples its own data at a non-integer (neighbor-chunk)
@@ -117,5 +127,64 @@ impl FieldNew for VisibilityField {
 impl<M: VoxelMaterial> FieldNew for MaterialField<M> {
     fn new_for_lod(lod: LOD) -> Self {
         Self::new(lod)
+    }
+}
+
+/// Build a field directly from raw voxel data at `lod` (version 0).
+pub trait FieldFromRaw: VoxelDataSlice + Sized {
+    /// Optional fields are REMOVED (not defaulted) when the save has no payload.
+    const OPTIONAL: bool = false;
+    fn from_raw(lod: LOD, data: Vec<Self::Elem>) -> Self;
+}
+
+use crate::chunk::{Chunk, EditPin};
+
+/// The only sanctioned way to mutate a chunk field. `get_mut` returns `Some`
+/// only when the chunk is at `MaxEditLod` with no load in flight. Otherwise
+/// it pins the chunk at max LOD (upgrading it) and returns `None`, so the
+/// caller retries next frame. If the field is optional and absent, it is
+/// created at its "editable default" (for visibility: fully visible).
+#[derive(SystemParam)]
+pub struct EditableChunks<'w, 's, F: Component<Mutability = Mutable> + FieldNew> {
+    max: Res<'w, MaxEditLod>,
+    commands: Commands<'w, 's>,
+    chunks: Query<
+        'w,
+        's,
+        (
+            Option<&'static LOD>,
+            Has<loading::ChunkDataTask>,
+            Option<&'static mut EditPin>,
+        ),
+        With<Chunk>,
+    >,
+    fields: Query<'w, 's, &'static mut F, With<Chunk>>,
+}
+
+impl<F: Component<Mutability = Mutable> + FieldNew> EditableChunks<'_, '_, F> {
+    pub fn get_mut(&mut self, e: Entity) -> Option<Mut<'_, F>> {
+        let max = self.max.0;
+        let (lod, loading, pin) = self.chunks.get_mut(e).ok()?;
+
+        let ready_lod = lod.copied().filter(|l| *l == max && !loading);
+        let Some(lod) = ready_lod else {
+            match pin {
+                Some(mut p) => p.idle = 0.0, // waiting on the load: keep the pin alive
+                None => {
+                    self.commands
+                        .entity(e)
+                        .try_insert((EditPin::default(), TargetLOD(max)));
+                }
+            }
+            return None;
+        };
+        if let Some(mut p) = pin {
+            p.idle = 0.0;
+        }
+        if !self.fields.contains(e) {
+            self.commands.entity(e).try_insert(F::new_for_lod(lod));
+            return None; // present next frame
+        }
+        self.fields.get_mut(e).ok()
     }
 }

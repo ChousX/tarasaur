@@ -5,8 +5,10 @@ use bevy::render::RenderPlugin;
 use bevy::render::settings::{RenderCreation, WgpuLimits, WgpuSettings};
 use bevy::window::PrimaryWindow;
 
+use tarasaur::loading::ChunkDataTask;
+use tarasaur::{Chunk, SDF};
 use tarasaur::{
-    LOD, TarasaurPlugin, VisibilityField,
+    LOD, TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ShowChunkBounds},
     field::generator::ChunkGeneratorRegistry,
 };
@@ -30,15 +32,17 @@ fn main() {
     )
     .add_plugins(TarasaurPlugin);
 
-    // Registered once, up front — every chunk ChunkLoader spawns from here
-    // on gets its terrain generated off-thread via the same task machinery
-    // that handles save-file loading (see spawn_chunk_data_task).
+    app.add_systems(Update, debug_stages);
+    // Registered once, up front. Every chunk the ChunkLoader spawns or
+    // retargets gets its terrain produced off-thread by the same task
+    // machinery that handles save-file loading (see start_chunk_loads in
+    // field/loading.rs). A saved max-LOD file is used first; the generator
+    // only runs when no usable save exists.
+    //
+    // No VisibilityField generator: a chunk without one is fully visible.
     {
         let mut generators = app.world_mut().resource_mut::<ChunkGeneratorRegistry>();
         generators.register_sdf(terrain_sdf);
-        generators.register::<u8>(std::any::type_name::<VisibilityField>(), |_pos, lod| {
-            vec![1u8; lod.volume()] // fully visible everywhere — see note below
-        });
     }
 
     app.insert_resource(ShowChunkBounds) // color-codes each chunk's LOD in gizmos — remove once you trust the streaming
@@ -67,11 +71,15 @@ fn terrain_height(x: f32, z: f32) -> f32 {
     h
 }
 
-/// Runs off the main thread inside spawn_chunk_data_task — no ECS access,
-/// pure function of chunk_pos + lod, exactly what ChunkGeneratorRegistry
-/// requires. Produces a signed distance: negative below the terrain
-/// surface, positive above, in the same x/y/z-flattened order
-/// RestorableField expects.
+/// Runs off the main thread inside a load task — no ECS access, pure
+/// function of chunk_pos + lod, exactly what ChunkGeneratorRegistry
+/// requires. Produces a sign volume: negative below the terrain surface,
+/// positive above, in x/y/z-flattened order. `register_sdf` turns it into
+/// real distances with a jump-flood pass.
+///
+/// Resolution-independent: voxel `i` samples world position
+/// `origin + i * voxel_size`, so the same chunk generated at two LODs
+/// describes the same surface.
 fn terrain_sdf(chunk_pos: IVec3, lod: LOD) -> Vec<f32> {
     let size = lod.size();
     let voxel_size = CHUNK_SIZE / size as f32;
@@ -120,16 +128,21 @@ fn spawn_player_and_cursor_marker(mut commands: Commands) {
             pitch,
             yaw,
         },
-        // Drives the main streaming radius: high LOD close to the player,
-        // falling off to lower LOD further out, per calculate_lod's
-        // hysteresis-adjusted thresholds. Smaller than ChunkLoader::default()
-        // so this example stays snappy — default's lowest_distance=10 spawns
-        // ~9000 chunks on first load.
+        // Drives the main streaming radius: High LOD close to the player,
+        // falling off to lower LODs further out. Band widths are ADDITIVE
+        // and listed finest first (Chebyshev distance, in chunks):
+        //   d <= 1 -> High, d <= 3 -> Medium, d <= 5 -> Low, d <= 8 -> Lowest.
+        // `hysteresis` delays both LOD downgrades and despawn by that many
+        // chunks (see ChunkLoader::want). Kept smaller than
+        // ChunkLoader::default(), whose total range of 10 spawns thousands
+        // of chunks on first load.
         ChunkLoader {
-            high_distance: 1,
-            medium_distance: 3,
-            low_distance: 5,
-            lowest_distance: 8,
+            lod_bands: vec![
+                (LOD::High, 1),   // d <= 1
+                (LOD::Medium, 2), // d <= 3
+                (LOD::Low, 2),    // d <= 5
+                (LOD::Lowest, 3), // d <= 8
+            ],
             hysteresis: 1,
         },
     ));
@@ -143,20 +156,17 @@ fn spawn_player_and_cursor_marker(mut commands: Commands) {
     ));
 
     // The cursor's high-detail marker: no mesh, just Transform + ChunkLoader.
-    // lowest_distance=1 means calculate_lod returns None for anything
-    // outside the immediate ring — this loader can only ever *request*
-    // LOD::High nearby, never request a downgrade anywhere, so it can't
-    // fight the player's loader for chunks outside that ring. See the note
-    // below about what happens when the two loaders do disagree on an
-    // overlapping chunk.
+    // A single High band of width 1 means this loader only ever wants High
+    // within one chunk of the marker and nothing beyond. When several loaders
+    // overlap, the finest wanted LOD wins and a chunk is despawned only when
+    // every loader wants it gone, so this loader can only upgrade chunks near
+    // the cursor and can't fight the player's loader for chunks outside that
+    // ring.
     commands.spawn((
         CursorFocus,
         Transform::default(),
         ChunkLoader {
-            high_distance: 1,
-            medium_distance: 1,
-            low_distance: 1,
-            lowest_distance: 1,
+            lod_bands: vec![(LOD::High, 1)],
             hysteresis: 0,
         },
     ));
@@ -243,4 +253,27 @@ fn update_cursor_marker(
     for mut transform in marker_q.iter_mut() {
         transform.translation = hit;
     }
+}
+
+fn debug_stages(
+    chunks: Query<(Has<LOD>, Has<SDF>, Has<ChunkDataTask>), With<Chunk>>,
+    mut t: Local<f32>,
+    time: Res<Time>,
+) {
+    *t += time.delta_secs();
+    if *t < 2.0 {
+        return;
+    }
+    *t = 0.0;
+    let (mut total, mut installed, mut loading) = (0, 0, 0);
+    for (l, s, d) in &chunks {
+        total += 1;
+        if l && s {
+            installed += 1;
+        }
+        if d {
+            loading += 1;
+        }
+    }
+    info!("[stages] chunks={total} installed={installed} loading={loading}");
 }

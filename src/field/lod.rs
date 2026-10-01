@@ -13,6 +13,8 @@ use bevy::prelude::*;
     PartialEq,
     Eq,
     Hash,
+    PartialOrd,
+    Ord,
 )]
 pub enum LOD {
     Lowest = 4,
@@ -22,14 +24,26 @@ pub enum LOD {
     High = 64,
 }
 
+/// What the loader wants this chunk to be. `LOD` (below) is what its fields
+/// currently hold; the load pipeline closes the gap between the two.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetLOD(pub LOD);
+
+/// The only LOD at which fields may be edited or saved.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct MaxEditLod(pub LOD);
+impl Default for MaxEditLod {
+    fn default() -> Self {
+        Self(LOD::High)
+    }
+}
+
 impl LOD {
     pub const COUNT: usize = 4;
-    /// Returns the CHUNK_SIZE for this specific level of detail
     #[inline]
     pub fn size(self) -> u32 {
         self as u32
     }
-
     #[inline]
     pub fn rank(self) -> u32 {
         match self {
@@ -39,7 +53,6 @@ impl LOD {
             LOD::High => 3,
         }
     }
-
     #[inline]
     pub fn from_rank(rank: u32) -> Option<Self> {
         match rank {
@@ -50,17 +63,16 @@ impl LOD {
             _ => None,
         }
     }
-    /// Returns the total number of voxels (Volume) for this LOD
     #[inline]
     pub fn volume(self) -> usize {
         let s = self.size() as usize;
         s * s * s
     }
-
-    /// Dynamically calculates voxel spatial size based on CHUNK_SIZE.x and grid resolution
-    /// Example: LOD::Medium (32) -> 10.0 / 32.0 = 0.3125 world units per voxel
     #[inline]
     pub fn voxel_size(self) -> f32 {
         CHUNK_SIZE / self.size() as f32
+    }
+    pub const fn get_number_of_lods() -> usize {
+        Self::COUNT
     }
 }

@@ -1,4 +1,4 @@
-use crate::{ApronSample, ExtractGate, FieldLOD, Versionable, VoxelDataSlice};
+use crate::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice};
 
 use super::{Field, LOD};
 use bevy::prelude::*;
@@ -38,6 +38,7 @@ pub struct SDF {
     data: Box<[f32]>,
     seeds: Box<[PackedCoord]>,
     scratch: Vec<PackedCoord>,
+    inside_count: u32, // voxels with value <= 0.0, same test as pass1
     pub version: u64,
 }
 
@@ -49,13 +50,29 @@ impl Default for SDF {
 
 impl SDF {
     pub fn new(lod: LOD) -> Self {
-        let volume = lod.volume();
         Self {
             lod,
-            data: vec![f32::MAX; volume].into_boxed_slice(),
-            seeds: vec![PackedCoord::EMPTY; volume].into_boxed_slice(),
-            scratch: vec![PackedCoord::EMPTY; volume],
+            data: vec![f32::MAX; lod.volume()].into_boxed_slice(),
+            seeds: Box::default(),
+            scratch: Vec::new(),
+            inside_count: 0,
             version: 0,
+        }
+    }
+    fn recount(&mut self) {
+        self.inside_count = self.data.iter().filter(|v| **v <= 0.0).count() as u32;
+    }
+
+    /// `Some(true)` = every voxel inside, `Some(false)` = every voxel outside,
+    /// `None` = mixed. O(1).
+    #[inline]
+    pub fn uniform_sign(&self) -> Option<bool> {
+        if self.inside_count == 0 {
+            Some(false)
+        } else if self.inside_count as usize == self.data.len() {
+            Some(true)
+        } else {
+            None
         }
     }
 
@@ -115,6 +132,7 @@ impl SDF {
     /// this just does the write and bumps version like any other mutation.
     pub fn apply_reinit_result(&mut self, data: Box<[f32]>) {
         self.data = data;
+        self.recount();
         self.version += 1;
     }
 }
@@ -169,7 +187,13 @@ impl Field<f32> for SDF {
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: f32) {
         let i = self.flatten(x, y, z);
-        if self.data[i] != value {
+        let old = self.data[i];
+        if old != value {
+            match (old <= 0.0, value <= 0.0) {
+                (false, true) => self.inside_count += 1,
+                (true, false) => self.inside_count -= 1,
+                _ => {}
+            }
             self.data[i] = value;
             self.version += 1;
         }
@@ -193,6 +217,21 @@ impl VoxelDataSlice for SDF {
     #[inline]
     fn data_slice(&self) -> &[f32] {
         &self.data
+    }
+}
+
+impl FieldFromRaw for SDF {
+    fn from_raw(lod: LOD, data: Vec<f32>) -> Self {
+        debug_assert_eq!(data.len(), lod.volume());
+        let inside_count = data.iter().filter(|v| **v <= 0.0).count() as u32;
+        Self {
+            lod,
+            data: data.into_boxed_slice(),
+            seeds: Box::default(),
+            scratch: Vec::new(),
+            inside_count,
+            version: 0,
+        }
     }
 }
 

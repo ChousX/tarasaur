@@ -1,8 +1,9 @@
 // fields/systems.rs
+use super::{EditableChunks, FieldNew};
 use super::{
     Field, SDF,
     editor::{EditFieldMessage, EditMode},
-    ops::{AccumulateExt, BlendExt, FieldBoxOps, ShapeBounds, ShapeScale},
+    ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
 };
 use crate::{
     CHUNK_SIZE, ChunkPosition, DirtyField, VisibilityField,
@@ -12,7 +13,6 @@ use crate::{
 };
 use bevy::{
     ecs::{component::Mutable, message::MessageReader},
-    math::primitives::Cuboid,
     prelude::*,
 };
 
@@ -26,115 +26,119 @@ fn overlapping_chunks(center: Vec3, half_extent: Vec3) -> impl Iterator<Item = I
     })
 }
 
+const MAX_DEFER_FRAMES: u32 = 600;
+const MAX_DEFERRED: usize = 4096;
+
+pub struct DeferredEdit<S, V> {
+    chunk_pos: IVec3,
+    center: Vec3,
+    shape: S,
+    val: V,
+    mode: EditMode<V>,
+    age: u32,
+}
+
 pub fn process_shape_edits<F, S, V>(
     mut commands: Commands,
     mut events: MessageReader<EditFieldMessage<F, S, V>>,
-    mut query: Query<&mut F>,
+    mut editable: EditableChunks<F>,
     chunk_manager: Res<ChunkManager>,
+    mut deferred: Local<Vec<DeferredEdit<S, V>>>,
 ) where
-    F: Field<V> + Component<Mutability = Mutable> + ShapeEditOps<V, S>,
+    F: Field<V> + Component<Mutability = Mutable> + ShapeEditOps<V, S> + FieldNew,
     S: Primitive3d + Copy + Send + Sync + 'static + ShapeBounds + ShapeScale,
     V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt,
 {
-    for event in events.read() {
-        info!(
-            "[process_shape_edits] got an edit message for {}",
-            std::any::type_name::<F>()
-        );
-        let EditFieldMessage {
-            center,
-            shape,
-            val,
-            mode,
-            ..
-        } = event;
-        // ^ event is &EditFieldMessage<..> here — do NOT write `= *event`.
-        // Match ergonomics gives center: &Vec3, shape: &S, val: &V for free.
-
-        for chunk_pos in overlapping_chunks(*center, shape.half_extent()) {
-            let Some(entity) = chunk_manager.get_chunk(&chunk_pos) else {
-                warn!(
-                    "[process_shape_edits] no chunk at {:?} for {}",
-                    chunk_pos,
-                    std::any::type_name::<F>()
-                );
-                continue;
-            };
-            let Ok(mut field) = query.get_mut(entity) else {
-                info!(
-                    "[process_shape_edits] resolved chunk_pos {:?} -> entity {:?} for {}",
-                    chunk_pos,
-                    entity,
-                    std::any::type_name::<F>()
-                );
-                continue;
-            };
-
-            let chunk_world_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
-            let voxel_size = CHUNK_SIZE / field.size().x as f32;
-            let grid_center = (*center - chunk_world_origin) / voxel_size;
-            let grid_shape = shape.scaled_by(1.0 / voxel_size);
-
-            match mode {
-                EditMode::Absolute => field.fill(grid_center, grid_shape, *val),
-                EditMode::Accumulate { delta } => field.accumulate(grid_center, grid_shape, *delta),
-                EditMode::Blend { rate } => field.blend(grid_center, grid_shape, *val, *rate),
-            }
-
-            commands
-                .entity(entity)
-                .insert(DirtyField::<F, V>::default());
+    // Retries first (oldest first), then this frame's new edits.
+    let mut work = std::mem::take(&mut *deferred);
+    for ev in events.read() {
+        for chunk_pos in overlapping_chunks(ev.center, ev.shape.half_extent()) {
+            work.push(DeferredEdit {
+                chunk_pos,
+                center: ev.center,
+                shape: ev.shape,
+                val: ev.val,
+                mode: ev.mode,
+                age: 0,
+            });
         }
     }
-}
 
-pub fn process_box_edits<F, V>(
-    mut commands: Commands,
-    mut events: MessageReader<EditFieldMessage<F, Cuboid, V>>,
-    mut query: Query<&mut F>,
-    chunk_manager: Res<ChunkManager>,
-) where
-    F: Field<V> + Component<Mutability = Mutable>,
-    V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt,
-{
-    for event in events.read() {
-        let EditFieldMessage {
-            center,
-            shape,
-            val,
-            mode,
-            ..
-        } = event;
-
-        for chunk_pos in overlapping_chunks(*center, shape.half_extent()) {
-            let Some(entity) = chunk_manager.get_chunk(&chunk_pos) else {
-                continue;
-            };
-            let Ok(mut field) = query.get_mut(entity) else {
-                continue;
-            };
-
-            let chunk_world_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
-            let local_center = *center - chunk_world_origin;
-
-            let voxel_size = CHUNK_SIZE / field.size().x as f32;
-            let grid_center = local_center / voxel_size;
-            let grid_shape = shape.scaled_by(1.0 / voxel_size);
-
-            match mode {
-                EditMode::Absolute => field.fill_box(grid_center, grid_shape, *val),
-                EditMode::Accumulate { delta } => {
-                    field.accumulate_box(grid_center, grid_shape, *delta)
+    for mut e in work {
+        let Some(entity) = chunk_manager.get_chunk(&e.chunk_pos) else {
+            continue; // chunk not loaded / gone: nothing to edit
+        };
+        match editable.get_mut(entity) {
+            Some(mut field) => {
+                let origin = e.chunk_pos.as_vec3() * CHUNK_SIZE;
+                let voxel_size = CHUNK_SIZE / field.size().x as f32;
+                let grid_center = (e.center - origin) / voxel_size;
+                let grid_shape = e.shape.scaled_by(1.0 / voxel_size);
+                match e.mode {
+                    EditMode::Absolute => field.fill(grid_center, grid_shape, e.val),
+                    EditMode::Accumulate { delta } => {
+                        field.accumulate(grid_center, grid_shape, delta)
+                    }
+                    EditMode::Blend { rate } => field.blend(grid_center, grid_shape, e.val, rate),
                 }
-                EditMode::Blend { rate } => field.blend_box(grid_center, grid_shape, *val, *rate),
+                commands
+                    .entity(entity)
+                    .insert(DirtyField::<F, V>::default());
             }
-
-            commands
-                .entity(entity)
-                .insert(DirtyField::<F, V>::default());
+            None => {
+                e.age += 1; // waiting for the chunk to reach max LOD
+                if e.age < MAX_DEFER_FRAMES {
+                    deferred.push(e);
+                }
+            }
         }
     }
+    if deferred.len() > MAX_DEFERRED {
+        let excess = deferred.len() - MAX_DEFERRED;
+        deferred.drain(..excess); // drop the oldest
+    }
 }
+
+pub fn process_sdf_sphere_stamps(
+    mut commands: Commands,
+    mut events: MessageReader<SdfSphereStamp>,
+    mut editable: EditableChunks<SDF>,
+    chunk_manager: Res<ChunkManager>,
+    mut deferred: Local<Vec<(IVec3, SdfSphereStamp, u32)>>,
+) {
+    let mut work = std::mem::take(&mut *deferred);
+    for &stamp in events.read() {
+        for p in overlapping_chunks(stamp.center, Vec3::splat(stamp.bound_radius)) {
+            work.push((p, stamp, 0));
+        }
+    }
+    for (chunk_pos, stamp, age) in work {
+        let Some(entity) = chunk_manager.get_chunk(&chunk_pos) else {
+            continue;
+        };
+        match editable.get_mut(entity) {
+            Some(mut sdf) => {
+                let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
+                let voxel_size = CHUNK_SIZE / sdf.size().x as f32;
+                sdf.stamp_sdf_sphere(
+                    (stamp.center - origin) / voxel_size,
+                    stamp.bound_radius / voxel_size,
+                    stamp.sdf_radius / voxel_size,
+                );
+                commands
+                    .entity(entity)
+                    .insert(DirtyField::<SDF, f32>::default());
+            }
+            None if age + 1 < MAX_DEFER_FRAMES => deferred.push((chunk_pos, stamp, age + 1)),
+            None => {}
+        }
+    }
+    if deferred.len() > MAX_DEFERRED {
+        let excess = deferred.len() - MAX_DEFERRED;
+        deferred.drain(..excess);
+    }
+}
+
 use super::sdf::{PackedCoord, jump_flood_distance_field};
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
@@ -253,43 +257,5 @@ pub fn clear_dirty_visibility(
         commands
             .entity(entity)
             .remove::<DirtyField<VisibilityField, bool>>();
-    }
-}
-
-pub fn process_sdf_sphere_stamps(
-    mut commands: Commands,
-    mut events: MessageReader<SdfSphereStamp>,
-    mut query: Query<&mut SDF>,
-    chunk_manager: Res<ChunkManager>,
-) {
-    for event in events.read() {
-        let SdfSphereStamp {
-            center,
-            bound_radius,
-            sdf_radius,
-        } = *event;
-
-        for chunk_pos in overlapping_chunks(center, Vec3::splat(bound_radius)) {
-            let Some(entity) = chunk_manager.get_chunk(&chunk_pos) else {
-                continue;
-            };
-            let Ok(mut sdf) = query.get_mut(entity) else {
-                continue;
-            };
-
-            let chunk_world_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
-            let voxel_size = CHUNK_SIZE / sdf.size().x as f32;
-            let grid_center = (center - chunk_world_origin) / voxel_size;
-
-            sdf.stamp_sdf_sphere(
-                grid_center,
-                bound_radius / voxel_size,
-                sdf_radius / voxel_size,
-            );
-
-            commands
-                .entity(entity)
-                .insert(DirtyField::<SDF, f32>::default());
-        }
     }
 }

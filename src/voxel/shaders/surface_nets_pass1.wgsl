@@ -67,7 +67,7 @@ fn cs_main(
     let cell_count = uniforms.cell_count;
 
     if (all(cell_coord == vec3<u32>(0u))) {
-        atomicStore(&indirect_args[chunk_idx].index_count, 0u);
+        atomicStore(&indirect_args[real_slot].index_count, 0u);
     }
 
     if (cell_coord.x >= cell_count || cell_coord.y >= cell_count || cell_coord.z >= cell_count) {

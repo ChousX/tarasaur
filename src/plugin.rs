@@ -6,6 +6,9 @@ use crate::{
         FieldsPlugin, SDF, VisibilityField,
         persistence::{ChunkPersistencePlugin, RegisterSaveableFieldExt},
     },
+    loading::ChunkLoadingPlugin,
+    surface::SurfaceCullPlugin,
+    texture_palette::plugin::PalettePlugin,
     voxel::VoxelRenderPlugin,
 };
 
@@ -18,6 +21,9 @@ impl Plugin for TarasaurPlugin {
             ChunkPlugin,
             FieldsPlugin,
             ChunkPersistencePlugin,
+            ChunkLoadingPlugin,
+            PalettePlugin,
+            SurfaceCullPlugin,
         ))
         .register_saveable_field::<SDF>()
         .register_saveable_field::<VisibilityField>();

@@ -9,7 +9,6 @@ use crate::chunk::NewChunkSpawned;
 use crate::editor::SdfSphereStamp;
 use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDF, VisibilityField};
-use crate::lod_sync::sync_field_lod;
 use crate::persistence::RegisterSaveableFieldExt;
 use crate::systems::{
     clear_dirty_visibility, detect_topology_desync, process_sdf_sphere_stamps,
@@ -125,7 +124,6 @@ impl AppFieldExt for App {
         self.add_systems(
             Update,
             (
-                sync_field_lod::<F>,
                 process_shape_edits::<F, Sphere, V>,
                 process_shape_edits::<F, Cuboid, V>,
             )

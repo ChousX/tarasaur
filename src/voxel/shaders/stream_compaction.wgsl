@@ -10,15 +10,19 @@ struct BatchCompactionUniforms {
 @group(0) @binding(2) var<storage, read_write> compacted_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read_write> block_sums: array<u32>;
 @group(0) @binding(4) var<storage, read_write> chunk_active_counts: array<u32>;
+@group(0) @binding(5) var<storage, read> active_slot_map: array<u32>;
 
-/// Phase C: one thread per active chunk. Reads the same cell_offset convention
-/// as scan_workgroup/resolve_block_offsets (chunk_idx * total_cells) and writes
-/// this chunk's total active-cell count — compacted_offsets is exclusive, so add
-/// the last cell's own flag to get the true total.
+// Indexing convention (matches pass1/pass3/compute_chunk_bases):
+//   chunk_idx  = position in the active list (dispatch order)
+//   real_slot  = active_slot_map[chunk_idx] = the arena slot
+// Per-cell buffers (cell_flags, compacted_offsets) are laid out per real slot.
+// Per-dispatch buffers (block_sums, chunk_active_counts) are indexed by chunk_idx.
+
 @compute @workgroup_size(1, 1, 1)
 fn write_chunk_active_count(@builtin(workgroup_id) wg_id: vec3<u32>) {
     let chunk_idx = wg_id.x;
-    let cell_offset = chunk_idx * uniforms.total_cells;
+    let real_slot = active_slot_map[chunk_idx];
+    let cell_offset = real_slot * uniforms.total_cells;
     let last = cell_offset + uniforms.total_cells - 1u;
     chunk_active_counts[chunk_idx] = compacted_offsets[last] + cell_flags[last];
 }
@@ -26,9 +30,6 @@ fn write_chunk_active_count(@builtin(workgroup_id) wg_id: vec3<u32>) {
 const WORKGROUP_SIZE: u32 = 256u;
 var<workgroup> shared_data: array<u32, WORKGROUP_SIZE * 2u>;
 
-/// Phase A: Up-Sweep (Reduction) & Down-Sweep Workgroup Scan, batched across chunks.
-/// Dispatched as (blocks_per_chunk * active_chunk_count, 1, 1); each chunk's
-/// local block index is wg_id.x % blocks_per_chunk, chunk index is wg_id.x / blocks_per_chunk.
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn scan_workgroup(
     @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -38,7 +39,8 @@ fn scan_workgroup(
     let chunk_idx = wg_id.x / uniforms.blocks_per_chunk;
     let local_bid = wg_id.x % uniforms.blocks_per_chunk;
 
-    let cell_offset = chunk_idx * uniforms.total_cells;
+    let real_slot = active_slot_map[chunk_idx];
+    let cell_offset = real_slot * uniforms.total_cells;
     let block_offset = chunk_idx * uniforms.blocks_per_chunk;
 
     let local_idx_a = local_bid * (WORKGROUP_SIZE * 2u) + thid;
@@ -93,9 +95,6 @@ fn scan_workgroup(
     }
 }
 
-/// Phase B: Global Block Offset Resolve, batched. Same wg_id.x -> (chunk_idx, local_bid)
-/// split as scan_workgroup; block_sums lookup uses the per-chunk block_offset so each
-/// chunk's blocks only see their own chunk's prefix sums.
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn resolve_block_offsets(
     @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -105,7 +104,8 @@ fn resolve_block_offsets(
     let chunk_idx = wg_id.x / uniforms.blocks_per_chunk;
     let local_bid = wg_id.x % uniforms.blocks_per_chunk;
 
-    let cell_offset = chunk_idx * uniforms.total_cells;
+    let real_slot = active_slot_map[chunk_idx];
+    let cell_offset = real_slot * uniforms.total_cells;
     let block_offset = chunk_idx * uniforms.blocks_per_chunk;
 
     let block_modifier = block_sums[block_offset + local_bid];
@@ -119,10 +119,7 @@ fn resolve_block_offsets(
     if (local_idx_b < uniforms.total_cells) { compacted_offsets[idx_b] += block_modifier; }
 }
 
-/// Phase A.5: Turns per-block totals into exclusive prefix sums, one chunk's
-/// worth of blocks per workgroup invocation. Dispatched as (active_chunk_count, 1, 1) —
-/// each invocation still does its scan serially since blocks_per_chunk is small,
-/// but now scans only its own chunk's slice of block_sums rather than the whole buffer.
+// Per-chunk block_sums scan; indexed by chunk_idx only, no slot lookup needed.
 @compute @workgroup_size(1, 1, 1)
 fn scan_block_sums(@builtin(workgroup_id) wg_id: vec3<u32>) {
     let chunk_idx = wg_id.x;

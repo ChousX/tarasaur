@@ -14,10 +14,9 @@ use common::{
     terrain_height,
 };
 use tarasaur::{
-    LOD, MaterialField, TarasaurPlugin, VisibilityField, VoxelMaterial,
+    LOD, MaterialField, TarasaurPlugin, VoxelMaterial,
     chunk::{CHUNK_SIZE, ChunkLoader},
     field::{MaterialFieldPlugin, generator::ChunkGeneratorRegistry},
-    texture_palette::plugin::PalettePlugin,
 };
 
 fn main() {
@@ -36,20 +35,20 @@ fn main() {
             ..default()
         }),
     )
+    // TarasaurPlugin now includes PalettePlugin.
     .add_plugins(TarasaurPlugin)
-    .add_plugins(PalettePlugin::new())
     .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
 
     {
         let mut g = app.world_mut().resource_mut::<ChunkGeneratorRegistry>();
         g.register_sdf(terrain_sdf);
-        // ASSUMPTION: material fields register under their type_name like
-        // VisibilityField does. Need generator.rs to confirm.
+        // The key must equal the type_name the persistence registry uses for
+        // this field (register_field::<F> uses std::any::type_name::<F>()).
         g.register::<u8>(
             type_name::<MaterialField<TerrainMaterial>>(),
             terrain_materials,
         );
-        g.register::<u8>(type_name::<VisibilityField>(), all_visible);
+        // No VisibilityField generator: a chunk without one is fully visible.
     }
 
     app.add_systems(Startup, (spawn_player, setup_terrain_palette))
@@ -63,6 +62,8 @@ fn main() {
 
 /// The heightfield only depends on (x, z), so evaluate it once per column
 /// instead of once per voxel. Both the SDF and material generators share it.
+/// Voxel `i` samples `origin + i * voxel`, so the same chunk generated at any
+/// LOD describes the same surface.
 struct Columns {
     size: u32,
     voxel: f32,
@@ -99,7 +100,8 @@ impl Columns {
         }
     }
 
-    /// Same x-fastest, then y, then z ordering as the lod_streaming example.
+    /// x-fastest, then y, then z ordering (matches the lod_streaming example
+    /// and what the fields expect).
     fn fill<T>(&self, f: impl Fn(f32, f32, f32) -> T) -> Vec<T> {
         let n = self.size as usize;
         let mut out = Vec::with_capacity(n * n * n);
@@ -116,16 +118,13 @@ impl Columns {
     }
 }
 
+/// Sign volume; `register_sdf` turns it into real distances with a jump flood.
 fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     Columns::new(pos, lod).fill(|y, h, k| (y - h) * k)
 }
 
 fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<u8> {
     Columns::new(pos, lod).fill(|y, h, _| determine_material(h, y).to_id())
-}
-
-fn all_visible(_pos: IVec3, lod: LOD) -> Vec<u8> {
-    vec![1u8; lod.volume()]
 }
 
 // ---------------------------------------------------------------------------
@@ -145,11 +144,16 @@ fn spawn_player(mut commands: Commands) {
             pitch,
             yaw,
         },
+        // Band widths are additive, finest first (Chebyshev distance in chunks):
+        //   d <= 1 High, d <= 3 Medium, d <= 5 Low, d <= 8 Lowest.
+        // `hysteresis` delays LOD downgrades and despawn by that many chunks.
         ChunkLoader {
-            high_distance: 1,
-            medium_distance: 3,
-            low_distance: 5,
-            lowest_distance: 8,
+            lod_bands: vec![
+                (LOD::High, 1),
+                (LOD::Medium, 2),
+                (LOD::Low, 2),
+                (LOD::Lowest, 3),
+            ],
             hysteresis: 1,
         },
     ));

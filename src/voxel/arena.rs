@@ -386,6 +386,7 @@ impl VoxelChunkArena {
                 (2, &compacted_offsets_buffer),
                 (3, &block_sums_buffer),
                 (4, &chunk_active_counts_buffer),
+                (5, &active_slot_map_buffer),
             ]),
         );
 
@@ -394,7 +395,7 @@ impl VoxelChunkArena {
             &layouts.raster_chunk_visibility_layout,
             &entries(&[
                 (0, &chunk_meta_buffer),
-                (1, &chunk_meta_buffer),
+                (1, &visibility_mask_buffer),
                 (2, &chunk_has_mask_buffer),
                 (3, &batch_uniform_buffer_pass3),
             ]),
@@ -538,19 +539,174 @@ impl VoxelChunkArena {
     }
 }
 
+/// Max arenas per LOD, indexed by `LOD::rank()` (Lowest, Low, Medium, High).
+/// Each arena is ~one device storage-binding-limit in size, so the real
+/// capacity is arenas * `max_chunks`. Give the LODs that hold many chunks more.
+#[derive(Clone, Debug)]
+pub struct ArenaConfig {
+    pub max_arenas: [usize; LOD::COUNT],
+}
+impl Default for ArenaConfig {
+    fn default() -> Self {
+        Self {
+            max_arenas: [1, 1, 2, 4],
+        }
+    }
+}
+/// How many arenas per LOD the cursor-query shader can currently address.
+/// cursor_query.wgsl / query_entries() bind exactly one sdf_buffer +
+/// chunk_meta per LOD, so only arena 0 is visible to queries for now.
+pub const QUERY_ARENAS_PER_LOD: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArenaSlot {
+    pub arena_idx: usize,
+    pub slot: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GpuChunkLookupEntry {
+    pub pos_x: u32,
+    pub pos_y: u32,
+    pub pos_z: u32,
+    pub packed_slot_and_rank: u32,
+}
+
 #[derive(Resource, Default)]
 pub struct VoxelChunkArenaSet {
-    pub arenas: HashMap<LOD, VoxelChunkArena>,
+    pub arenas: [Vec<VoxelChunkArena>; LOD::get_number_of_lods()],
+    pub config: ArenaConfig,
 }
+
 impl VoxelChunkArenaSet {
-    pub fn total_max_chunks(&self) -> u32 {
-        self.arenas.values().map(|a| a.max_chunks).sum()
+    pub fn with_config(config: ArenaConfig) -> Self {
+        Self {
+            arenas: Default::default(),
+            config,
+        }
+    }
+    /// The query-visible arena for `lod` (the first one), if it exists.
+    pub fn first_arena(&self, lod: LOD) -> Option<&VoxelChunkArena> {
+        self.arenas[Self::lod_index(lod)].first()
     }
 
-    /// Rebuilds a combined chunk_pos -> (lod_rank, slot) table across every
-    /// live LOD arena. Unlike each arena's own lookup (which only knows
-    /// about its own slots), this is what the query shader now walks so a
-    /// ray resolves whatever LOD is actually resident at a position.
+    /// (lod_rank, arena) for every LOD's query-visible arena.
+    pub fn query_arenas(&self) -> impl Iterator<Item = (usize, &VoxelChunkArena)> {
+        self.arenas
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, v)| v.first().map(|a| (rank, a)))
+    }
+    /// ASSUMPTION: LOD is a fieldless enum. If it already has an index/rank
+    /// method, call that here instead.
+    #[inline]
+    pub fn lod_index(lod: LOD) -> usize {
+        lod.rank() as usize
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &VoxelChunkArena> {
+        self.arenas.iter().flatten()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut VoxelChunkArena> {
+        self.arenas.iter_mut().flatten()
+    }
+
+    /// True if no arena exists for any LOD.
+    pub fn is_empty(&self) -> bool {
+        self.arenas.iter().all(|v| v.is_empty())
+    }
+
+    #[inline]
+    pub fn arena_mut(&mut self, lod: LOD, arena_idx: usize) -> &mut VoxelChunkArena {
+        &mut self.arenas[Self::lod_index(lod)][arena_idx]
+    }
+
+    /// Finds which arena (within `lod`) already holds this entity, if any.
+    pub fn find_slot(&self, lod: LOD, main_entity: MainEntity) -> Option<ArenaSlot> {
+        self.arenas[Self::lod_index(lod)]
+            .iter()
+            .enumerate()
+            .find_map(|(arena_idx, a)| {
+                a.existing_slot(main_entity)
+                    .map(|slot| ArenaSlot { arena_idx, slot })
+            })
+    }
+
+    /// Returns the (arena, slot) for this chunk, allocating if it's new:
+    ///   1. already resident in one of this LOD's arenas -> reuse
+    ///   2. resident in a *different* LOD's arena (LOD changed) -> evict it there
+    ///   3. first arena of this LOD with a free slot (fills arenas in order)
+    ///   4. otherwise create a new arena via `make_arena`, up to MAX_ARENAS_PER_LOD
+    /// `None` means every arena is full and the cap is hit.
+    pub fn slot_for(
+        &mut self,
+        lod: LOD,
+        main_entity: MainEntity,
+        make_arena: impl FnOnce() -> VoxelChunkArena,
+    ) -> Option<ArenaSlot> {
+        let lod_idx = Self::lod_index(lod);
+
+        if let Some(found) = self.find_slot(lod, main_entity) {
+            return Some(found);
+        }
+
+        for (i, arenas) in self.arenas.iter_mut().enumerate() {
+            if i == lod_idx {
+                continue;
+            }
+            for a in arenas.iter_mut() {
+                a.release(main_entity);
+            }
+        }
+
+        for (arena_idx, arena) in self.arenas[lod_idx].iter_mut().enumerate() {
+            if let Some(slot) = arena.slot_for(main_entity) {
+                return Some(ArenaSlot { arena_idx, slot });
+            }
+        }
+
+        if self.arenas[lod_idx].len() >= self.config.max_arenas[lod_idx] {
+            return None;
+        }
+        let mut arena = make_arena();
+        let slot = arena.slot_for(main_entity)?;
+        let list = &mut self.arenas[lod_idx];
+        list.push(arena);
+        info!(
+            "[VoxelChunkArenaSet] LOD {:?} now has {} arena(s)",
+            lod,
+            list.len()
+        );
+        Some(ArenaSlot {
+            arena_idx: list.len() - 1,
+            slot,
+        })
+    }
+
+    /// Releases the entity from whichever arena holds it, across all LODs.
+    /// Use this wherever you currently call `arena.release(..)` on despawn.
+    pub fn release(&mut self, main_entity: MainEntity) {
+        for a in self.iter_mut() {
+            a.release(main_entity);
+        }
+    }
+
+    pub fn total_max_chunks(&self) -> u32 {
+        self.iter().map(|a| a.max_chunks).sum()
+    }
+
+    /// Max entries `rebuild_merged_lookup` can emit (only query-visible arenas).
+    /// Size the merged lookup buffer from this rather than total_max_chunks().
+    pub fn query_visible_max_chunks(&self) -> u32 {
+        self.arenas
+            .iter()
+            .flat_map(|v| v.iter().take(QUERY_ARENAS_PER_LOD))
+            .map(|a| a.max_chunks)
+            .sum()
+    }
+
     pub fn rebuild_merged_lookup(
         &self,
         render_queue: &RenderQueue,
@@ -559,20 +715,55 @@ impl VoxelChunkArenaSet {
     ) {
         const EMPTY: u32 = u32::MAX;
         let cap = capacity as usize;
-        let mut table = vec![[EMPTY; 4]; cap];
-        for (&lod, arena) in self.arenas.iter() {
-            let rank = lod.rank();
-            for (&pos, &slot) in arena.slot_of_chunk_pos.iter() {
-                let packed = (rank << 28) | slot;
-                let mut idx = (hash_chunk_pos(pos) as usize) % cap;
-                while table[idx][3] != EMPTY {
-                    idx = (idx + 1) % cap;
+        if cap == 0 {
+            return;
+        }
+
+        let mut table = vec![
+            GpuChunkLookupEntry {
+                pos_x: 0,
+                pos_y: 0,
+                pos_z: 0,
+                packed_slot_and_rank: EMPTY,
+            };
+            cap
+        ];
+        let mut total_entries = 0;
+
+        'outer: for (rank, arenas) in self.arenas.iter().enumerate() {
+            for arena in arenas.iter().take(QUERY_ARENAS_PER_LOD) {
+                for (&pos, &slot) in arena.slot_of_chunk_pos.iter() {
+                    if total_entries >= cap {
+                        bevy::log::warn!("Merged lookup table exceeded capacity ({cap})!");
+                        break 'outer;
+                    }
+                    let packed = ((rank as u32) << 28) | (slot & 0x0FFF_FFFF);
+                    let initial_idx = (hash_chunk_pos(pos) as usize) % cap;
+                    let mut idx = initial_idx;
+                    loop {
+                        if table[idx].packed_slot_and_rank == EMPTY {
+                            table[idx] = GpuChunkLookupEntry {
+                                pos_x: pos.x as u32,
+                                pos_y: pos.y as u32,
+                                pos_z: pos.z as u32,
+                                packed_slot_and_rank: packed,
+                            };
+                            total_entries += 1;
+                            break;
+                        }
+                        idx = (idx + 1) % cap;
+                        if idx == initial_idx {
+                            bevy::log::error!("Merged lookup table completely full!");
+                            break 'outer;
+                        }
+                    }
                 }
-                table[idx] = [pos.x as u32, pos.y as u32, pos.z as u32, packed];
             }
         }
+
         render_queue.write_buffer(buffer, 0, bytemuck::cast_slice(&table));
     }
 }
+
 unsafe impl Send for VoxelChunkArena {}
 unsafe impl Sync for VoxelChunkArena {}

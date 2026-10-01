@@ -4,18 +4,31 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
+use std::collections::VecDeque;
 
-use crate::LOD;
+use crate::{LOD, TargetLOD};
 
 pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkManager>()
-            //.init_resource::<ShowChunkBounds>()
+            .init_resource::<CursorFocusChunk>()
+            .init_resource::<ChunkOpQueue>()
+            .init_resource::<MaxChunkOpsPerFrame>()
+            .init_resource::<EditPinTimeout>()
+            .init_resource::<ReplanRequested>()
             .add_observer(new_chunk_spawned)
-            .add_systems(Update, chunk_loader_boundry_checker)
-            .add_observer(update_chunk_loaded)
             .add_systems(Startup, configure_gizmo_depth_bias)
+            .add_systems(
+                Update,
+                (
+                    chunk_loader_boundry_checker,
+                    expire_edit_pins,
+                    plan_chunk_ops.run_if(loaders_dirty),
+                    apply_chunk_ops,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 chunk_boundry_visualizer.run_if(resource_exists::<ShowChunkBounds>),
@@ -24,9 +37,26 @@ impl Plugin for ChunkPlugin {
 }
 
 pub const CHUNK_SIZE: f32 = 10.;
+/// Chunks within this Chebyshev radius of the cursor chunk are treated as
+/// being at (at most) that distance from every loader.
+pub const FOCUS_RADIUS: i32 = 1;
 
 #[derive(Resource, Default)]
 pub struct ShowChunkBounds;
+
+/// Written by whatever reads cursor query hits. Only assign when the chunk
+/// actually changes so `is_changed` stays meaningful.
+#[derive(Resource, Default, PartialEq, Clone, Copy)]
+pub struct CursorFocusChunk(pub Option<IVec3>);
+
+/// Max spawns + LOD retargets applied per frame, nearest first.
+#[derive(Resource)]
+pub struct MaxChunkOpsPerFrame(pub usize);
+impl Default for MaxChunkOpsPerFrame {
+    fn default() -> Self {
+        Self(64)
+    }
+}
 
 #[derive(Resource, Clone, Default)]
 pub struct ChunkManager {
@@ -47,7 +77,6 @@ pub fn world_pos_to_chunk_pos(world_position: &Vec3) -> IVec3 {
     (world_position / CHUNK_SIZE).floor().as_ivec3()
 }
 
-// Managed by Hooks
 impl ChunkManager {
     fn add_chunk(&mut self, position: IVec3, id: Entity) {
         self.arena.insert(position, id);
@@ -57,21 +86,17 @@ impl ChunkManager {
     }
 }
 
+/// No `LOD` here on purpose: `LOD` + fields are inserted together by the
+/// loading pipeline once data for `TargetLOD` is ready.
 #[derive(Component, Default, Clone, Copy)]
 #[require(
     ChunkPosition,
     Visibility,
-    LOD,
     Aabb::from_min_max(Vec3::ZERO, Vec3::splat(CHUNK_SIZE))
 )]
-#[component(
-    immutable,
-    on_add = on_add_chunk,
-    on_remove = on_remove_chunk
-)]
+#[component(immutable, on_add = on_add_chunk, on_remove = on_remove_chunk)]
 pub struct Chunk;
 
-/// Registers the chunk with [`ChunkManager`] when added.
 fn on_add_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     let chunk_pos = world.get::<ChunkPosition>(entity).unwrap().0;
     let mut chunk_manager = world.get_resource_mut::<ChunkManager>().unwrap();
@@ -85,7 +110,6 @@ fn on_add_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContex
     chunk_manager.add_chunk(chunk_pos, entity);
 }
 
-/// Unregisters the chunk from [`ChunkManager`] when removed.
 fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     let chunk_pos = world.get::<ChunkPosition>(entity).unwrap().0;
     world
@@ -99,7 +123,6 @@ fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
 #[component(immutable, on_add = on_add_chunk_pos)]
 pub struct ChunkPosition(pub IVec3);
 
-/// Sets the entity's [`Transform`] translation based on chunk position and size.
 fn on_add_chunk_pos(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     let chunk_pos = world.get::<ChunkPosition>(entity).unwrap();
     let translation = chunk_pos.as_vec3() * CHUNK_SIZE;
@@ -121,169 +144,342 @@ fn new_chunk_spawned(
     let Ok((transform, &ChunkPosition(chunk_position))) = chunk_q.get(trigger.entity) else {
         return;
     };
-    let world_position = transform.translation;
     commands.trigger(NewChunkSpawned {
         entity: trigger.entity,
-        world_position,
+        world_position: transform.translation,
         chunk_position,
     });
 }
 
+// ============================================================================
+// Loader
+// ============================================================================
+
 #[derive(Default, Deref, DerefMut, Component)]
 pub struct CurrentChunk(pub IVec3);
 
+/// `lod_bands`: finest first; each width is ADDITIVE. Distance is Chebyshev,
+/// in chunks. `[(High,1),(Medium,1)]` => High for d<=1, Medium for d==2,
+/// nothing beyond. `hysteresis` extends both LOD downgrades and despawn: an
+/// existing chunk keeps its finer LOD until d > band_edge + hysteresis, and
+/// is despawned only when d > total + hysteresis. Upgrades and new spawns
+/// use the plain edges.
 #[derive(Component, Clone, Debug)]
 #[require(CurrentChunk)]
 #[component(on_add = on_add_chunk_loader)]
 pub struct ChunkLoader {
-    pub high_distance: i32,
-    pub medium_distance: i32,
-    pub low_distance: i32,
-    pub lowest_distance: i32,
-    /// Distance buffer in chunks before a chunk drops to a lower LOD level
-    pub hysteresis: i32,
+    pub lod_bands: Vec<(LOD, u8)>,
+    pub hysteresis: u8,
 }
 
 impl Default for ChunkLoader {
     fn default() -> Self {
         Self {
-            high_distance: 1,
-            medium_distance: 3,
-            low_distance: 6,
-            lowest_distance: 10,
+            lod_bands: vec![
+                (LOD::High, 1),
+                (LOD::Medium, 2),
+                (LOD::Low, 3),
+                (LOD::Lowest, 4),
+            ],
             hysteresis: 1,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Want {
+    Lod(LOD),
+    /// Inside the hysteresis margin: leave the chunk exactly as it is.
+    Keep,
+    Drop,
+}
+
 impl ChunkLoader {
-    /// Determines target LOD level taking hysteresis into account to prevent thrashing.
-    pub fn calculate_lod(&self, distance: i32, current_lod: Option<LOD>) -> Option<LOD> {
-        let ideal_lod = if distance <= self.high_distance {
-            LOD::High
-        } else if distance <= self.medium_distance {
-            LOD::Medium
-        } else if distance <= self.low_distance {
-            LOD::Low
-        } else if distance <= self.lowest_distance {
-            LOD::Lowest
-        } else {
-            return None;
-        };
+    pub fn total_range(&self) -> i32 {
+        self.lod_bands.iter().map(|b| b.1 as i32).sum()
+    }
 
-        let Some(current) = current_lod else {
-            return Some(ideal_lod);
-        };
-
-        // Instant upgrade when getting closer
-        if (ideal_lod as u32) > (current as u32) {
-            return Some(ideal_lod);
+    /// `current` is `Some` for chunks that already exist.
+    pub fn want(&self, d: i32, current: Option<LOD>) -> Want {
+        let h = self.hysteresis as i32;
+        let mut acc = 0i32;
+        let mut ideal = None;
+        let mut current_edge = None;
+        for &(lod, w) in &self.lod_bands {
+            acc += w as i32;
+            if ideal.is_none() && d <= acc {
+                ideal = Some(lod);
+            }
+            if current == Some(lod) && current_edge.is_none() {
+                current_edge = Some(acc);
+            }
         }
+        let Some(&(last, _)) = self.lod_bands.last() else {
+            return Want::Drop;
+        };
+        let outside = ideal.is_none();
 
-        // Apply hysteresis buffer on downgrades
-        let h = self.hysteresis;
-        match current {
-            LOD::High if distance <= self.high_distance + h => Some(LOD::High),
-            LOD::Medium if distance <= self.medium_distance + h => Some(LOD::Medium),
-            LOD::Low if distance <= self.low_distance + h => Some(LOD::Low),
-            LOD::Lowest if distance <= self.lowest_distance + h => Some(LOD::Lowest),
-            _ => Some(ideal_lod),
+        let Some(cur) = current else {
+            return ideal.map_or(Want::Drop, Want::Lod);
+        };
+        if outside && d > acc + h {
+            return Want::Drop;
+        }
+        let ideal = ideal.unwrap_or(last);
+        if ideal > cur {
+            return if outside {
+                Want::Keep
+            } else {
+                Want::Lod(ideal)
+            }; // instant upgrade
+        }
+        if ideal == cur {
+            return Want::Lod(cur);
+        }
+        match current_edge {
+            Some(e) if d <= e + h => Want::Lod(cur), // hysteresis: hold the finer LOD
+            _ => Want::Lod(ideal),
         }
     }
 }
 
 fn on_add_chunk_loader(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    let chunk_pos = world.get::<GlobalTransform>(entity).unwrap();
-    world.get_mut::<CurrentChunk>(entity).unwrap().0 =
-        world_pos_to_chunk_pos(&chunk_pos.translation());
-    world.commands().trigger(ChunkLoaderChunkChange { entity });
-}
-
-#[derive(Event)]
-pub struct ChunkLoaderChunkChange {
-    pub entity: Entity,
+    let chunk_pos = world.get::<GlobalTransform>(entity).unwrap().translation();
+    world.get_mut::<CurrentChunk>(entity).unwrap().0 = world_pos_to_chunk_pos(&chunk_pos);
 }
 
 fn chunk_loader_boundry_checker(
-    mut chunk_loader_q: Query<
-        (&GlobalTransform, &mut CurrentChunk, Entity),
-        Changed<GlobalTransform>,
-    >,
-    mut commands: Commands,
+    mut q: Query<(&GlobalTransform, &mut CurrentChunk), Changed<GlobalTransform>>,
 ) {
-    for (transform, mut old_chunk, entity) in chunk_loader_q.iter_mut() {
-        let old_pos = old_chunk.0;
+    for (transform, mut current) in q.iter_mut() {
         let new_pos = world_pos_to_chunk_pos(&transform.translation());
-        if old_pos != new_pos {
-            old_chunk.0 = new_pos;
-            commands.trigger(ChunkLoaderChunkChange { entity });
+        if current.0 != new_pos {
+            current.0 = new_pos; // marks Changed<CurrentChunk>, which wakes plan_chunk_ops
         }
     }
 }
 
-fn update_chunk_loaded(
-    trigger: On<ChunkLoaderChunkChange>,
-    chunk_loader_q: Query<(&ChunkLoader, &CurrentChunk)>,
+fn loaders_dirty(
+    loaders: Query<(), Or<(Changed<CurrentChunk>, Changed<ChunkLoader>)>>,
+    focus: Res<CursorFocusChunk>,
+    replan: Res<ReplanRequested>,
+) -> bool {
+    !loaders.is_empty() || focus.is_changed() || replan.0
+}
+
+fn effective_distance(
+    pos: IVec3,
+    center: IVec3,
+    loader: &ChunkLoader,
+    focus: Option<IVec3>,
+) -> i32 {
+    let d = (pos - center).abs().max_element();
+    if let Some(f) = focus {
+        let fd = (pos - f).abs().max_element();
+        // Focus only promotes chunks that are already in this loader's range.
+        if fd <= FOCUS_RADIUS && d <= loader.total_range() + loader.hysteresis as i32 {
+            return d.min(fd);
+        }
+    }
+    d
+}
+
+#[derive(Clone, Copy)]
+pub struct ChunkOp {
+    dist: i32,
+    pos: IVec3,
+    lod: LOD,
+}
+
+#[derive(Resource, Default)]
+pub struct ChunkOpQueue(VecDeque<ChunkOp>);
+
+/// Recomputes the desired state. Despawns are immediate; spawns and LOD
+/// changes go into a nearest-first queue drained by `apply_chunk_ops`.
+/// Multiple loaders: finest wanted LOD wins; a chunk despawns only when
+/// every loader wants it gone.
+fn plan_chunk_ops(
+    loaders: Query<(&ChunkLoader, &CurrentChunk)>,
+    chunks: Query<(Entity, &ChunkPosition, &TargetLOD, Has<EditPin>), With<Chunk>>,
+    mut replan: ResMut<ReplanRequested>,
+    focus: Res<CursorFocusChunk>,
     chunk_manager: Res<ChunkManager>,
-    lod_q: Query<&LOD>,
+    mut queue: ResMut<ChunkOpQueue>,
     mut commands: Commands,
 ) {
-    let Ok((loader, &CurrentChunk(center_pos))) = chunk_loader_q.get(trigger.entity) else {
-        return;
-    };
+    replan.0 = false;
+    queue.0.clear();
+    if loaders.is_empty() {
+        return; // no loader => don't wipe the world
+    }
+    let mut ops: Vec<ChunkOp> = Vec::new();
 
-    let max_r = loader.lowest_distance + loader.hysteresis;
-    let min_bounds = center_pos - IVec3::splat(max_r);
-    let max_bounds = center_pos + IVec3::splat(max_r);
+    // Existing chunks: retarget or despawn.
+    for (entity, pos, target, pinned) in &chunks {
+        if pinned {
+            continue;
+        }
+        let (mut best, mut keep, mut dist) = (None::<LOD>, false, i32::MAX);
+        for (loader, center) in &loaders {
+            let d = effective_distance(pos.0, center.0, loader, focus.0);
+            dist = dist.min(d);
+            match loader.want(d, Some(target.0)) {
+                Want::Lod(l) => best = Some(best.map_or(l, |b| b.max(l))),
+                Want::Keep => keep = true,
+                Want::Drop => {}
+            }
+        }
+        match best {
+            Some(l) if l != target.0 => ops.push(ChunkOp {
+                dist,
+                pos: pos.0,
+                lod: l,
+            }),
+            Some(_) => {}
+            None if keep => {}
+            None => {
+                commands.queue(move |world: &mut World| {
+                    crate::persistence::flush_and_despawn(world, entity)
+                });
+            }
+        }
+    }
 
-    for x in min_bounds.x..=max_bounds.x {
-        for y in min_bounds.y..=max_bounds.y {
-            for z in min_bounds.z..=max_bounds.z {
-                let chunk_pos = ivec3(x, y, z);
-                let distance = (chunk_pos - center_pos).abs().max_element();
-
-                let existing_entity = chunk_manager.get_chunk(&chunk_pos);
-                let current_lod = existing_entity.and_then(|e| lod_q.get(e).ok().copied());
-
-                let target_lod = loader.calculate_lod(distance, current_lod);
-
-                match (existing_entity, target_lod, current_lod) {
-                    (Some(entity), Some(new_lod), Some(old_lod)) => {
-                        if new_lod != old_lod {
-                            commands.entity(entity).insert(new_lod);
-                        }
+    // Missing chunks: spawn candidates inside each loader's box.
+    let mut spawns: HashMap<IVec3, (i32, LOD)> = HashMap::default();
+    for (loader, center) in &loaders {
+        let r = loader.total_range();
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let p = center.0 + ivec3(dx, dy, dz);
+                    if chunk_manager.is_loaded(&p) {
+                        continue;
                     }
-                    (None, Some(new_lod), _) => {
-                        commands.spawn((Chunk, ChunkPosition(chunk_pos), new_lod));
+                    let d = effective_distance(p, center.0, loader, focus.0);
+                    if let Want::Lod(l) = loader.want(d, None) {
+                        spawns
+                            .entry(p)
+                            .and_modify(|e| {
+                                e.0 = e.0.min(d);
+                                e.1 = e.1.max(l);
+                            })
+                            .or_insert((d, l));
                     }
-                    _ => {}
+                }
+            }
+        }
+    }
+    ops.extend(
+        spawns
+            .into_iter()
+            .map(|(pos, (dist, lod))| ChunkOp { dist, pos, lod }),
+    );
+    ops.sort_unstable_by_key(|o| o.dist);
+    queue.0 = ops.into();
+}
+
+fn apply_chunk_ops(
+    mut queue: ResMut<ChunkOpQueue>,
+    budget: Res<MaxChunkOpsPerFrame>,
+    chunk_manager: Res<ChunkManager>,
+    targets: Query<(&TargetLOD, Has<EditPin>)>,
+    mut commands: Commands,
+) {
+    for _ in 0..budget.0 {
+        let Some(op) = queue.0.pop_front() else { break };
+        match chunk_manager.get_chunk(&op.pos) {
+            None => {
+                commands.spawn((Chunk, ChunkPosition(op.pos), TargetLOD(op.lod)));
+            }
+            Some(e) => {
+                if targets
+                    .get(e)
+                    .is_ok_and(|(t, pinned)| !pinned && t.0 != op.lod)
+                {
+                    commands.entity(e).insert(TargetLOD(op.lod));
                 }
             }
         }
     }
 }
 
-// Visualizer Systems
+// ============================================================================
+// Visualizer
+// ============================================================================
 
 fn configure_gizmo_depth_bias(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
     config.depth_bias = -1.0;
 }
 
-fn chunk_boundry_visualizer(chunk_q: Query<(&Transform, &LOD), With<Chunk>>, mut gizmos: Gizmos) {
+fn chunk_boundry_visualizer(
+    chunk_q: Query<(&Transform, &TargetLOD), With<Chunk>>,
+    mut gizmos: Gizmos,
+) {
     let half_size = Vec3::splat(CHUNK_SIZE * 0.5);
     for (transform, lod) in chunk_q.iter() {
-        let color = match lod {
-            LOD::High => Color::srgb(0.0, 1.0, 0.0),   // Green
-            LOD::Medium => Color::srgb(1.0, 1.0, 0.0), // Yellow
-            LOD::Low => Color::srgb(1.0, 0.5, 0.0),    // Orange
-            LOD::Lowest => Color::srgb(1.0, 0.0, 0.0), // Red
+        let color = match lod.0 {
+            LOD::High => Color::srgb(0.0, 1.0, 0.0),
+            LOD::Medium => Color::srgb(1.0, 1.0, 0.0),
+            LOD::Low => Color::srgb(1.0, 0.5, 0.0),
+            LOD::Lowest => Color::srgb(1.0, 0.0, 0.0),
         };
-
-        let center = transform.translation + half_size;
         gizmos.cube(
-            Transform::from_translation(center).with_scale(Vec3::splat(CHUNK_SIZE)),
+            Transform::from_translation(transform.translation + half_size)
+                .with_scale(Vec3::splat(CHUNK_SIZE)),
             color,
         );
     }
+}
+
+/// Keeps a chunk at max LOD while edits are landing on it. Inserted by
+/// `EditableChunks`; removed by `expire_edit_pins` once idle.
+#[derive(Component, Default)]
+pub struct EditPin {
+    pub idle: f32,
+}
+
+#[derive(Resource)]
+pub struct EditPinTimeout(pub f32);
+impl Default for EditPinTimeout {
+    fn default() -> Self {
+        Self(2.0)
+    }
+}
+
+/// Set by anything that needs `plan_chunk_ops` to run even though no loader moved.
+#[derive(Resource, Default)]
+pub struct ReplanRequested(pub bool);
+
+pub fn expire_edit_pins(
+    time: Res<Time>,
+    timeout: Res<EditPinTimeout>,
+    mut pins: Query<(Entity, &mut EditPin)>,
+    mut replan: ResMut<ReplanRequested>,
+    mut commands: Commands,
+) {
+    for (e, mut pin) in &mut pins {
+        pin.idle += time.delta_secs();
+        if pin.idle >= timeout.0 {
+            commands.entity(e).remove::<EditPin>();
+            replan.0 = true; // loader decides what LOD this chunk goes back to
+        }
+    }
+}
+
+pub fn update_cursor_focus(
+    results: Res<crate::voxel::query::VoxelQueryResults>,
+    mut focus: ResMut<CursorFocusChunk>,
+) {
+    // Assumes the cursor ray is query 0; match on `user_id` if you issue several.
+    let Some(hit) = results.0.first() else { return };
+    let new = (hit.did_hit != 0).then(|| {
+        // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
+        let p = Vec3::from(hit.hit_pos_world) - Vec3::from(hit.hit_normal) * 0.05;
+        world_pos_to_chunk_pos(&p)
+    });
+    if focus.0 != new {
+        focus.0 = new;
+    } // assign only on change, so is_changed stays meaningful
 }

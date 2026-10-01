@@ -1,5 +1,5 @@
 use crate::{
-    ApronSample, ExtractGate, FieldLOD, Versionable, VoxelDataSlice,
+    ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
     ops::{AccumulateExt, BlendExt},
     voxel::systems::nearest_neighbor_sample,
 };
@@ -80,6 +80,18 @@ impl<M: VoxelMaterial> VoxelDataSlice for MaterialField<M> {
     type Elem = u8;
     fn data_slice(&self) -> &[u8] {
         &self.data
+    }
+}
+
+impl<M: VoxelMaterial> FieldFromRaw for MaterialField<M> {
+    fn from_raw(lod: LOD, data: Vec<u8>) -> Self {
+        debug_assert_eq!(data.len(), lod.volume());
+        Self {
+            lod,
+            data: data.into_boxed_slice(),
+            _marker: default(),
+            version: 0,
+        }
     }
 }
 

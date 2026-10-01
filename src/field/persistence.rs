@@ -1,23 +1,21 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
+use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
+use crate::field::generator::ChunkGeneratorRegistry;
+use crate::field::loading::ChunkDataTask;
+use crate::field::{FieldFromRaw, FieldNew, Versionable, VoxelDataSlice};
+use crate::{DirtyField, field::systems::SdfReinitTask};
+use crate::{LOD, MaxEditLod};
+use crate::{SDF, chunk::ReplanRequested};
 use bevy::ecs::component::Mutable;
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy::tasks::AsyncComputeTaskPool;
 use serde::{Deserialize, Serialize};
-
-use crate::LOD;
-use crate::chunk::{ChunkManager, NewChunkSpawned};
-use crate::field::generator::ChunkGeneratorRegistry;
-use crate::field::material::VoxelMaterial;
-use crate::field::{
-    Field, FieldLOD, MaterialField, SDF, Versionable, VisibilityField, VoxelDataSlice,
-};
-
-// ============================================================================
-// Data Transfer Objects & Headers
-// ============================================================================
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkHeader {
@@ -28,9 +26,7 @@ pub struct ChunkHeader {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FieldSavePayload {
-    /// Unique identifier for the field type (e.g., "SDFField", "VisibilityField", "MaterialField<Dirt>")
     pub field_type_id: String,
-    /// Raw binary payload
     pub bytes: Vec<u8>,
 }
 
@@ -40,172 +36,272 @@ pub struct ChunkSaveData {
     pub fields: Vec<FieldSavePayload>,
 }
 
-// ============================================================================
-// Field Persistence Traits
-// ============================================================================
-
-/// Trait allowing any field component to serialize its state.
-pub trait SaveableField: Component + FieldLOD {
-    fn field_type_id(&self) -> &'static str;
-    fn save_payload(&self) -> Vec<u8>;
+pub fn chunk_path(p: IVec3) -> PathBuf {
+    PathBuf::from(format!("./saves/chunks/chunk_{}_{}_{}.bin", p.x, p.y, p.z))
 }
 
-/// Trait allowing any field component to restore its state from serialized bytes.
-pub trait RestorableField: Component + FieldLOD {
-    fn field_type_id() -> &'static str;
-    fn restore_from_bytes(&mut self, bytes: &[u8]);
+// ------------------------------------------------------------ save cache ----
+
+/// Writes land here first (synchronously), then hit disk asynchronously.
+/// Load tasks consult it before disk, so a downgrade -> re-upgrade can never
+/// read a stale file, and a despawn can't lose a pending write.
+#[derive(Resource, Clone, Default)]
+pub struct SaveCache(Arc<SaveCacheInner>);
+
+#[derive(Default)]
+struct SaveCacheInner {
+    map: Mutex<HashMap<IVec3, Arc<ChunkSaveData>>>,
+    write_lock: Mutex<()>,
 }
 
-// Blanket implementation of `SaveableField` for any component implementing `VoxelDataSlice`
-impl<F> SaveableField for F
-where
-    F: Component + VoxelDataSlice + FieldLOD,
-    <F as VoxelDataSlice>::Elem: bytemuck::Pod,
-{
-    fn field_type_id(&self) -> &'static str {
-        std::any::type_name::<F>()
-    }
-
-    fn save_payload(&self) -> Vec<u8> {
-        bytemuck::cast_slice(self.data_slice()).to_vec()
+impl SaveCache {
+    pub fn get(&self, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
+        self.0.map.lock().unwrap().get(&pos).cloned()
     }
 }
 
-// ============================================================================
-// Field Restorable Implementations
-// ============================================================================
-
-impl RestorableField for SDF {
-    fn field_type_id() -> &'static str {
-        std::any::type_name::<SDF>()
+pub fn read_save(cache: &SaveCache, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
+    if let Some(hit) = cache.get(pos) {
+        return Some(hit);
     }
+    let bytes = std::fs::read(chunk_path(pos)).ok()?;
+    postcard::from_bytes::<ChunkSaveData>(&bytes)
+        .ok()
+        .map(Arc::new)
+}
 
-    fn restore_from_bytes(&mut self, bytes: &[u8]) {
-        let lod = self.lod();
-        let floats: &[f32] = bytemuck::cast_slice(bytes);
-
-        if floats.len() == lod.volume() {
-            // Ensure buffer is allocated first
-            if self.data_slice().is_empty() {
-                self.reinit();
+pub fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
+    let pos = data.header.chunk_pos;
+    let data = Arc::new(data);
+    cache.0.map.lock().unwrap().insert(pos, data.clone());
+    let cache = cache.clone();
+    AsyncComputeTaskPool::get()
+        .spawn(async move {
+            let _guard = cache.0.write_lock.lock().unwrap();
+            // A newer save for this chunk superseded us while we waited: skip.
+            let current = cache.0.map.lock().unwrap().get(&pos).cloned();
+            if !current.is_some_and(|c| Arc::ptr_eq(&c, &data)) {
+                return;
             }
-
-            let data_slice = unsafe {
-                std::slice::from_raw_parts_mut(self.data_slice().as_ptr() as *mut f32, floats.len())
-            };
-
-            data_slice.copy_from_slice(floats);
-            self.incorment_version();
-            // DO NOT call self.reinit() here, as it re-initializes/clears the field buffer!
-        }
-    }
-}
-
-impl RestorableField for VisibilityField {
-    fn field_type_id() -> &'static str {
-        std::any::type_name::<VisibilityField>()
-    }
-
-    fn restore_from_bytes(&mut self, bytes: &[u8]) {
-        let lod = self.lod();
-        if bytes.len() == lod.volume() {
-            for (idx, &val) in bytes.iter().enumerate() {
-                let x = (idx as u32) % lod.size();
-                let y = ((idx as u32) / lod.size()) % lod.size();
-                let z = (idx as u32) / (lod.size() * lod.size());
-                Field::set(self, x, y, z, val != 0);
+            let path = chunk_path(pos);
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
             }
-            self.incorment_version();
-        }
-    }
+            match postcard::to_allocvec(&*data) {
+                Ok(bytes) => {
+                    let tmp = path.with_extension("tmp");
+                    if let Err(e) =
+                        std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path))
+                    {
+                        eprintln!("Failed to write chunk save {pos:?}: {e}");
+                        return; // keep it cached so loads still see it
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to serialize chunk {pos:?}: {e}");
+                    return;
+                }
+            }
+            let mut map = cache.0.map.lock().unwrap();
+            if map.get(&pos).is_some_and(|c| Arc::ptr_eq(c, &data)) {
+                map.remove(&pos);
+            }
+        })
+        .detach();
 }
 
-impl<M: VoxelMaterial> RestorableField for MaterialField<M> {
-    fn field_type_id() -> &'static str {
-        std::any::type_name::<MaterialField<M>>()
-    }
+// -------------------------------------------------------------- registry ----
 
-    fn restore_from_bytes(&mut self, bytes: &[u8]) {
-        let lod = self.lod();
-        if bytes.len() == lod.volume() {
-            let data_slice = unsafe {
-                std::slice::from_raw_parts_mut(self.data_slice().as_ptr() as *mut u8, bytes.len())
-            };
-            data_slice.copy_from_slice(bytes);
-            self.incorment_version();
-        }
-    }
+/// Sum of field versions at the last save (or install). Differs from the
+/// current sum => unsaved edits.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ChunkSaveState(pub u64);
+
+#[derive(Clone, Copy)]
+pub struct FieldVTable {
+    pub type_id: &'static str,
+    pub save: fn(&World, Entity) -> Option<Vec<u8>>,
+    pub version: fn(&World, Entity) -> u64,
+    /// Exact downsample of a serialized payload (`from >= to`).
+    pub downsample: fn(&[u8], LOD, LOD) -> Vec<u8>,
+    /// Builds the field for `lod` from `bytes` and inserts it. `None` (or a
+    /// size mismatch) inserts the default field, or removes it if OPTIONAL.
+    pub install: fn(&mut EntityWorldMut<'_>, LOD, Option<&[u8]>),
 }
 
-// ============================================================================
-// Registry Architecture
-// ============================================================================
-
-type FieldSaverFn = fn(&World, Entity) -> Option<FieldSavePayload>;
-pub(crate) type FieldLoaderFn = fn(&mut World, Entity, &[u8]);
-
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct ChunkPersistenceRegistry {
-    savers: Vec<FieldSaverFn>,
-    loaders: HashMap<&'static str, FieldLoaderFn>,
+    pub(crate) fields: Vec<FieldVTable>,
+}
+
+/// Power-of-two LOD sizes and voxel i sitting at i*CHUNK_SIZE/size make
+/// this an exact stride sample; no interpolation, no JFA.
+pub fn downsample_bytes<F: VoxelDataSlice>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
+    let src: Vec<F::Elem> = bytemuck::pod_collect_to_vec(bytes);
+    let (fs, ts) = (from.size() as usize, to.size() as usize);
+    if src.len() != fs * fs * fs || ts == 0 || fs < ts {
+        return Vec::new(); // install falls back to a default field
+    }
+    if fs == ts {
+        return bytes.to_vec();
+    }
+    let ratio = fs / ts;
+    let mut out: Vec<F::Elem> = Vec::with_capacity(ts * ts * ts);
+    for z in 0..ts {
+        for y in 0..ts {
+            for x in 0..ts {
+                let i = (z * ratio * fs + y * ratio) * fs + x * ratio;
+                out.push(F::rescale(src[i], ratio as f32));
+            }
+        }
+    }
+    bytemuck::cast_slice(&out).to_vec()
 }
 
 impl ChunkPersistenceRegistry {
     pub fn register_field<F>(&mut self)
     where
-        F: SaveableField + RestorableField + Component<Mutability = Mutable>,
+        F: Component<Mutability = Mutable> + VoxelDataSlice + FieldFromRaw + FieldNew + Versionable,
     {
-        self.savers.push(|world, entity| {
-            world.get::<F>(entity).map(|field| FieldSavePayload {
-                field_type_id: SaveableField::field_type_id(field).to_string(),
-                bytes: field.save_payload(),
-            })
-        });
-
-        self.loaders.insert(
-            <F as RestorableField>::field_type_id(),
-            |world, entity, bytes| {
-                if let Some(mut field) = world.get_mut::<F>(entity) {
-                    field.restore_from_bytes(bytes);
+        self.fields.push(FieldVTable {
+            type_id: std::any::type_name::<F>(),
+            save: |w, e| {
+                w.get::<F>(e)
+                    .map(|f| bytemuck::cast_slice(f.data_slice()).to_vec())
+            },
+            version: |w, e| w.get::<F>(e).map_or(0, |f| Versionable::version(f)),
+            downsample: |b, from, to| downsample_bytes::<F>(b, from, to),
+            install: |em, lod, bytes| {
+                if let Some(b) = bytes {
+                    let elems: Vec<F::Elem> = bytemuck::pod_collect_to_vec(b);
+                    if elems.len() == lod.volume() {
+                        em.insert(F::from_raw(lod, elems));
+                        return;
+                    }
+                }
+                if F::OPTIONAL {
+                    em.remove::<F>();
+                } else {
+                    em.insert(F::new_for_lod(lod));
                 }
             },
-        );
+        });
     }
 
-    /// Looks up the loader closure for a given field type id — used by
-    /// `resolve_chunk_data_tasks` to apply both loaded and generated
-    /// payloads through the same path.
-    pub fn loader_for(&self, field_type_id: &str) -> Option<FieldLoaderFn> {
-        self.loaders.get(field_type_id).copied()
+    pub fn fingerprint(&self, world: &World, e: Entity) -> u64 {
+        self.fields
+            .iter()
+            .fold(0u64, |a, f| a.wrapping_add((f.version)(world, e)))
     }
 }
 
-// ============================================================================
-// LOD Save Guard Logic
-// ============================================================================
+pub trait RegisterSaveableFieldExt {
+    fn register_saveable_field<F>(&mut self) -> &mut Self
+    where
+        F: Component<Mutability = Mutable> + VoxelDataSlice + FieldFromRaw + FieldNew + Versionable;
+}
 
-/// Evaluates whether an existing save on disk contains a higher detail level (higher LOD value)
-/// than the candidate save. Returns `true` if safe to overwrite.
-fn should_overwrite_save(file_path: &Path, candidate_lod: LOD) -> bool {
-    if !file_path.exists() {
-        return true;
+impl RegisterSaveableFieldExt for App {
+    fn register_saveable_field<F>(&mut self) -> &mut Self
+    where
+        F: Component<Mutability = Mutable> + VoxelDataSlice + FieldFromRaw + FieldNew + Versionable,
+    {
+        self.init_resource::<ChunkPersistenceRegistry>();
+        self.world_mut()
+            .resource_mut::<ChunkPersistenceRegistry>()
+            .register_field::<F>();
+        self
     }
+}
 
-    if let Ok(bytes) = std::fs::read(file_path) {
-        if let Ok(existing_data) = postcard::from_bytes::<ChunkSaveData>(&bytes) {
-            if existing_data.header.lod.size() > candidate_lod.size() {
-                return false;
-            }
+// ---------------------------------------------------------------- saving ----
+
+/// Some((data, fingerprint)) if the chunk is at max LOD, has no load in
+/// flight, and has unsaved changes.
+pub fn build_if_dirty(world: &World, e: Entity) -> Option<(ChunkSaveData, u64)> {
+    let lod = *world.get::<LOD>(e)?;
+    if lod != world.resource::<MaxEditLod>().0 || world.get::<ChunkDataTask>(e).is_some() {
+        return None;
+    }
+    if is_settling(world, e) {
+        return None;
+    }
+    let pos = world.get::<ChunkPosition>(e)?.0;
+    let saved = world.get::<ChunkSaveState>(e)?.0;
+    let reg = world.resource::<ChunkPersistenceRegistry>();
+    let fp = reg.fingerprint(world, e);
+    if fp == saved {
+        return None;
+    }
+    let fields = reg
+        .fields
+        .iter()
+        .filter_map(|f| {
+            (f.save)(world, e).map(|bytes| FieldSavePayload {
+                field_type_id: f.type_id.to_string(),
+                bytes,
+            })
+        })
+        .collect();
+    Some((
+        ChunkSaveData {
+            header: ChunkHeader {
+                chunk_pos: pos,
+                lod,
+                version: 1,
+            },
+            fields,
+        },
+        fp,
+    ))
+}
+
+/// Used by the loader when a chunk leaves range.
+pub fn flush_and_despawn(world: &mut World, e: Entity) {
+    if is_settling(world, e) {
+        world.resource_mut::<ReplanRequested>().0 = true; // try again next frame
+        return;
+    }
+    if let Some((data, _)) = build_if_dirty(world, e) {
+        let cache = world.resource::<SaveCache>().clone();
+        commit_save(&cache, data);
+    }
+    if let Ok(em) = world.get_entity_mut(e) {
+        em.despawn();
+    }
+}
+
+#[derive(Resource)]
+pub struct AutosaveIntervalSecs(pub f32);
+impl Default for AutosaveIntervalSecs {
+    fn default() -> Self {
+        Self(2.0)
+    }
+}
+
+pub fn autosave_dirty_chunks(
+    world: &World,
+    time: Res<Time>,
+    interval: Res<AutosaveIntervalSecs>,
+    cache: Res<SaveCache>,
+    chunks: Query<Entity, (With<Chunk>, With<ChunkSaveState>)>,
+    mut acc: Local<f32>,
+    mut commands: Commands,
+) {
+    *acc += time.delta_secs();
+    if *acc < interval.0 {
+        return;
+    }
+    *acc = 0.0;
+    for e in &chunks {
+        if let Some((data, fp)) = build_if_dirty(world, e) {
+            commit_save(&cache, data);
+            commands.entity(e).insert(ChunkSaveState(fp));
         }
     }
-
-    true
 }
 
-// ============================================================================
-// Systems & Observers — saving
-// ============================================================================
-
+/// Manual "save now". Only chunks at max LOD with unsaved changes are written.
 #[derive(Message)]
 pub struct SaveChunkMessage(pub IVec3);
 
@@ -213,183 +309,36 @@ pub fn generic_save_chunk_system(
     mut events: MessageReader<SaveChunkMessage>,
     world: &World,
     chunk_manager: Res<ChunkManager>,
-    registry: Res<ChunkPersistenceRegistry>,
-) {
-    let save_dir = PathBuf::from("./saves/chunks");
-
-    for event in events.read() {
-        let chunk_pos = event.0;
-
-        let Some(entity) = chunk_manager.get_chunk(&chunk_pos) else {
-            warn!("Cannot save chunk at {:?}: Not loaded", chunk_pos);
-            continue;
-        };
-
-        let lod = world.get::<LOD>(entity).copied().unwrap_or_default();
-        let file_path = save_dir.join(format!(
-            "chunk_{}_{}_{}.bin",
-            chunk_pos.x, chunk_pos.y, chunk_pos.z
-        ));
-
-        // Guard against clobbering higher resolution LOD files on disk
-        if !should_overwrite_save(&file_path, lod) {
-            info!(
-                "Skipping save for chunk {:?}: File on disk has higher LOD resolution.",
-                chunk_pos
-            );
-            continue;
-        }
-
-        let mut fields = Vec::new();
-        for saver in &registry.savers {
-            if let Some(payload) = saver(world, entity) {
-                fields.push(payload);
-            }
-        }
-
-        let save_data = ChunkSaveData {
-            header: ChunkHeader {
-                chunk_pos,
-                lod,
-                version: 1,
-            },
-            fields,
-        };
-
-        let dir = save_dir.clone();
-        AsyncComputeTaskPool::get()
-            .spawn(async move {
-                if let Err(e) = std::fs::create_dir_all(&dir) {
-                    eprintln!("Failed to create save path: {e}");
-                    return;
-                }
-
-                if let Ok(bytes) = postcard::to_allocvec(&save_data) {
-                    if let Err(e) = std::fs::write(file_path, bytes) {
-                        eprintln!("Failed to write chunk save: {e}");
-                    }
-                }
-            })
-            .detach();
-    }
-}
-
-// ============================================================================
-// Systems & Observers — loading / generating
-// ============================================================================
-
-/// Attached to a chunk entity while its initial data (loaded from disk, or
-/// produced by `ChunkGeneratorRegistry` when no save exists) is being
-/// resolved off the main thread. Removed by `resolve_chunk_data_tasks`
-/// once the task completes and its payloads have been applied.
-#[derive(Component)]
-pub struct ChunkDataTask(Task<Vec<FieldSavePayload>>);
-
-/// Fires on every new chunk. Spawns a background task that checks disk
-/// first and falls back to generation — both branches are pure I/O/CPU
-/// work with no ECS access, so both run off the main thread identically.
-/// Nothing here blocks: the observer just kicks the task off and returns.
-pub fn spawn_chunk_data_task(
-    trigger: On<NewChunkSpawned>,
-    lod_q: Query<&LOD>,
-    generators: Res<ChunkGeneratorRegistry>,
+    cache: Res<SaveCache>,
     mut commands: Commands,
 ) {
-    let NewChunkSpawned {
-        entity,
-        chunk_position,
-        ..
-    } = *trigger.event();
-
-    let Ok(&lod) = lod_q.get(entity) else {
-        return;
-    };
-
-    let generators = generators.clone(); // Arc<dyn Fn> clones are cheap
-    let save_path = PathBuf::from(format!(
-        "./saves/chunks/chunk_{}_{}_{}.bin",
-        chunk_position.x, chunk_position.y, chunk_position.z
-    ));
-
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        if let Ok(bytes) = std::fs::read(&save_path) {
-            if let Ok(save_data) = postcard::from_bytes::<ChunkSaveData>(&bytes) {
-                return save_data.fields;
-            }
-        }
-        generators.generate_all(chunk_position, lod)
-    });
-
-    commands.entity(entity).insert(ChunkDataTask(task));
-}
-
-/// Runs every frame. Non-blocking poll of every in-flight
-/// `ChunkDataTask`; on completion, applies each payload through the same
-/// `ChunkPersistenceRegistry` loader closures a save-file restore uses —
-/// loaded and generated data are indistinguishable from this point on.
-pub fn resolve_chunk_data_tasks(
-    mut commands: Commands,
-    mut tasks: Query<(Entity, &mut ChunkDataTask)>,
-    registry: Res<ChunkPersistenceRegistry>,
-) {
-    for (entity, mut task) in tasks.iter_mut() {
-        let Some(payloads) = block_on(poll_once(&mut task.0)) else {
+    for SaveChunkMessage(pos) in events.read() {
+        let Some(e) = chunk_manager.get_chunk(pos) else {
+            warn!("Cannot save chunk at {:?}: not loaded", pos);
             continue;
         };
-
-        for payload in payloads {
-            if let Some(loader) = registry.loader_for(&payload.field_type_id) {
-                commands.queue(move |world: &mut World| loader(world, entity, &payload.bytes));
-            } else {
-                warn!(
-                    "[resolve_chunk_data_tasks] no loader registered for field type {:?}, dropping payload",
-                    payload.field_type_id
-                );
-            }
+        if let Some((data, fp)) = build_if_dirty(world, e) {
+            commit_save(&cache, data);
+            commands.entity(e).insert(ChunkSaveState(fp));
         }
-
-        commands.entity(entity).remove::<ChunkDataTask>();
-    }
-}
-
-// ============================================================================
-// App Builder Extensions & Plugin
-// ============================================================================
-
-pub trait RegisterSaveableFieldExt {
-    fn register_saveable_field<F>(&mut self) -> &mut Self
-    where
-        F: SaveableField + RestorableField + Component<Mutability = Mutable>;
-}
-
-impl RegisterSaveableFieldExt for App {
-    fn register_saveable_field<F>(&mut self) -> &mut Self
-    where
-        F: SaveableField + RestorableField + Component<Mutability = Mutable>,
-    {
-        if !self.world().contains_resource::<ChunkPersistenceRegistry>() {
-            self.init_resource::<ChunkPersistenceRegistry>();
-        }
-
-        self.world_mut()
-            .resource_mut::<ChunkPersistenceRegistry>()
-            .register_field::<F>();
-
-        self
     }
 }
 
 pub struct ChunkPersistencePlugin;
-
 impl Plugin for ChunkPersistencePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkPersistenceRegistry>()
             .init_resource::<ChunkGeneratorRegistry>()
+            .init_resource::<SaveCache>()
+            .init_resource::<MaxEditLod>()
+            .init_resource::<AutosaveIntervalSecs>()
             .add_message::<SaveChunkMessage>()
-            .add_systems(
-                Update,
-                (generic_save_chunk_system, resolve_chunk_data_tasks),
-            )
-            .add_observer(spawn_chunk_data_task);
+            .add_systems(Update, (generic_save_chunk_system, autosave_dirty_chunks));
     }
+}
+
+/// Edits are still being turned into real distances. Saving now would
+/// persist pre-JFA data, and replacing the fields now would discard the edits.
+pub fn is_settling(world: &World, e: Entity) -> bool {
+    world.get::<SdfReinitTask>(e).is_some() || world.get::<DirtyField<SDF, f32>>(e).is_some()
 }

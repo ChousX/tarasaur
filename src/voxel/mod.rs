@@ -32,8 +32,9 @@ use crate::{
             prepare_voxel_queries,
         },
         systems::{
-            dispatch_voxel_compute_passes_batched, init_voxel_arena, prepare_visibility_for_arena,
-            prepare_voxel_arena, voxel_raster_pass,
+            dispatch_voxel_compute_passes_batched, extract_visibility_removed,
+            prepare_visibility_for_arena, prepare_voxel_arena, release_despawned_chunks,
+            voxel_raster_pass,
         },
     },
 };
@@ -116,19 +117,20 @@ impl Plugin for VoxelRenderPlugin {
             .add_systems(
                 ExtractSchedule,
                 (
-                    extract_voxel_chunks::<SDF>,
-                    extract_voxel_chunks::<VisibilityField>,
-                    extract_voxel_queries,
-                ),
+                    release_despawned_chunks,
+                    (
+                        extract_visibility_removed,
+                        extract_voxel_chunks::<SDF>,
+                        extract_voxel_chunks::<VisibilityField>,
+                        extract_voxel_queries,
+                    ),
+                )
+                    .chain(),
             )
             .add_systems(
                 Render,
                 (
-                    (
-                        init_voxel_arena::<SDF>,
-                        prepare_voxel_arena::<SDF>,
-                        prepare_visibility_for_arena,
-                    )
+                    (prepare_voxel_arena::<SDF>, prepare_visibility_for_arena)
                         .chain()
                         .in_set(RenderSystems::Prepare),
                     update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
