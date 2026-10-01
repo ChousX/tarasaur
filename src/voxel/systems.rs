@@ -473,9 +473,6 @@ pub fn voxel_raster_pass(
 
     const ARGS_STRIDE: u64 = std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
 
-    // Each LOD's arena has its own vertex/index buffers, so the bind-once
-    // optimization from the single-arena version now happens once per arena
-    // instead of once per frame.
     for arena in arena_set.iter() {
         if arena.active_slots.is_empty() {
             continue;
@@ -484,26 +481,10 @@ pub fn voxel_raster_pass(
         render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
         render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
         render_pass.set_bind_group(2, &arena.raster_chunk_bind_group, &[]);
-        //If the gpu supports MULTI_DRAW_INDIRECT_COUNT
-        if multi {
-            //Then batch all the chunks in the arena as one draw call
-            let count = arena
-                .active_slots
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |m| m + 1);
-            render_pass.multi_draw_indexed_indirect(&arena.indirect_args_buffer, 0, count);
-        } else {
-            //Else run each chunk as its own draw call
-            for &slot in arena.active_slots.iter() {
-                render_pass
-                    .draw_indexed_indirect(&arena.indirect_args_buffer, slot as u64 * ARGS_STRIDE);
-            }
-        }
-        for &slot in arena.active_slots.iter() {
-            let offset = slot as u64 * ARGS_STRIDE;
-            render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, offset);
+
+        // indirect_args is dense: entry i belongs to active_slots[i].
+        for i in 0..arena.active_slots.len() as u64 {
+            render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, i * ARGS_STRIDE);
         }
     }
 }

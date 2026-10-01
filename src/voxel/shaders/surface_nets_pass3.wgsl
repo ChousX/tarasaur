@@ -42,10 +42,6 @@ fn get_cell_index(local_coord: vec3<u32>, cell_offset: u32) -> u32 {
         + (local_coord.z * uniforms.cell_count * uniforms.cell_count);
 }
 
-fn index_buffer_base(cell_offset: u32) -> u32 {
-    return cell_offset * 18u;
-}
-
 fn sdf_offset_for(slot: u32) -> u32 {
     return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
 }
@@ -183,11 +179,8 @@ fn pack_material_a(id_a: u32, weight_u8: u32) -> f32 {
     return bitcast<f32>(packed);
 }
 
-// real_slot occupies bits 8-22 (15 bits, up to 32767 slots — comfortably
-// above any realistic max_chunks). id_b keeps bits 0-7 as before. The
-// fragment shader in voxel_raster.wgsl unpacks real_slot to know which
-// arena chunk's visibility data to sample for its per-pixel discard test —
-// this replaces the per-vertex visible flag from the previous approach.
+// real_slot occupies bits 8-22 (15 bits). id_b keeps bits 0-7. The fragment
+// shader unpacks real_slot for its per-pixel visibility discard test.
 fn pack_material_b(id_b: u32, real_slot: u32) -> f32 {
     let packed = (id_b & 0xFFu) | ((real_slot & 0x7FFFu) << 8u) | 0x3F800000u;
     return bitcast<f32>(packed);
@@ -207,16 +200,22 @@ fn cs_main(
         return;
     }
 
+    // chunk_idx = position in the active list. It indexes every per-dispatch
+    // buffer (bases, indirect_args). real_slot indexes per-slot buffers
+    // (sdf, flags, offsets, materials, chunk_meta).
     let real_slot = active_slot_map[chunk_idx];
     let cmeta = chunk_meta[real_slot];
     let sdf_base = sdf_offset_for(real_slot);
     let cell_base = cell_offset_for(real_slot);
     let cell_idx = get_cell_index(id, cell_base);
-    let idx_base = chunk_index_base[cmeta.active_list_pos];
-    if (chunk_vertex_base[cmeta.active_list_pos] == 0xFFFFFFFFu) { return; }
+
+    let vbase = chunk_vertex_base[chunk_idx];
+    if (vbase == 0xFFFFFFFFu) { return; } // dropped by compute_chunk_bases (overflow)
+    let idx_base = chunk_index_base[chunk_idx];
+
     // --- PART 1: VERTEX GENERATION FOR ACTIVE DUAL CELLS ---
     if (flags_buffer[cell_idx] == 1u) {
-        let vert_idx = chunk_vertex_base[cmeta.active_list_pos] + compacted_offsets[cell_idx];
+        let vert_idx = vbase + compacted_offsets[cell_idx];
 
         let corners = array<vec3<u32>, 8>(
             vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
@@ -245,11 +244,11 @@ fn cs_main(
             if ((v0 <= 0.0) != (v1 <= 0.0)) {
                 let p0 = vec3<f32>(id + corners[c0]);
                 let p1 = vec3<f32>(id + corners[c1]);
-    
+
                 // Prevent divide-by-zero or step artifacts
                 let diff = v1 - v0;
                 let t = select(0.5, -v0 / diff, abs(diff) > 0.00001);
-    
+
                 vert_pos += mix(p0, p1, clamp(t, 0.0, 1.0));
                 edge_count += 1.0;
             }
@@ -274,8 +273,6 @@ fn cs_main(
     }
 
     // --- PART 2: INDEX GENERATION FOR ACTIVE EDGES ---
-    // Unconditioned — geometry is always fully generated; visibility is
-    // resolved per-fragment in voxel_raster.wgsl instead.
     let sdf_curr = sample_sdf(sdf_base, vec3<i32>(id));
     let curr_inside = sdf_curr <= 0.0;
 
@@ -289,14 +286,13 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(0u, 1u, 1u), cell_base);
             let idx_3 = get_cell_index(id - vec3<u32>(0u, 0u, 1u), cell_base);
 
-            let vbase = chunk_vertex_base[cmeta.active_list_pos];
             let v0 = vbase + compacted_offsets[idx_0];
             let v1 = vbase + compacted_offsets[idx_1];
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
-                if (curr_inside) {
+            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
                 final_index_buffer[base_idx + 2u] = v2;
@@ -324,14 +320,12 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 0u, 1u), cell_base);
             let idx_3 = get_cell_index(id - vec3<u32>(1u, 0u, 0u), cell_base);
 
-            let vbase = chunk_vertex_base[cmeta.active_list_pos];
             let v0 = vbase + compacted_offsets[idx_0];
             let v1 = vbase + compacted_offsets[idx_1];
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
-
+            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
@@ -360,14 +354,12 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 1u, 0u), cell_base);
             let idx_3 = get_cell_index(id - vec3<u32>(0u, 1u, 0u), cell_base);
 
-            let vbase = chunk_vertex_base[cmeta.active_list_pos];
             let v0 = vbase + compacted_offsets[idx_0];
             let v1 = vbase + compacted_offsets[idx_1];
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
-
+            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;

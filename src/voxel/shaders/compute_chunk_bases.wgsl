@@ -35,12 +35,12 @@ fn cs_main() {
             atomicStore(&overflow_flag[0], 1u);
             chunk_vertex_base[i] = 0xFFFFFFFFu;
             chunk_index_base[i] = 0u;
-            indirect_args[slot].first_index = 0u;
-            atomicStore(&indirect_args[slot].index_count, 0u);
+            indirect_args[i].first_index = 0u;
+            atomicStore(&indirect_args[i].index_count, 0u);
         } else {
             chunk_vertex_base[i] = running;
             chunk_index_base[i] = running * 18u;
-            indirect_args[slot].first_index = running * 18u;
+            indirect_args[i].first_index = running * 18u;
             running = running + count;
         }
     }
