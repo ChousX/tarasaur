@@ -5,7 +5,6 @@ use bevy::prelude::*;
 
 use crate::LOD;
 use crate::field::SDF;
-use crate::field::sdf::{PackedCoord, jump_flood_distance_field};
 use crate::persistence::FieldSavePayload;
 
 /// A registered generator: pure function of chunk position + LOD, no ECS
@@ -47,15 +46,8 @@ impl ChunkGeneratorRegistry {
     ) {
         self.register::<f32>(std::any::type_name::<SDF>(), move |pos, lod| {
             let mut data = generate_signs(pos, lod);
-            let volume = data.len();
-            debug_assert_eq!(
-                volume,
-                lod.volume(),
-                "register_sdf generator must return lod.volume() elements"
-            );
-            let mut seeds = vec![PackedCoord::EMPTY; volume];
-            let mut scratch = vec![PackedCoord::EMPTY; volume];
-            jump_flood_distance_field(&mut data, &mut seeds, &mut scratch, lod.size());
+            debug_assert_eq!(data.len(), lod.volume());
+            crate::field::sdf::compute_sdf_distances(&mut data, lod.size());
             data
         });
     }

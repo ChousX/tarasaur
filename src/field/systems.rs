@@ -1,7 +1,5 @@
-// fields/systems.rs
-use super::{EditableChunks, FieldNew};
 use super::{
-    Field, SDF,
+    EditableChunks, Field, FieldNew, SDF,
     editor::{EditFieldMessage, EditMode},
     ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
 };
@@ -14,6 +12,7 @@ use crate::{
 use bevy::{
     ecs::{component::Mutable, message::MessageReader},
     prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, block_on, poll_once},
 };
 
 fn overlapping_chunks(center: Vec3, half_extent: Vec3) -> impl Iterator<Item = IVec3> {
@@ -139,9 +138,6 @@ pub fn process_sdf_sphere_stamps(
     }
 }
 
-use super::sdf::{PackedCoord, jump_flood_distance_field};
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
-
 /// In-flight async JFA recompute for one chunk's SDF. `started_version`
 /// is the SDFField::version this task's input was cloned at — used by
 /// resolve_sdf_reinit_tasks to detect whether a newer edit landed while
@@ -165,11 +161,8 @@ pub fn spawn_sdf_reinit_tasks(
         let (data, size, started_version) = sdf.reinit_input();
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
-            let volume = data.len();
             let mut data = data.into_vec();
-            let mut seeds = vec![PackedCoord::EMPTY; volume];
-            let mut scratch = vec![PackedCoord::EMPTY; volume];
-            jump_flood_distance_field(&mut data, &mut seeds, &mut scratch, size);
+            crate::field::sdf::compute_sdf_distances(&mut data, size);
             data.into_boxed_slice()
         });
 

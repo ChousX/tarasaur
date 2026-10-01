@@ -97,10 +97,15 @@ impl SDF {
     pub fn reinit(&mut self) {
         self.version += 1;
         let volume = self.lod.volume();
-
         // Guarantee buffers match the expected volume before sampling
         if self.data.len() != volume {
             self.data = vec![f32::MAX; volume].into_boxed_slice();
+        }
+        if let Some(neg) = uniform_sign_volume(&self.data) {
+            let size = self.lod.size() as f32;
+            self.data.fill(if neg { -size } else { size });
+            self.recount();
+            return; // no seeds/scratch allocation
         }
         if self.seeds.len() != volume {
             self.seeds = vec![PackedCoord::EMPTY; volume].into_boxed_slice();
@@ -264,6 +269,10 @@ pub fn jump_flood_distance_field(
     scratch: &mut [PackedCoord],
     size: u32,
 ) {
+    if let Some(neg) = uniform_sign_volume(data) {
+        data.fill(if neg { -(size as f32) } else { size as f32 });
+        return;
+    }
     #[inline]
     fn flatten(x: u32, y: u32, z: u32, size: u32) -> usize {
         (z * size * size + y * size + x) as usize
@@ -391,7 +400,11 @@ pub fn jump_flood_distance_field(
                 let final_seed = seeds[idx];
 
                 if final_seed.is_empty() {
-                    data[idx] = size as f32;
+                    data[idx] = if data[idx].is_sign_negative() {
+                        -(size as f32)
+                    } else {
+                        size as f32
+                    };
                 } else {
                     let (sx, sy, sz) = final_seed.unpack();
                     let distance = dist_sq(x, y, z, sx, sy, sz).sqrt();
@@ -405,4 +418,28 @@ pub fn jump_flood_distance_field(
             }
         }
     }
+}
+
+/// `Some(true)` = every voxel negative-signed, `Some(false)` = every voxel
+/// non-negative, `None` = mixed. Uses `is_sign_negative` because that is the
+/// sign convention the JFA itself uses.
+pub fn uniform_sign_volume(data: &[f32]) -> Option<bool> {
+    let first = data.first()?.is_sign_negative();
+    data.iter()
+        .all(|v| v.is_sign_negative() == first)
+        .then_some(first)
+}
+
+/// Signs in `data` -> signed distances (in voxels of this LOD). Uniform
+/// volumes have no surface, so the answer is just +/-size everywhere and no
+/// buffers are allocated. Use this instead of calling the JFA directly.
+pub fn compute_sdf_distances(data: &mut [f32], size: u32) {
+    if let Some(neg) = uniform_sign_volume(data) {
+        data.fill(if neg { -(size as f32) } else { size as f32 });
+        return;
+    }
+    let volume = data.len();
+    let mut seeds = vec![PackedCoord::EMPTY; volume];
+    let mut scratch = vec![PackedCoord::EMPTY; volume];
+    jump_flood_distance_field(data, &mut seeds, &mut scratch, size);
 }
