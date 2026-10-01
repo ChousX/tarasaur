@@ -6,7 +6,7 @@ use bevy::{
     prelude::*,
     render::{
         RenderPlugin,
-        settings::{RenderCreation, WgpuLimits, WgpuSettings},
+        settings::{RenderCreation, WgpuFeatures, WgpuLimits, WgpuSettings},
     },
 };
 use common::{
@@ -24,6 +24,7 @@ fn main() {
     app.add_plugins(
         DefaultPlugins.set(RenderPlugin {
             render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                features: WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT,
                 limits: WgpuLimits {
                     max_buffer_size: 1024 * 1024 * 1024,
                     max_storage_buffer_binding_size: 512 * 1024 * 1024,

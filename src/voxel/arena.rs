@@ -108,7 +108,9 @@ pub struct VoxelChunkArena {
     pub slot_of_main_entity: HashMap<MainEntity, u32>,
     pub active_slots: Vec<u32>, // stable order used for this frame's batched dispatch
     pub dirty_slots: Vec<u32>,  // slots whose ChunkMeta/SDF changed since last upload
-
+    /// Set whenever a mesh input changes; cleared only after the compute
+    /// passes have actually been dispatched for this arena.
+    pub needs_remesh: bool,
     pub chunk_active_counts_buffer: Buffer, // [active_list_pos] -> active cell count, GPU-written
     pub chunk_vertex_base_buffer: Buffer,   // [active_list_pos] -> exclusive prefix sum
     pub chunk_index_base_buffer: Buffer,    // [active_list_pos] -> vertex_base * 18
@@ -466,6 +468,7 @@ impl VoxelChunkArena {
             chunk_pos_of_slot: vec![None; max as usize],
             chunk_lookup_buffer,
             lookup_capacity,
+            needs_remesh: true,
         }
     }
 
@@ -523,7 +526,12 @@ impl VoxelChunkArena {
     pub fn release(&mut self, main_entity: MainEntity) {
         if let Some(slot) = self.slot_of_main_entity.remove(&main_entity) {
             self.free_slots.push(slot);
+            //self.pending_zero.push(slot);
+            let before = self.active_slots.len();
             self.active_slots.retain(|&s| s != slot);
+            if self.active_slots.len() != before {
+                self.needs_remesh = true;
+            }
             self.mask_slots[slot as usize] = false;
             if let Some(pos) = self.chunk_pos_of_slot[slot as usize].take() {
                 self.slot_of_chunk_pos.remove(&pos);

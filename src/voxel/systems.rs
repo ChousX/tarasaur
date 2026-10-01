@@ -106,14 +106,14 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
         );
 
         arena.dirty_slots.push(slot);
+        arena.needs_remesh = true;
         commands.entity(extracted_entity).despawn();
     }
 
-    // Now that arena.active_slots reflects this frame's final order, patch
-    // each active chunk's active_list_pos field (its index into active_slots),
-    // populate active_slot_map (the inverse mapping used by compute_chunk_bases
-    // and pass3), and refresh the bases-pass uniform's active_count.
     for arena in arena_set.iter_mut() {
+        if !arena.needs_remesh {
+            continue; // nothing will dispatch this frame; skip all the metadata writes
+        }
         const ACTIVE_LIST_POS_OFFSET: u64 = std::mem::offset_of!(ChunkMeta, active_list_pos) as u64;
 
         for (pos, &slot) in arena.active_slots.iter().enumerate() {
@@ -188,13 +188,13 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
             "mixed LOD in one arena — bucket by LOD"
         );
 
-        // 1 byte/elem, same element count as the SDF payload for this slot.
         let material_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64;
         render_queue.write_buffer(
             &arena.material_buffer,
             material_offset_bytes,
             &extracted_material.padded_data,
         );
+        arena.needs_remesh = true;
 
         commands.entity(extracted_entity).despawn();
     }
@@ -272,14 +272,15 @@ pub fn prepare_visibility_for_arena(
         );
     }
 }
+
 pub fn dispatch_voxel_compute_passes_batched(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
-    arena_set: Res<VoxelChunkArenaSet>,
+    mut arena_set: ResMut<VoxelChunkArenaSet>,
 ) {
-    if arena_set.arenas.is_empty() {
+    if arena_set.is_empty() || !arena_set.iter().any(|a| a.needs_remesh) {
         return;
     }
 
@@ -327,9 +328,14 @@ pub fn dispatch_voxel_compute_passes_batched(
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_compute_encoder_batched"),
     });
-
-    for arena in arena_set.iter() {
+    for arena in arena_set.iter_mut() {
+        if !arena.needs_remesh {
+            continue;
+        }
         let active = arena.active_chunk_count();
+        if active == 0 {
+            continue;
+        }
         static LAST: AtomicU32 = AtomicU32::new(0);
         if active != LAST.swap(active, Ordering::Relaxed) {
             info!(
@@ -337,10 +343,6 @@ pub fn dispatch_voxel_compute_passes_batched(
                 arena.texture_size, active, arena.max_chunks
             );
         }
-        if active == 0 {
-            continue;
-        }
-
         let wg1 = arena.cell_count.div_ceil(4);
         dispatch(
             &mut encoder,
@@ -349,7 +351,6 @@ pub fn dispatch_voxel_compute_passes_batched(
             &arena.pass1_bind_group,
             (wg1, wg1, wg1 * active),
         );
-
         let wg_scan = arena.blocks_per_chunk;
         dispatch(
             &mut encoder,
@@ -386,7 +387,6 @@ pub fn dispatch_voxel_compute_passes_batched(
             &arena.chunk_bases_bind_group,
             (1, 1, 1),
         );
-
         let wg3 = arena.cell_count.div_ceil(8);
         dispatch(
             &mut encoder,
@@ -395,7 +395,6 @@ pub fn dispatch_voxel_compute_passes_batched(
             &arena.pass3_bind_group,
             (wg3, wg3, wg3 * active),
         );
-
         encoder.copy_buffer_to_buffer(
             &arena.overflow_flag_buffer,
             0,
@@ -403,6 +402,7 @@ pub fn dispatch_voxel_compute_passes_batched(
             0,
             4,
         );
+        arena.needs_remesh = false;
     }
     render_queue.submit(std::iter::once(encoder.finish()));
 }
@@ -437,16 +437,13 @@ pub fn voxel_raster_pass(
     if arena_set.is_empty() {
         return;
     }
-
     let Some(pipeline) = pipeline_cache.get_render_pipeline(raster_pipeline.pipeline_id) else {
         return;
     };
     let Some(binding) = view_uniforms.uniforms.binding() else {
         return;
     };
-
     let (_camera, target, depth_texture, view_offset) = view.into_inner();
-
     let view_bind_group = ctx.render_device().create_bind_group(
         Some("voxel_view_bind_group"),
         &raster_pipeline.view_layout,
@@ -455,8 +452,11 @@ pub fn voxel_raster_pass(
             resource: binding,
         }],
     );
-
     let material_bind_group = &voxel_material.0;
+    let multi = ctx
+        .render_device()
+        .features()
+        .contains(WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT);
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),
@@ -484,7 +484,23 @@ pub fn voxel_raster_pass(
         render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
         render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
         render_pass.set_bind_group(2, &arena.raster_chunk_bind_group, &[]);
-
+        //If the gpu supports MULTI_DRAW_INDIRECT_COUNT
+        if multi {
+            //Then batch all the chunks in the arena as one draw call
+            let count = arena
+                .active_slots
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |m| m + 1);
+            render_pass.multi_draw_indexed_indirect(&arena.indirect_args_buffer, 0, count);
+        } else {
+            //Else run each chunk as its own draw call
+            for &slot in arena.active_slots.iter() {
+                render_pass
+                    .draw_indexed_indirect(&arena.indirect_args_buffer, slot as u64 * ARGS_STRIDE);
+            }
+        }
         for &slot in arena.active_slots.iter() {
             let offset = slot as u64 * ARGS_STRIDE;
             render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, offset);
