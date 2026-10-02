@@ -20,7 +20,10 @@ use crate::{
     ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField,
     Versionable, VisibilityField, VoxelMaterial,
     voxel::{
-        arena::{ArenaSlot, ChunkMeta, VoxelChunkArena, VoxelChunkArenaSet},
+        arena::{
+            ArenaSlot, ChunkMeta, OVERFLOW_COPIED, OVERFLOW_FREE, OVERFLOW_MAPPED,
+            OverflowTelemetry, VoxelChunkArena, VoxelChunkArenaSet,
+        },
         pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
     },
 };
@@ -279,6 +282,7 @@ pub fn dispatch_voxel_compute_passes_batched(
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
     mut arena_set: ResMut<VoxelChunkArenaSet>,
+    telemetry: Res<OverflowTelemetry>,
 ) {
     if arena_set.is_empty() || !arena_set.iter().any(|a| a.needs_remesh) {
         return;
@@ -395,13 +399,20 @@ pub fn dispatch_voxel_compute_passes_batched(
             &arena.pass3_bind_group,
             (wg3, wg3, wg3 * active),
         );
-        encoder.copy_buffer_to_buffer(
-            &arena.overflow_flag_buffer,
-            0,
-            &arena.overflow_readback_buffer,
-            0,
-            4,
-        );
+
+        if telemetry.0 && arena.overflow_state.load(Ordering::Acquire) == OVERFLOW_FREE {
+            encoder.copy_buffer_to_buffer(
+                &arena.overflow_flag_buffer,
+                0,
+                &arena.overflow_readback_buffer,
+                0,
+                4,
+            );
+            // The submit below always follows, and the map system runs later this frame.
+            arena
+                .overflow_state
+                .store(OVERFLOW_COPIED, Ordering::Release);
+        }
         arena.needs_remesh = false;
     }
     render_queue.submit(std::iter::once(encoder.finish()));
@@ -922,5 +933,55 @@ pub fn release_despawned_chunks(
         .collect();
     for e in stale {
         arena_set.release(e);
+    }
+}
+
+pub fn map_overflow_readbacks(
+    telemetry: Res<OverflowTelemetry>,
+    arena_set: Res<VoxelChunkArenaSet>,
+) {
+    if !telemetry.0 {
+        return;
+    }
+    for (rank, arenas) in arena_set.arenas.iter().enumerate() {
+        for (arena_idx, arena) in arenas.iter().enumerate() {
+            let state = arena.overflow_state.clone();
+            if state
+                .compare_exchange(
+                    OVERFLOW_COPIED,
+                    OVERFLOW_MAPPED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                continue;
+            }
+
+            let buf = arena.overflow_readback_buffer.clone();
+            let buf2 = buf.clone();
+            let texture_size = arena.texture_size;
+            let max_chunks = arena.max_chunks;
+
+            buf2.slice(..).map_async(MapMode::Read, move |result| {
+                if result.is_err() {
+                    state.store(OVERFLOW_FREE, Ordering::Release); // don't strand the buffer
+                    return;
+                }
+                let value = {
+                    let data = buf.slice(..).get_mapped_range();
+                    u32::from_le_bytes(data[..4].try_into().unwrap())
+                };
+                buf.unmap();
+                if value != 0 {
+                    warn!(
+                        "[overflow] LOD rank {rank} arena {arena_idx} (texture_size={texture_size}, \
+                         max_chunks={max_chunks}) dropped chunks: vertex budget exceeded. \
+                         Raise ACTIVE_FRACTION_ESTIMATE in arena.rs."
+                    );
+                }
+                state.store(OVERFLOW_FREE, Ordering::Release);
+            });
+        }
     }
 }

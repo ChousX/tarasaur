@@ -18,6 +18,22 @@ use crate::{
     },
 };
 
+use std::sync::{Arc, atomic::AtomicU8};
+
+pub const OVERFLOW_FREE: u8 = 0; // readback buffer idle, safe to copy into
+pub const OVERFLOW_COPIED: u8 = 1; // copy submitted, ready to map
+pub const OVERFLOW_MAPPED: u8 = 2; // map_async in flight, do not touch
+
+/// Runtime switch for overflow telemetry. On in debug builds, off in release.
+#[derive(Resource)]
+pub struct OverflowTelemetry(pub bool);
+
+impl Default for OverflowTelemetry {
+    fn default() -> Self {
+        Self(cfg!(debug_assertions))
+    }
+}
+
 const ACTIVE_FRACTION_ESTIMATE: f32 = 0.20; // tune from telemetry
 
 /// Largest chunk count that keeps every per-chunk-strided buffer (vertex
@@ -135,6 +151,8 @@ pub struct VoxelChunkArena {
     pub chunk_pos_of_slot: Vec<Option<IVec3>>, // len == max_chunks, O(1) release
     pub chunk_lookup_buffer: Buffer,
     pub lookup_capacity: u32,
+
+    pub overflow_state: Arc<AtomicU8>,
 }
 
 impl VoxelChunkArena {
@@ -474,6 +492,7 @@ impl VoxelChunkArena {
             chunk_pos_of_slot: vec![None; max as usize],
             chunk_lookup_buffer,
             lookup_capacity,
+            overflow_state: Arc::new(AtomicU8::new(OVERFLOW_FREE)),
         }
     }
 

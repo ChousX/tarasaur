@@ -19,7 +19,7 @@ use systems::extract_voxel_chunks;
 use crate::{
     SDF, VisibilityField,
     voxel::{
-        arena::VoxelChunkArenaSet,
+        arena::{OverflowTelemetry, VoxelChunkArenaSet},
         pipeline::{
             VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
             update_voxel_material_bind_group,
@@ -33,8 +33,8 @@ use crate::{
         },
         systems::{
             dispatch_voxel_compute_passes_batched, extract_visibility_removed,
-            prepare_visibility_for_arena, prepare_voxel_arena, release_despawned_chunks,
-            voxel_raster_pass,
+            map_overflow_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
+            release_despawned_chunks, voxel_raster_pass,
         },
     },
 };
@@ -114,6 +114,7 @@ impl Plugin for VoxelRenderPlugin {
 
         render_app
             .init_resource::<VoxelChunkArenaSet>()
+            .init_resource::<OverflowTelemetry>()
             .add_systems(
                 ExtractSchedule,
                 (
@@ -144,7 +145,11 @@ impl Plugin for VoxelRenderPlugin {
                     map_voxel_query_results.in_set(RenderSystems::Cleanup),
                 ),
             )
-            .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass));
+            .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass))
+            .add_systems(
+                Render,
+                map_overflow_readbacks.in_set(RenderSystems::Cleanup),
+            );
     }
 
     fn finish(&self, app: &mut App) {
