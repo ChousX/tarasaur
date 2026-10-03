@@ -422,6 +422,7 @@ impl VoxelChunkArena {
                 (1, &visibility_mask_buffer), // was chunk_meta_buffer (bug)
                 (2, &chunk_has_mask_buffer),
                 (3, &batch_uniform_buffer_pass3),
+                (4, &material_buffer),
             ]),
         );
 

@@ -162,7 +162,7 @@ fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) ->
         }
     }
 
-    let id_a = uniq_ids[best_idx];
+     let id_a = uniq_ids[best_idx];
     var id_b = id_a;
     var weight_u8 = 255u;
     if (second_w >= 0.0 && (best_w + second_w) > 0.00001) {
@@ -171,6 +171,11 @@ fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) ->
         weight_u8 = u32(clamp(norm_a * 255.0, 0.0, 255.0));
     }
 
+    // Canonical order: lower id is always "a". Weight is always "amount of the
+    // lower id", so every vertex touching the same pair agrees on direction.
+    if (id_b < id_a) {
+        return MaterialBlend(id_b, id_a, 255u - weight_u8);
+    }
     return MaterialBlend(id_a, id_b, weight_u8);
 }
 

@@ -5,7 +5,62 @@
 
 @group(1) @binding(0) var texture_array: texture_2d_array<f32>;
 @group(1) @binding(1) var texture_sampler: sampler;
+@group(2) @binding(4) var<storage, read> material_buffer: array<u32>;
 
+fn sample_material_id(slot: u32, coord: vec3<i32>) -> u32 {
+    let ts = vis_uniforms.texture_size;
+    let c = vec3<u32>(clamp(coord, vec3<i32>(0), vec3<i32>(i32(ts) - 1)));
+    let elem = slot * ts * ts * ts + flatten_sdf_idx(c, ts);
+    let word = material_buffer[elem / 4u];
+    return (word >> ((elem % 4u) * 8u)) & 0xFFu;
+}
+
+struct FragBlend {
+    id_a: u32,
+    id_b: u32,
+    w: f32, // weight of id_a, 0..1
+}
+
+fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
+    let origin = chunk_meta[slot].chunk_world_origin;
+    let local = (world_pos - origin) / vis_uniforms.voxel_size;
+    let base = floor(local);
+    let f = local - base;
+    let ib = vec3<i32>(base);
+
+    var ids: array<u32, 8>;
+    var ws: array<f32, 8>;
+    var n = 0u;
+
+    for (var i = 0u; i < 8u; i++) {
+        let o = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
+        let wx = select(1.0 - f.x, f.x, o.x == 1u);
+        let wy = select(1.0 - f.y, f.y, o.y == 1u);
+        let wz = select(1.0 - f.z, f.z, o.z == 1u);
+        let w = wx * wy * wz;
+        let id = sample_material_id(slot, ib + vec3<i32>(o));
+
+        var found = false;
+        for (var j = 0u; j < n; j++) {
+            if (ids[j] == id) { ws[j] += w; found = true; break; }
+        }
+        if (!found) { ids[n] = id; ws[n] = w; n += 1u; }
+    }
+
+    var best = 0u;
+    for (var j = 1u; j < n; j++) { if (ws[j] > ws[best]) { best = j; } }
+
+    var second = best;
+    var second_w = -1.0;
+    for (var j = 0u; j < n; j++) {
+        if (j != best && ws[j] > second_w) { second_w = ws[j]; second = j; }
+    }
+
+    if (second_w < 0.0) {
+        return FragBlend(ids[best], ids[best], 1.0);
+    }
+    return FragBlend(ids[best], ids[second], ws[best] / (ws[best] + second_w));
+}
 struct MaterialProperties {
     texture_scale: f32,
     blend_sharpness: f32,
@@ -51,15 +106,26 @@ struct VertexOutput {
     @location(5) @interpolate(flat) real_slot: u32,
 };
 
+// Width of the transition band, measured in |normal| units. Smaller = harder,
+// narrower seams. 0.15 is a moderate band; try 0.05-0.25.
+const TRIPLANAR_BLEND_WIDTH: f32 = 0.15;
+
 fn triplanar_weights(N: vec3<f32>, sharpness: f32) -> vec3<f32> {
-    var w = pow(abs(N), vec3<f32>(max(sharpness, 0.0001)));
-    let total = w.x + w.y + w.z;
-    if (total > 0.0) {
-        w = w / total;
-    } else {
-        w = vec3<f32>(0.3333);
-    }
-    return w;
+    let a = abs(N);
+    let m = max(a.x, max(a.y, a.z));
+
+    // Per-material blend_sharpness now also narrows the band (1.0 = default width).
+    let width = max(TRIPLANAR_BLEND_WIDTH / max(sharpness, 1.0), 0.02);
+
+    // The dominant axis gets 1.0. Other axes get 0 until they come within
+    // `width` of the dominant one, then ramp up linearly.
+    var w = clamp((a - vec3<f32>(m - width)) / width, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Optional: smooth the ramp so the seam has no visible kink.
+    w = w * w * (3.0 - 2.0 * w);
+
+    let total = w.x + w.y + w.z; // always >= 1 because the dominant axis is 1
+    return w / total;
 }
 
 @vertex
@@ -123,38 +189,36 @@ fn fragment_is_visible(slot: u32, world_pos: vec3<f32>) -> bool {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Per-pixel visibility test, using the smoothly-interpolated
-    // world_position rather than a flat per-vertex flag — this is the
-    // change from the previous per-vertex-flag approach: the discard
-    // boundary now follows the visibility voxel grid at fragment
-    // resolution instead of snapping to whole triangles.
     if (!fragment_is_visible(in.real_slot, in.world_position)) {
         discard;
     }
 
     let N = normalize(in.world_normal);
 
-    let mat_a = material_properties[in.material_id_a];
-    let mat_b = material_properties[in.material_id_b];
+    let blend = fragment_material_blend(in.real_slot, in.world_position);
+
+    let mat_a = material_properties[blend.id_a];
+    let mat_b = material_properties[blend.id_b];
+    let layer_a = i32(blend.id_a);
+    let layer_b = i32(blend.id_b);
 
     let inv_scale_a = 1.0 / max(mat_a.texture_scale, 0.0001);
     let inv_scale_b = 1.0 / max(mat_b.texture_scale, 0.0001);
 
     let weights_a = triplanar_weights(N, mat_a.blend_sharpness);
-    let layer_a = i32(in.material_id_a);
     let a_x = textureSample(texture_array, texture_sampler, in.world_position.yz * inv_scale_a, layer_a);
     let a_y = textureSample(texture_array, texture_sampler, in.world_position.xz * inv_scale_a, layer_a);
     let a_z = textureSample(texture_array, texture_sampler, in.world_position.xy * inv_scale_a, layer_a);
     let color_a = (a_x * weights_a.x) + (a_y * weights_a.y) + (a_z * weights_a.z);
 
     let weights_b = triplanar_weights(N, mat_b.blend_sharpness);
-    let layer_b = i32(in.material_id_b);
     let b_x = textureSample(texture_array, texture_sampler, in.world_position.yz * inv_scale_b, layer_b);
     let b_y = textureSample(texture_array, texture_sampler, in.world_position.xz * inv_scale_b, layer_b);
     let b_z = textureSample(texture_array, texture_sampler, in.world_position.xy * inv_scale_b, layer_b);
     let color_b = (b_x * weights_b.x) + (b_y * weights_b.y) + (b_z * weights_b.z);
 
-    let blended_color = mix(color_b, color_a, in.blend_weight);
+    let t = smoothstep(0.35, 0.65, blend.w);
+    let blended_color = mix(color_b, color_a, t);
 
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.2));
     let diffuse = max(dot(N, light_dir), 0.0);
