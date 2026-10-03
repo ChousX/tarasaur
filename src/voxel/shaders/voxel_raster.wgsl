@@ -25,20 +25,39 @@ fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
     let origin = chunk_meta[slot].chunk_world_origin;
     let local = (world_pos - origin) / vis_uniforms.voxel_size;
     let base = floor(local);
-    let f = local - base;
     let ib = vec3<i32>(base);
+
+    // Pass 1: fetch the 8 corner ids only. No float math yet.
+    var corner_ids: array<u32, 8>;
+    for (var i = 0u; i < 8u; i++) {
+        let o = vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
+        corner_ids[i] = sample_material_id(slot, ib + o);
+    }
+
+    // Early out: all 8 corners agree, which is true for almost every pixel
+    // away from a material border. Skips weights, dedupe and both ranking loops.
+    let first = corner_ids[0];
+    var all_same = true;
+    for (var i = 1u; i < 8u; i++) {
+        all_same = all_same && (corner_ids[i] == first);
+    }
+    if (all_same) {
+        return FragBlend(first, first, 1.0);
+    }
+
+    // Pass 2: mixed cell. Trilinear corner weights, merged per unique id.
+    let f = local - base;
 
     var ids: array<u32, 8>;
     var ws: array<f32, 8>;
     var n = 0u;
 
     for (var i = 0u; i < 8u; i++) {
-        let o = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
-        let wx = select(1.0 - f.x, f.x, o.x == 1u);
-        let wy = select(1.0 - f.y, f.y, o.y == 1u);
-        let wz = select(1.0 - f.z, f.z, o.z == 1u);
+        let wx = select(1.0 - f.x, f.x, (i & 1u) == 1u);
+        let wy = select(1.0 - f.y, f.y, ((i >> 1u) & 1u) == 1u);
+        let wz = select(1.0 - f.z, f.z, ((i >> 2u) & 1u) == 1u);
         let w = wx * wy * wz;
-        let id = sample_material_id(slot, ib + vec3<i32>(o));
+        let id = corner_ids[i];
 
         var found = false;
         for (var j = 0u; j < n; j++) {
@@ -56,11 +75,9 @@ fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
         if (j != best && ws[j] > second_w) { second_w = ws[j]; second = j; }
     }
 
-    if (second_w < 0.0) {
-        return FragBlend(ids[best], ids[best], 1.0);
-    }
     return FragBlend(ids[best], ids[second], ws[best] / (ws[best] + second_w));
 }
+
 struct MaterialProperties {
     texture_scale: f32,
     blend_sharpness: f32,
@@ -186,44 +203,89 @@ fn fragment_is_visible(slot: u32, world_pos: vec3<f32>) -> bool {
     let rounded = clamp(round(local), vec3<f32>(0.0), vec3<f32>(max_coord));
     return sample_visibility(slot, vec3<u32>(rounded));
 }
+// Weights below this are dropped (and the rest renormalized). Your
+// triplanar_weights already returns exact 0 for non-dominant axes outside the
+// blend band, so most pixels end up with a single projection.
+const MIN_PROJ_WEIGHT: f32 = 0.01;
+
+fn sample_triplanar(
+    layer: i32,
+    p: vec3<f32>,
+    ddx_p: vec3<f32>,
+    ddy_p: vec3<f32>,
+    inv_scale: f32,
+    N: vec3<f32>,
+    sharpness: f32,
+) -> vec4<f32> {
+    var w = triplanar_weights(N, sharpness);
+    w = select(vec3<f32>(0.0), w, w > vec3<f32>(MIN_PROJ_WEIGHT));
+    w = w / (w.x + w.y + w.z); // dominant axis is always kept, so the sum is > 0
+
+    var c = vec4<f32>(0.0);
+    if (w.x > 0.0) {
+        c += w.x * textureSampleGrad(texture_array, texture_sampler,
+            p.yz * inv_scale, layer, ddx_p.yz * inv_scale, ddy_p.yz * inv_scale);
+    }
+    if (w.y > 0.0) {
+        c += w.y * textureSampleGrad(texture_array, texture_sampler,
+            p.xz * inv_scale, layer, ddx_p.xz * inv_scale, ddy_p.xz * inv_scale);
+    }
+    if (w.z > 0.0) {
+        c += w.z * textureSampleGrad(texture_array, texture_sampler,
+            p.xy * inv_scale, layer, ddx_p.xy * inv_scale, ddy_p.xy * inv_scale);
+    }
+    return c;
+}
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Derivatives must be taken in uniform control flow, so do it before the
+    // discard and before any branching on per-pixel data.
+    let ddx_p = dpdx(in.world_position);
+    let ddy_p = dpdy(in.world_position);
+
     if (!fragment_is_visible(in.real_slot, in.world_position)) {
         discard;
     }
 
     let N = normalize(in.world_normal);
-
     let blend = fragment_material_blend(in.real_slot, in.world_position);
 
-    let mat_a = material_properties[blend.id_a];
-    let mat_b = material_properties[blend.id_b];
-    let layer_a = i32(blend.id_a);
-    let layer_b = i32(blend.id_b);
-
-    let inv_scale_a = 1.0 / max(mat_a.texture_scale, 0.0001);
-    let inv_scale_b = 1.0 / max(mat_b.texture_scale, 0.0001);
-
-    let weights_a = triplanar_weights(N, mat_a.blend_sharpness);
-    let a_x = textureSample(texture_array, texture_sampler, in.world_position.yz * inv_scale_a, layer_a);
-    let a_y = textureSample(texture_array, texture_sampler, in.world_position.xz * inv_scale_a, layer_a);
-    let a_z = textureSample(texture_array, texture_sampler, in.world_position.xy * inv_scale_a, layer_a);
-    let color_a = (a_x * weights_a.x) + (a_y * weights_a.y) + (a_z * weights_a.z);
-
-    let weights_b = triplanar_weights(N, mat_b.blend_sharpness);
-    let b_x = textureSample(texture_array, texture_sampler, in.world_position.yz * inv_scale_b, layer_b);
-    let b_y = textureSample(texture_array, texture_sampler, in.world_position.xz * inv_scale_b, layer_b);
-    let b_z = textureSample(texture_array, texture_sampler, in.world_position.xy * inv_scale_b, layer_b);
-    let color_b = (b_x * weights_b.x) + (b_y * weights_b.y) + (b_z * weights_b.z);
-
+    // Decide which materials are actually needed.
     let t = smoothstep(0.35, 0.65, blend.w);
-    let blended_color = mix(color_b, color_a, t);
+    let same = blend.id_a == blend.id_b;
+    let need_a = same || t > 0.001;
+    let need_b = !same && t < 0.999;
+
+    var color = vec4<f32>(0.0);
+    var color_a = vec4<f32>(0.0);
+    var color_b = vec4<f32>(0.0);
+
+    if (need_a) {
+        let mat_a = material_properties[blend.id_a];
+        color_a = sample_triplanar(
+            i32(blend.id_a), in.world_position, ddx_p, ddy_p,
+            1.0 / max(mat_a.texture_scale, 0.0001), N, mat_a.blend_sharpness);
+    }
+    if (need_b) {
+        let mat_b = material_properties[blend.id_b];
+        color_b = sample_triplanar(
+            i32(blend.id_b), in.world_position, ddx_p, ddy_p,
+            1.0 / max(mat_b.texture_scale, 0.0001), N, mat_b.blend_sharpness);
+    }
+
+    if (need_a && need_b) {
+        color = mix(color_b, color_a, t);
+    } else if (need_a) {
+        color = color_a;
+    } else {
+        color = color_b;
+    }
 
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.2));
     let diffuse = max(dot(N, light_dir), 0.0);
     let ambient = 0.2;
     let lighting = diffuse + ambient;
 
-    return vec4<f32>(blended_color.rgb * lighting, 1.0);
+    return vec4<f32>(color.rgb * lighting, 1.0);
 }

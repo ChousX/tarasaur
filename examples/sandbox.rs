@@ -150,10 +150,10 @@ fn spawn_player(mut commands: Commands) {
         // `hysteresis` delays LOD downgrades and despawn by that many chunks.
         ChunkLoader {
             lod_bands: vec![
-                (LOD::High, 1),
-                (LOD::Medium, 2),
-                (LOD::Low, 2),
-                (LOD::Lowest, 3),
+                (LOD::High, 2),
+                (LOD::Medium, 3),
+                (LOD::Low, 4),
+                (LOD::Lowest, 5),
             ],
             hysteresis: 1,
         },
