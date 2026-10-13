@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use bevy::platform::collections::HashSet;
 
 use bevy::prelude::*;
 
@@ -23,7 +23,7 @@ fn chunk_has_surface<'a>(own: &SDF, mut neighbours: impl Iterator<Item = &'a SDF
     neighbours.any(|n| n.uniform_sign() != Some(sign))
 }
 
-/// Chunk `p` depends on `p + off` for each `off` in NEIGHBORS_MASK, so a
+/// Chunk `p` depends on `p + off` for each `off` in `NEIGHBORS_MASK`, so a
 /// change at `q` dirties `q` and `q - off`.
 pub fn update_surface_flags(
     changed: Query<&ChunkPosition, (With<Chunk>, Changed<SDF>)>,
@@ -36,11 +36,11 @@ pub fn update_surface_flags(
     for pos in &changed {
         dirty.insert(pos.0);
         for off in NEIGHBORS_MASK {
-            dirty.insert(pos.0 - off);
+            dirty.insert(pos.0.wrapping_sub(off));
         }
     }
 
-    for &pos in dirty.iter() {
+    for &pos in &dirty {
         let Some(entity) = chunk_manager.get_chunk(&pos) else {
             continue;
         };
@@ -49,7 +49,7 @@ pub fn update_surface_flags(
         };
 
         let neighbours = NEIGHBORS_MASK.iter().filter_map(|off| {
-            let e = chunk_manager.get_chunk(&(pos + *off))?;
+            let e = chunk_manager.get_chunk(&pos.wrapping_add(*off))?;
             sdfs.get(e).ok().map(|(s, _)| s)
         });
         let wants = chunk_has_surface(sdf, neighbours);

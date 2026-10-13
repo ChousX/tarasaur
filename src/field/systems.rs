@@ -7,6 +7,7 @@ use crate::{
     CHUNK_SIZE, ChunkPosition, DirtyField, MaxEditLod, VisibilityField,
     chunk::{ChunkManager, overlapping_chunks},
     editor::{SdfCsgSphere, SdfSphereStamp},
+    num::f32_from_u32,
     ops::{FieldSphereOps, ShapeEditOps},
     voxel::resident::ForceResident,
 };
@@ -57,34 +58,34 @@ fn apply_edits<F, V, E: Copy>(
         let Some(entity) = chunk_manager.get_chunk(&e.chunk_pos) else {
             continue; // chunk not loaded / gone: nothing to edit
         };
-        match editable.get_mut(entity) {
-            Some(mut field) => {
-                let origin = e.chunk_pos.as_vec3() * CHUNK_SIZE;
-                let voxel_size = CHUNK_SIZE / field.size().x as f32;
-                apply(entity, &mut field, origin, voxel_size, e.edit);
-            }
-            None => {
-                e.age += 1; // waiting for the chunk to reach max LOD
-                if e.age < MAX_DEFER_FRAMES {
-                    deferred.push(e);
-                } else {
-                    on_drop(e.chunk_pos);
-                }
+        if let Some(mut field) = editable.get_mut(entity) {
+            let origin = e.chunk_pos.as_vec3() * CHUNK_SIZE;
+            let voxel_size = CHUNK_SIZE / f32_from_u32(field.size().x);
+            apply(entity, &mut field, origin, voxel_size, e.edit);
+        } else {
+            e.age = e.age.saturating_add(1); // waiting for the chunk to reach max LOD
+            if e.age < MAX_DEFER_FRAMES {
+                deferred.push(e);
+            } else {
+                on_drop(e.chunk_pos);
             }
         }
     }
     if deferred.len() > MAX_DEFERRED {
-        let excess = deferred.len() - MAX_DEFERRED;
+        let excess = deferred.len().saturating_sub(MAX_DEFERRED);
         deferred.drain(..excess); // drop the oldest
     }
 }
+
+/// One queued shape edit: (center, shape, value, mode).
+type ShapeEdit<S, V> = (Vec3, S, V, EditMode<V>);
 
 pub fn process_shape_edits<F, S, V>(
     mut commands: Commands,
     mut events: MessageReader<EditFieldMessage<F, S, V>>,
     mut editable: EditableChunks<F>,
     chunk_manager: Res<ChunkManager>,
-    mut deferred: Local<Vec<DeferredEdit<(Vec3, S, V, EditMode<V>)>>>,
+    mut deferred: Local<Vec<DeferredEdit<ShapeEdit<S, V>>>>,
 ) where
     F: Field<V> + Component<Mutability = Mutable> + ShapeEditOps<V, S> + FieldNew,
     S: Primitive3d + Copy + Send + Sync + 'static + ShapeBounds + ShapeScale,
@@ -147,9 +148,10 @@ pub fn process_sdf_sphere_stamps(
     );
 }
 
-/// In-flight async JFA recompute for one chunk's SDF. `started_version`
-/// is the SDFField::version this task's input was cloned at — used by
-/// resolve_sdf_reinit_tasks to detect whether a newer edit landed while
+/// In-flight async JFA recompute for one chunk's SDF.
+///
+/// `started_version` is the `SDFField::version` this task's input was cloned at — used by
+/// `resolve_sdf_reinit_tasks` to detect whether a newer edit landed while
 /// the task was running.
 #[derive(Component)]
 pub struct SdfReinitTask {
@@ -158,14 +160,16 @@ pub struct SdfReinitTask {
 }
 
 /// Spawns a background JFA task for every dirty SDF chunk that doesn't
-/// already have one in flight. The `Without<SdfReinitTask>` filter is
+/// already have one in flight.
+///
+/// The `Without<SdfReinitTask>` filter is
 /// what prevents re-spawning a second task each frame while the sphere
-/// is still resizing — DirtyField stays set (see resolve, below) but no
+/// is still resizing — `DirtyField` stays set (see resolve, below) but no
 /// new task starts until the current one resolves.
-pub fn spawn_sdf_reinit_tasks(
-    mut commands: Commands,
-    query: Query<(Entity, &SDF), (With<DirtyField<SDF, f32>>, Without<SdfReinitTask>)>,
-) {
+/// Dirty SDF chunks with no reinit in flight.
+type NeedsReinit = (With<DirtyField<SDF, f32>>, Without<SdfReinitTask>);
+
+pub fn spawn_sdf_reinit_tasks(mut commands: Commands, query: Query<(Entity, &SDF), NeedsReinit>) {
     for (entity, sdf) in query.iter() {
         let (data, size, started_version) = sdf.reinit_input();
 
@@ -209,23 +213,26 @@ pub fn resolve_sdf_reinit_tasks(
     }
 }
 
+/// (entity, SDF edited, visibility edited).
+type EditedFields = (
+    Entity,
+    Has<DirtyField<SDF, f32>>,
+    Has<DirtyField<VisibilityField, bool>>,
+);
+
+/// Chunks with both fields, at least one edited, and no reinit in flight.
+type DesyncCandidate = (
+    With<SDF>,
+    With<VisibilityField>,
+    Without<SdfReinitTask>,
+    Or<(
+        With<DirtyField<SDF, f32>>,
+        With<DirtyField<VisibilityField, bool>>,
+    )>,
+);
+
 pub fn detect_topology_desync(
-    query: Query<
-        (
-            Entity,
-            Has<DirtyField<SDF, f32>>,
-            Has<DirtyField<VisibilityField, bool>>,
-        ),
-        (
-            With<SDF>,
-            With<VisibilityField>,
-            Without<SdfReinitTask>,
-            Or<(
-                With<DirtyField<SDF, f32>>,
-                With<DirtyField<VisibilityField, bool>>,
-            )>,
-        ),
-    >,
+    query: Query<EditedFields, DesyncCandidate>,
     positions: Query<&ChunkPosition>,
 ) {
     for (entity, sdf_dirty, vis_dirty) in query.iter() {

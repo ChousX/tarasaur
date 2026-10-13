@@ -41,10 +41,10 @@ fn spawn_chunk_grid(mut commands: Commands) {
     }
 }
 
-/// Same pattern as cursor_collision_test.rs's mark_chunks_visible — sets
-/// every voxel in every chunk to visible once, directly via Field::set,
-/// bypassing WorldEditor entirely. VisibilityField defaults to all-hidden
-/// on spawn, so without this extract_voxel_chunks would skip every chunk
+/// Same pattern as `cursor_collision_test.rs`'s `mark_chunks_visible` — sets
+/// every voxel in every chunk to visible once, directly via `Field::set`,
+/// bypassing `WorldEditor` entirely. `VisibilityField` defaults to all-hidden
+/// on spawn, so without this `extract_voxel_chunks` would skip every chunk
 /// forever regardless of what the SDF contains. SDF alone defines the
 /// actual surface shape from here on — visibility just needs to not be
 /// in the way.
@@ -98,10 +98,10 @@ fn handle_sphere_editing(
 ) {
     let mut delta_radius = 0.0;
     if keyboard_input.pressed(KeyCode::KeyW) || keyboard_input.pressed(KeyCode::ArrowUp) {
-        delta_radius += 1.5 * time.delta_secs();
+        delta_radius = 1.5f32.mul_add(time.delta_secs(), delta_radius);
     }
     if keyboard_input.pressed(KeyCode::KeyS) || keyboard_input.pressed(KeyCode::ArrowDown) {
-        delta_radius -= 1.5 * time.delta_secs();
+        delta_radius = 1.5f32.mul_add(-time.delta_secs(), delta_radius);
     }
     if delta_radius == 0.0 {
         return;

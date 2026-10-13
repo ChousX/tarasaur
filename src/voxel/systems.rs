@@ -1,13 +1,20 @@
 use super::util::dispatch;
 use std::{collections::HashMap, marker::PhantomData, sync::atomic::Ordering};
 
+use crate::field::flatten_cube;
+use crate::num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from};
+
 use bevy::{
     diagnostic::FrameCount,
+    ecs::{entity::EntityHashMap, system::SystemParam},
     prelude::*,
     render::{
         Extract,
         camera::ExtractedCamera,
-        render_resource::*,
+        render_resource::{
+            BindGroupEntry, CommandEncoderDescriptor, IndexFormat, MapMode, PipelineCache,
+            RenderPassDescriptor, StoreOp,
+        },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         sync_world::MainEntity,
         view::{ViewDepthStencilTexture, ViewTarget, ViewUniformOffset, ViewUniforms},
@@ -41,9 +48,10 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub _type: PhantomData<T>,
 }
 
-/// Max cells re-meshed per frame, summed over all arenas. Uploads past it
-/// wait for the next frame while the chunk keeps its current mesh, so a
-/// burst of loads is spread out instead of landing in one frame.
+/// Max cells re-meshed per frame, summed over all arenas.
+///
+/// Uploads past it wait for the next frame while the chunk keeps its current
+/// mesh, so a burst of loads is spread out instead of landing in one frame.
 #[derive(Resource)]
 pub struct RemeshBudget {
     pub cells_per_frame: u32,
@@ -99,26 +107,45 @@ fn newest_pending<T: Send + Sync + 'static>(
 /// is active when some but not all of its 8 corners are `<= 0`. Sizes the
 /// chunk's vertex range before the GPU meshes it.
 fn count_active_cells(padded: &[u8], texture_size: u32) -> u32 {
-    let n = texture_size as usize;
+    let size = usize_from(texture_size);
     // snorm16, as uploaded (see quantize_sdf): same sign test as pass1.
     let inside: Vec<u8> = padded
-        .chunks_exact(2)
-        .map(|b| u8::from(i16::from_le_bytes([b[0], b[1]]) <= 0))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u8::from(i16::from_le_bytes(b) <= 0))
         .collect();
-    if n < 2 || inside.len() != n * n * n {
+    let Some(slab) = size.checked_mul(size) else {
+        return 0;
+    };
+    if size < 2 || Some(inside.len()) != slab.checked_mul(size) {
         return 0;
     }
-    let row = |y: usize, z: usize| (z * n + y) * n;
-    let mut total = 0;
-    for z in 0..n - 1 {
-        for y in 0..n - 1 {
-            let (a, b, c, d) = (row(y, z), row(y + 1, z), row(y, z + 1), row(y + 1, z + 1));
-            let column = |x: usize| inside[a + x] + inside[b + x] + inside[c + x] + inside[d + x];
-            let mut prev = column(0);
-            for x in 1..n {
-                let next = column(x);
-                let corners = prev + next;
-                total += u32::from(corners > 0 && corners < 8);
+    // [z][y] -> row of x
+    let slabs: Vec<Vec<&[u8]>> = inside
+        .chunks_exact(slab)
+        .map(|s| s.chunks_exact(size).collect())
+        .collect();
+    let mut total: u32 = 0;
+    for pair in slabs.windows(2) {
+        let [lo, hi] = pair else { continue };
+        for (lo_rows, hi_rows) in lo.windows(2).zip(hi.windows(2)) {
+            let (&[y0z0, y1z0], &[y0z1, y1z1]) = (lo_rows, hi_rows) else {
+                continue;
+            };
+            // Each corner is 0 or 1, so these sums stay tiny.
+            let mut columns = y0z0
+                .iter()
+                .zip(y1z0)
+                .zip(y0z1)
+                .zip(y1z1)
+                .map(|(((a, b), c), d)| a.wrapping_add(*b).wrapping_add(*c).wrapping_add(*d));
+            let Some(mut prev) = columns.next() else {
+                continue;
+            };
+            for next in columns {
+                let corners = prev.wrapping_add(next);
+                total = total.wrapping_add(u32::from(corners > 0 && corners < 8));
                 prev = next;
             }
         }
@@ -126,15 +153,22 @@ fn count_active_cells(padded: &[u8], texture_size: u32) -> u32 {
     total
 }
 
+/// The render resources `prepare_voxel_arena` creates arenas and writes with.
+#[derive(SystemParam)]
+pub struct ArenaGpu<'w> {
+    render_device: Res<'w, RenderDevice>,
+    layouts: Res<'w, VoxelPipelineLayouts>,
+    render_queue: Res<'w, RenderQueue>,
+}
+
 /// Uploads changed chunks' SDF and gives each an exact-size vertex range.
+///
 /// Never drops one: past the per-frame budget, or with no room in any arena,
 /// the upload waits and the chunk keeps drawing its current mesh (an old
 /// LOD is only released once the new one is placed).
 pub fn prepare_voxel_arena(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
-    render_device: Res<RenderDevice>,
-    layouts: Res<VoxelPipelineLayouts>,
-    render_queue: Res<RenderQueue>,
+    gpu: ArenaGpu,
     budget: Res<RemeshBudget>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<SDF>)>,
     mut commands: Commands,
@@ -155,7 +189,7 @@ pub fn prepare_voxel_arena(
             continue;
         };
         if arena_set.find_slot(x.lod, x.main_entity).is_none() {
-            let cells = (x.size - 1).pow(3);
+            let cells = x.size.saturating_sub(1).saturating_pow(3);
             if placed_new && cells > cells_left {
                 arena_set.deferred.insert(x.main_entity);
                 continue;
@@ -185,22 +219,22 @@ pub fn prepare_voxel_arena(
             continue;
         }
         arena_set.empty.remove(&x.main_entity);
+        let cell_count = size.saturating_sub(1);
         let Some(ArenaSlot { arena_idx, slot }) =
             arena_set.place(lod, x.main_entity, count, || {
                 info!(
                     "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
-                    lod,
-                    size - 1,
-                    size
+                    lod, cell_count, size
                 );
-                VoxelChunkArena::new(&render_device, &layouts, size - 1, size)
+                VoxelChunkArena::new(&gpu.render_device, &gpu.layouts, cell_count, size)
             })
         else {
             arena_set.deferred.insert(x.main_entity);
             let lod_idx = VoxelChunkArenaSet::lod_index(lod);
-            if arena_set.arenas[lod_idx]
-                .iter()
-                .any(VoxelChunkArena::dirty_full)
+            if arena_set
+                .arenas
+                .get(lod_idx)
+                .is_some_and(|arenas| arenas.iter().any(VoxelChunkArena::dirty_full))
             {
                 continue; // out of scratch for this frame: just wait
             }
@@ -213,56 +247,74 @@ pub fn prepare_voxel_arena(
             any_out_of_room = true;
             continue;
         };
-        let arena = arena_set.arena_mut(lod, arena_idx);
+        let Some(arena) = arena_set.arena_mut(lod, arena_idx) else {
+            continue;
+        };
         arena.register_chunk_pos(slot, x.chunk_pos);
         debug_assert_eq!(
             size, arena.texture_size,
             "mixed LOD in one arena — bucket by LOD"
         );
-
-        let sdf_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64 * 2; // snorm16
-        render_queue.write_buffer(&arena.sdf_buffer, sdf_offset_bytes, &x.padded_data);
-
-        let meta = ChunkMeta {
-            chunk_world_origin: (x.chunk_pos.as_vec3() * CHUNK_SIZE).into(),
-            active_list_pos: 0,
-        };
-        let meta_size = std::mem::size_of::<ChunkMeta>() as u64;
-        render_queue.write_buffer(
-            &arena.chunk_meta_buffer,
-            slot as u64 * meta_size,
-            bytemuck::bytes_of(&meta),
-        );
-
-        let (base, _) = arena.slot_range[slot as usize];
-        let slot_word = slot as u64 * 4;
-        render_queue.write_buffer(
-            &arena.slot_vertex_base_buffer,
-            slot_word,
-            bytemuck::bytes_of(&base),
-        );
-        render_queue.write_buffer(
-            &arena.slot_vertex_count_buffer,
-            slot_word,
-            bytemuck::bytes_of(&count),
-        );
-        let args = DrawIndexedIndirectArgs {
-            index_count: 0, // pass3 fills it in this frame
-            instance_count: 1,
-            first_index: base * INDICES_PER_CELL,
-            base_vertex: 0,
-            first_instance: 0,
-        };
-        render_queue.write_buffer(
-            &arena.indirect_args_buffer,
-            slot as u64 * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64,
-            bytemuck::bytes_of(&args),
-        );
-
-        arena.mark_dirty(slot);
+        upload_chunk(&gpu.render_queue, arena, slot, x, count);
         commands.entity(extracted_entity).despawn();
     }
     *out_of_room = any_out_of_room;
+}
+
+/// Writes a placed chunk's SDF, metadata, vertex range and draw args into
+/// its arena slot, and marks the slot for re-meshing.
+fn upload_chunk(
+    render_queue: &RenderQueue,
+    arena: &mut VoxelChunkArena,
+    slot: u32,
+    x: &ExtractedChunkField<SDF>,
+    count: u32,
+) {
+    let Some(&(base, _)) = arena.slot_range.get(usize_from(slot)) else {
+        return;
+    };
+    let slot64 = u64::from(slot);
+    // snorm16: 2 bytes per element
+    let sdf_offset_bytes = slot64
+        .wrapping_mul(u64::from(arena.sdf_elems_per_chunk))
+        .wrapping_mul(2);
+    render_queue.write_buffer(&arena.sdf_buffer, sdf_offset_bytes, &x.padded_data);
+
+    let meta = ChunkMeta {
+        chunk_world_origin: (x.chunk_pos.as_vec3() * CHUNK_SIZE).into(),
+        active_list_pos: 0,
+    };
+    render_queue.write_buffer(
+        &arena.chunk_meta_buffer,
+        slot64.wrapping_mul(u64_from_usize(std::mem::size_of::<ChunkMeta>())),
+        bytemuck::bytes_of(&meta),
+    );
+
+    let slot_word = slot64.wrapping_mul(4);
+    render_queue.write_buffer(
+        &arena.slot_vertex_base_buffer,
+        slot_word,
+        bytemuck::bytes_of(&base),
+    );
+    render_queue.write_buffer(
+        &arena.slot_vertex_count_buffer,
+        slot_word,
+        bytemuck::bytes_of(&count),
+    );
+    let args = DrawIndexedIndirectArgs {
+        index_count: 0, // pass3 fills it in this frame
+        instance_count: 1,
+        first_index: base.wrapping_mul(INDICES_PER_CELL),
+        base_vertex: 0,
+        first_instance: 0,
+    };
+    render_queue.write_buffer(
+        &arena.indirect_args_buffer,
+        slot64.wrapping_mul(ARGS_STRIDE),
+        bytemuck::bytes_of(&args),
+    );
+
+    arena.mark_dirty(slot);
 }
 
 /// Pending uploads for a channel that rides along with a chunk's SDF
@@ -298,8 +350,12 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
             continue;
         };
         debug_assert_eq!(
-            x.size,
-            arena_set.arenas[VoxelChunkArenaSet::lod_index(x.lod)][slot.arena_idx].texture_size,
+            Some(x.size),
+            arena_set
+                .arenas
+                .get(VoxelChunkArenaSet::lod_index(x.lod))
+                .and_then(|arenas| arenas.get(slot.arena_idx))
+                .map(|arena| arena.texture_size),
             "mixed LOD in one arena — bucket by LOD"
         );
         out.push((e, slot));
@@ -321,11 +377,13 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
         let Ok((_, x)) = extracted_chunks.get(e) else {
             continue;
         };
-        let arena = arena_set.arena_mut(x.lod, arena_idx);
+        let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
+            continue;
+        };
         if !arena.can_mark_dirty(slot) {
             continue; // no scratch left this frame; retried next frame
         }
-        let offset = slot as u64 * arena.sdf_elems_per_chunk as u64;
+        let offset = u64::from(slot).wrapping_mul(u64::from(arena.sdf_elems_per_chunk));
         render_queue.write_buffer(&arena.material_buffer, offset, &x.padded_data);
         arena.mark_dirty(slot); // pass3 bakes materials into vertices
         commands.entity(e).despawn();
@@ -344,7 +402,9 @@ pub fn prepare_visibility_for_arena(
         let Ok((_, x)) = extracted_chunks.get(e) else {
             continue;
         };
-        let arena = arena_set.arena_mut(x.lod, arena_idx);
+        let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
+            continue;
+        };
         // Empty = the chunk went uniform: clear the flag so the raster stops
         // consulting the now-stale mask.
         let has_mask = !x.padded_data.is_empty();
@@ -352,11 +412,13 @@ pub fn prepare_visibility_for_arena(
             // One byte per voxel -> 1 bit. Each slot gets its own word-aligned
             // region, like sdf/material_buffer, so adjacent slots' writes can't
             // clobber each other's boundary words.
-            let words_per_chunk = (arena.sdf_elems_per_chunk as u64).div_ceil(32);
+            let words_per_chunk = u64::from(arena.sdf_elems_per_chunk).div_ceil(32);
             let packed = pack_bits(x.padded_data.iter().map(|&b| b != 0));
             render_queue.write_buffer(
                 &arena.visibility_mask_buffer,
-                slot as u64 * words_per_chunk * 4,
+                u64::from(slot)
+                    .wrapping_mul(words_per_chunk)
+                    .wrapping_mul(4),
                 bytemuck::cast_slice(&packed),
             );
         }
@@ -422,7 +484,7 @@ pub fn dispatch_voxel_compute_passes_batched(
         }
         arena.dirty_slots.sort_unstable();
         arena.dirty_slots.dedup();
-        let n = arena.dirty_slots.len() as u32;
+        let n = u32::try_from(arena.dirty_slots.len()).unwrap_or(u32::MAX);
         render_queue.write_buffer(
             &arena.active_slot_map_buffer,
             0,
@@ -435,7 +497,7 @@ pub fn dispatch_voxel_compute_passes_batched(
             "surface_nets_pass1_batched",
             pass1_pipeline,
             &arena.pass1_bind_group,
-            (wg1, wg1, wg1 * n),
+            (wg1, wg1, wg1.saturating_mul(n)),
         );
         // Scan/resolve: x = block within a chunk, y = chunk. Keeps x under
         // the 65535-workgroup limit however many chunks are dispatched.
@@ -467,7 +529,7 @@ pub fn dispatch_voxel_compute_passes_batched(
             "surface_nets_pass3_batched",
             pass3_pipeline,
             &arena.pass3_bind_group,
-            (wg3, wg3, wg3 * n),
+            (wg3, wg3, wg3.saturating_mul(n)),
         );
         if telemetry.0 && arena.guard_state.load(Ordering::Acquire) == GUARD_FREE {
             encoder.copy_buffer_to_buffer(
@@ -543,9 +605,7 @@ pub fn voxel_raster_pass(
 
     render_pass.set_render_pipeline(pipeline);
     render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
-    render_pass.set_bind_group(1, &material_bind_group, &[]);
-
-    const ARGS_STRIDE: u64 = std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
+    render_pass.set_bind_group(1, material_bind_group, &[]);
 
     for arena in arena_set.iter() {
         if arena.active_slots.is_empty() {
@@ -558,11 +618,16 @@ pub fn voxel_raster_pass(
 
         // indirect_args is indexed by slot.
         for &slot in &arena.active_slots {
-            render_pass
-                .draw_indexed_indirect(&arena.indirect_args_buffer, slot as u64 * ARGS_STRIDE);
+            render_pass.draw_indexed_indirect(
+                &arena.indirect_args_buffer,
+                u64::from(slot).wrapping_mul(ARGS_STRIDE),
+            );
         }
     }
 }
+
+/// Byte stride of one slot's entry in `indirect_args_buffer`.
+const ARGS_STRIDE: u64 = u64_from_usize(std::mem::size_of::<DrawIndexedIndirectArgs>());
 
 pub(crate) const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 0, 0),
@@ -575,16 +640,18 @@ pub(crate) const NEIGHBORS_MASK: [IVec3; 7] = [
 ];
 
 /// Nearest-neighbor apron sampling for categorical byte data — material
-/// ids, visibility bits. Shared by MaterialField's and VisibilityField's
-/// ApronSample impls rather than duplicated: unlike SDF distances, these
-/// values must never be blended across a chunk boundary.
+/// ids, visibility bits.
+///
+/// Shared by `MaterialField`'s and `VisibilityField`'s `ApronSample` impls
+/// rather than duplicated: unlike SDF distances, these values must never be
+/// blended across a chunk boundary. Reads 0 if `data` is shorter than `size^3`.
+#[must_use]
 pub fn nearest_neighbor_sample(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
-    let max_coord = (size - 1) as f32;
-    let xi = x.round().clamp(0.0, max_coord) as usize;
-    let yi = y.round().clamp(0.0, max_coord) as usize;
-    let zi = z.round().clamp(0.0, max_coord) as usize;
-    let s = size as usize;
-    data[(zi * s + yi) * s + xi]
+    let max_coord = f32_from_u32(size.saturating_sub(1));
+    let axis = |v: f32| u32_from_f32(v.round().clamp(0.0, max_coord));
+    data.get(flatten_cube(axis(x), axis(y), axis(z), size))
+        .copied()
+        .unwrap_or_default()
 }
 
 pub fn extract_visibility_removed(
@@ -604,7 +671,7 @@ pub fn extract_visibility_removed(
             main_entity: entity.into(),
             chunk_pos: pos.0,
             padded_data: Vec::new(),
-            size: lod.size() + PADDING,
+            size: lod.size().wrapping_add(PADDING),
             lod: *lod,
             seq: frame.0,
             _type: PhantomData,
@@ -612,52 +679,64 @@ pub fn extract_visibility_removed(
     }
 }
 
+/// Which chunks `extract_voxel_chunks` skips: no surface, or fully hidden
+/// (unless forced resident).
+#[derive(SystemParam)]
+pub struct ExtractFilter<'w, 's> {
+    surface: Extract<'w, 's, Query<'static, 'static, (), With<crate::field::surface::HasSurface>>>,
+    visibility: Extract<'w, 's, Query<'static, 'static, Option<&'static VisibilityField>>>,
+    forced: Extract<'w, 's, Res<'static, ForceResident>>,
+}
+
+impl ExtractFilter<'_, '_> {
+    fn skips(&self, entity: Entity, pos: IVec3) -> bool {
+        let hidden = self
+            .visibility
+            .get(entity)
+            .is_ok_and(|v| v.is_some_and(VisibilityField::is_all_empty));
+        !self.surface.contains(entity) || (hidden && !self.forced.contains(&pos))
+    }
+}
+
 pub fn extract_voxel_chunks<T>(
     mut commands: Commands,
     chunk_manager: Extract<Res<ChunkManager>>,
     query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
-    visibility_query: Extract<Query<Option<&VisibilityField>>>,
-    mut last_versions: Local<std::collections::HashMap<Entity, (LOD, [u64; 8])>>,
-    surface_query: Extract<Query<(), With<crate::field::surface::HasSurface>>>,
-    forced: Extract<Res<ForceResident>>,
+    filter: ExtractFilter,
+    mut last_versions: Local<EntityHashMap<(LOD, [u64; 8])>>,
     frame: Extract<Res<FrameCount>>,
 ) where
     T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
     for (entity, pos, field, lod) in query.iter() {
-        if !surface_query.contains(entity) {
-            last_versions.remove(&entity); // so gaining a surface re-extracts
-            continue;
-        }
-        if visibility_query
-            .get(entity)
-            .is_ok_and(|v| v.is_some_and(|vv| vv.is_all_empty()))
-            && !forced.contains(&pos.0)
-        {
-            last_versions.remove(&entity); // so leasing/un-hiding re-extracts
+        if filter.skips(entity, pos.0) {
+            // so gaining a surface, or leasing/un-hiding, re-extracts
+            last_versions.remove(&entity);
             continue;
         }
         let size = lod.size();
-        let expected_elems = lod.volume();
-        if field.data_slice().len() != expected_elems {
-            unreachable!("can't happen now (LOD and fields install together); defensive");
+        if field.data_slice().len() != lod.volume() {
+            continue; // can't happen (LOD and fields install together); defensive
         }
 
         let mut versions = [0u64; 8];
-        versions[0] = field.version();
-        for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
-            if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
-                if let Ok((_, _, n_field, n_lod)) = query.get(n_entity) {
-                    // At equal LOD the apron reads only the neighbour's facing slab;
-                    // across LODs it resamples more of it, so use the full version.
-                    let v = if n_lod == lod {
-                        n_field.border_version(i)
-                    } else {
-                        n_field.version()
-                    };
-                    // fold neighbour LOD in: a reload resets version to 0
-                    versions[i + 1] = v ^ ((n_lod.rank() as u64 + 1) << 56);
-                }
+        let (own, neighbor_versions) = versions.split_at_mut(1);
+        if let Some(own) = own.first_mut() {
+            *own = field.version();
+        }
+        for ((i, offset), slot) in NEIGHBORS_MASK.iter().enumerate().zip(neighbor_versions) {
+            if let Some(n_entity) = chunk_manager.get_chunk(&pos.0.wrapping_add(*offset))
+                && let Ok((_, _, n_field, n_lod)) = query.get(n_entity)
+            {
+                // At equal LOD the apron reads only the neighbour's facing slab;
+                // across LODs it resamples more of it, so use the full version.
+                let v = if n_lod == lod {
+                    n_field.border_version(i)
+                } else {
+                    n_field.version()
+                };
+                // fold neighbour LOD in: a reload resets version to 0
+                *slot = v ^ (u64::from(n_lod.rank()).wrapping_add(1) << 56);
             }
         }
 
@@ -670,18 +749,20 @@ pub fn extract_voxel_chunks<T>(
         }
         last_versions.insert(entity, key);
 
-        let padded_size = size + PADDING;
+        let padded_size = size.wrapping_add(PADDING);
 
         let padded_data: Vec<u8> = if field.should_extract() {
-            let mut vol =
-                vec![T::Elem::default(); (padded_size * padded_size * padded_size) as usize];
-            let raw = field.data_slice();
+            let mut vol = vec![T::Elem::default(); usize_from(padded_size).saturating_pow(3)];
+            // Copy row by row: each source row of x lands at the start of the
+            // same (y, z) row in the padded volume.
+            let row_len = usize_from(size);
+            let mut src_rows = field.data_slice().chunks_exact(row_len);
             for z in 0..size {
                 for y in 0..size {
-                    for x in 0..size {
-                        let src = ((z * size + y) * size + x) as usize;
-                        let dst = ((z * padded_size + y) * padded_size + x) as usize;
-                        vol[dst] = raw[src];
+                    let dst = flatten_cube(0, y, z, padded_size);
+                    let dst_row = vol.get_mut(dst..dst.wrapping_add(row_len));
+                    if let (Some(src), Some(dst)) = (src_rows.next(), dst_row) {
+                        dst.copy_from_slice(src);
                     }
                 }
             }
@@ -707,10 +788,11 @@ pub fn extract_voxel_chunks<T>(
 pub(crate) const PADDING: u32 = 2;
 
 /// Fills the `+x/+y/+z` apron of a padded volume from the 7 neighbours in
-/// `NEIGHBORS_MASK`, resampling across LODs. A missing neighbour (or one
-/// mid-LOD-change, whose data doesn't match its LOD) falls back to this
-/// chunk's own edge voxels. Every region writes only apron voxels and reads
-/// only interior ones, so the regions are independent.
+/// `NEIGHBORS_MASK`, resampling across LODs.
+///
+/// A missing neighbour (or one mid-LOD-change, whose data doesn't match its
+/// LOD) falls back to this chunk's own edge voxels. Every region writes only
+/// apron voxels and reads only interior ones, so the regions are independent.
 pub fn fill_apron<T>(
     vol: &mut [T::Elem],
     chunk_pos: IVec3,
@@ -726,30 +808,38 @@ pub fn fill_apron<T>(
     let Some((_, lod)) = field_at(chunk_pos) else {
         return;
     };
-    let n = lod.size();
-    let p = n + PADDING;
-    let idx = |c: UVec3| ((c.z * p + c.y) * p + c.x) as usize;
+    let size = UVec3::splat(lod.size());
+    let padded = lod.size().wrapping_add(PADDING);
+    let idx = |c: UVec3| flatten_cube(c.x, c.y, c.z, padded);
+    let edge = size.saturating_sub(UVec3::ONE);
 
     for offset in NEIGHBORS_MASK {
-        let o = offset.as_uvec3();
+        let dir = offset.as_uvec3();
         // Borrowed, not cloned: this runs in ExtractSchedule, which stalls both worlds.
-        let neighbor = field_at(chunk_pos + offset)
+        let neighbor = field_at(chunk_pos.wrapping_add(offset))
             .filter(|(f, l)| f.data_slice().len() == l.volume())
             .map(|(f, l)| (f.data_slice(), l.size()));
-        // Axes with o = 1 cover the apron (n..n+PADDING), the rest 0..n.
-        let (lo, hi) = (o * n, UVec3::splat(n) + o * PADDING);
-        for z in lo.z..hi.z {
-            for y in lo.y..hi.y {
-                for x in lo.x..hi.x {
-                    let c = UVec3::new(x, y, z);
-                    vol[idx(c)] = match neighbor {
+        // Axes with dir = 1 cover the apron (n..n+PADDING), the rest 0..n.
+        let origin = dir.wrapping_mul(size);
+        let end = size.wrapping_add(dir.wrapping_mul(UVec3::splat(PADDING)));
+        for z in origin.z..end.z {
+            for y in origin.y..end.y {
+                for x in origin.x..end.x {
+                    let cell = UVec3::new(x, y, z);
+                    let value = match neighbor {
                         Some((data, n_size)) => {
-                            let ratio = n_size as f32 / n as f32;
-                            let l = (c - o * n).as_vec3() * ratio;
-                            T::rescale(T::sample_apron(data, n_size, l.x, l.y, l.z), ratio)
+                            let ratio = f32_from_u32(n_size) / f32_from_u32(size.x);
+                            let local = cell.wrapping_sub(origin).as_vec3() * ratio;
+                            T::rescale(
+                                T::sample_apron(data, n_size, local.x, local.y, local.z),
+                                ratio,
+                            )
                         }
-                        None => vol[idx(c.min(UVec3::splat(n - 1)))],
+                        None => vol.get(idx(cell.min(edge))).copied().unwrap_or_default(),
                     };
+                    if let Some(v) = vol.get_mut(idx(cell)) {
+                        *v = value;
+                    }
                 }
             }
         }
@@ -759,43 +849,52 @@ pub fn fill_apron<T>(
 /// Trilinear neighbor sampling, for continuous data like SDF distances.
 /// Categorical fields (material ids, visibility) must never blend; they use
 /// `nearest_neighbor_sample` instead.
+///
+/// Reads 0 if `data` is shorter than `size^3`.
+#[must_use]
 pub fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
-    let p = Vec3::new(x, y, z).clamp(Vec3::ZERO, Vec3::splat((size - 1) as f32));
-    let p0 = p.floor().as_uvec3();
-    let p1 = (p0 + 1).min(UVec3::splat(size - 1));
-    let t = p - p0.as_vec3();
-    let s = size as usize;
-    let at = |x: u32, y: u32, z: u32| data[(z as usize * s + y as usize) * s + x as usize];
-    let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
-    let plane = |z: u32| {
-        let y0 = lerp(at(p0.x, p0.y, z), at(p1.x, p0.y, z), t.x);
-        let y1 = lerp(at(p0.x, p1.y, z), at(p1.x, p1.y, z), t.x);
-        lerp(y0, y1, t.y)
+    let edge = UVec3::splat(size.saturating_sub(1));
+    let pos = Vec3::new(x, y, z).clamp(Vec3::ZERO, edge.as_vec3());
+    let p0 = pos.floor().as_uvec3();
+    let p1 = p0.saturating_add(UVec3::ONE).min(edge);
+    let frac = pos - p0.as_vec3();
+    let at = |ix: u32, iy: u32, iz: u32| {
+        data.get(flatten_cube(ix, iy, iz, size))
+            .copied()
+            .unwrap_or_default()
     };
-    lerp(plane(p0.z), plane(p1.z), t.z)
+    let lerp = |from: f32, to: f32, w: f32| to.mul_add(w, from * (1.0 - w));
+    let plane = |iz: u32| {
+        let y0 = lerp(at(p0.x, p0.y, iz), at(p1.x, p0.y, iz), frac.x);
+        let y1 = lerp(at(p0.x, p1.y, iz), at(p1.x, p1.y, iz), frac.x);
+        lerp(y0, y1, frac.y)
+    };
+    lerp(plane(p0.z), plane(p1.z), frac.z)
 }
 
 fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
     let mut packed = vec![0u32; bits.len().div_ceil(32)];
     for (i, b) in bits.enumerate() {
-        if b {
-            packed[i / 32] |= 1 << (i % 32);
+        if b && let Some(word) = packed.get_mut(i / 32) {
+            *word |= 1 << (i % 32);
         }
     }
     packed
 }
 
+type LiveChunkData = (
+    Entity,
+    &'static ChunkPosition,
+    Option<&'static VisibilityField>,
+);
+type LiveChunkFilter = (
+    With<crate::Chunk>,
+    With<LOD>,
+    With<crate::field::surface::HasSurface>,
+);
+
 pub fn release_despawned_chunks(
-    live: Extract<
-        Query<
-            (Entity, &ChunkPosition, Option<&VisibilityField>),
-            (
-                With<crate::Chunk>,
-                With<LOD>,
-                With<crate::field::surface::HasSurface>,
-            ),
-        >,
-    >,
+    live: Extract<Query<LiveChunkData, LiveChunkFilter>>,
     forced: Extract<Res<ForceResident>>,
     arena_set: Option<ResMut<VoxelChunkArenaSet>>,
 ) {
@@ -804,7 +903,10 @@ pub fn release_despawned_chunks(
     };
     let wanted: std::collections::HashSet<MainEntity> = live
         .iter()
-        .filter(|(_, pos, v)| !v.is_some_and(|v| v.is_all_empty()) || forced.contains(&pos.0))
+        .filter(|(_, pos, v)| {
+            !v.is_some_and(super::super::field::visibility::VisibilityField::is_all_empty)
+                || forced.contains(&pos.0)
+        })
         .map(|(e, _, _)| MainEntity::from(e))
         .collect();
     let stale: Vec<MainEntity> = arena_set
@@ -822,12 +924,12 @@ pub fn release_despawned_chunks(
 #[cfg(test)]
 mod tests {
     use super::count_active_cells;
-    use crate::{VoxelDataSlice, field::SDF};
+    use crate::{VoxelDataSlice, field::SDF, field::flatten_cube, num::usize_from};
 
-    fn volume(n: usize, inside: &[(usize, usize, usize)]) -> Vec<u8> {
-        let mut v = vec![1.0f32; n * n * n];
+    fn volume(n: u32, inside: &[(u32, u32, u32)]) -> Vec<u8> {
+        let mut v = vec![1.0f32; usize_from(n).pow(3)];
         for &(x, y, z) in inside {
-            v[(z * n + y) * n + x] = -1.0;
+            v[flatten_cube(x, y, z, n)] = -1.0;
         }
         SDF::gpu_bytes(&v)
     }
@@ -880,16 +982,15 @@ pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelC
             let chunk_pos_of_slot = arena.chunk_pos_of_slot.clone();
             buf.clone().slice(..).map_async(MapMode::Read, move |result| {
                 if result.is_ok() {
-                    let v: [u32; 4] = {
-                        let Ok(data) = buf.slice(..).get_mapped_range() else {
-                            buf.unmap();
-                            return;
-                        };
-                        *bytemuck::from_bytes(&data[..16])
-                    };
+                    // The view must be dropped before `unmap`; it is, at the
+                    // end of this statement.
+                    let v = buf.slice(..).get_mapped_range().ok().and_then(|data| {
+                        let bytes = data.get(..16)?;
+                        bytemuck::try_pod_read_unaligned::<[u32; 4]>(bytes).ok()
+                    });
                     buf.unmap();
-                    if v[0] != 0 {
-                        let pos = chunk_pos_of_slot.get(v[1] as usize).copied().flatten();
+                    if let Some(v) = v.filter(|v| v[0] != 0) {
+                        let pos = chunk_pos_of_slot.get(usize_from(v[1])).copied().flatten();
                         warn!(
                             "[guard] LOD rank {rank} arena {arena_idx}: {} chunk(s) skipped; last slot {} at {:?}: gpu_count {} > cpu_count {}",
                             v[0], v[1], pos, v[2], v[3]

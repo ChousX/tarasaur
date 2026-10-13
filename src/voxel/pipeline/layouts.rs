@@ -1,11 +1,13 @@
 use std::num::NonZeroU64;
 
-use bevy::render::render_resource::*;
+use bevy::render::render_resource::{
+    BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages,
+};
 
 use crate::LOD;
 
 /// A read-write or read-only storage buffer binding, bound to `ShaderStages`.
-pub fn storage_buffer_entry(
+pub const fn storage_buffer_entry(
     binding: u32,
     visibility: ShaderStages,
     read_only: bool,
@@ -25,7 +27,7 @@ pub fn storage_buffer_entry(
 /// A uniform buffer binding. Pass `min_binding_size` when the shader
 /// requires a guaranteed minimum size (e.g. a fixed-size struct binding
 /// shared across draw calls); otherwise pass `None`.
-pub fn uniform_buffer_entry(
+pub const fn uniform_buffer_entry(
     binding: u32,
     visibility: ShaderStages,
     min_binding_size: Option<NonZeroU64>,
@@ -72,9 +74,9 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
 
 /// Binding layout for `surface_nets_pass3`. Back to 12 entries — visibility
 /// is no longer sampled here. Pass3 only needs to know *which slot* each
-/// vertex belongs to (packed into the vertex itself, see pack_material_b in
+/// vertex belongs to (packed into the vertex itself, see `pack_material_b` in
 /// the shader); the actual visibility test now happens per-fragment in
-/// voxel_raster.wesl against raster_chunk_visibility_entries() below.
+/// `voxel_raster.wesl` against `raster_chunk_visibility_entries()` below.
 pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: snorm16, 2 voxels per u32
@@ -103,9 +105,9 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
 /// (material). All FRAGMENT-only: the vertex stage doesn't need any of
 /// this, it only carries `real_slot` through as a packed flat attribute.
 ///
-/// Binding 3 reuses the same BatchUniforms layout as pass3's own uniform
-/// (cell_count, texture_size, wg_per_chunk_z, voxel_size) — only
-/// texture_size/voxel_size are read here, but no reason to duplicate the
+/// Binding 3 reuses the same `BatchUniforms` layout as pass3's own uniform
+/// (`cell_count`, `texture_size`, `wg_per_chunk_z`, `voxel_size`) — only
+/// `texture_size/voxel_size` are read here, but no reason to duplicate the
 /// buffer when pass3's `batch_uniform_buffer_pass3` already holds the
 /// right values for this arena and never changes after arena creation.
 pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
@@ -119,7 +121,7 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
 }
 
 /// Binding layout for the cursor/raycast query pass (`cursor_query.wgsl`).
-/// Binding 1 (hits) is read_write since the shader writes results in
+/// Binding 1 (hits) is `read_write` since the shader writes results in
 /// place. Everything else is read-only from the shader's perspective.
 pub fn query_entries() -> Vec<BindGroupLayoutEntry> {
     let mut entries = vec![
@@ -128,10 +130,14 @@ pub fn query_entries() -> Vec<BindGroupLayoutEntry> {
         uniform_buffer_entry(2, ShaderStages::COMPUTE, NonZeroU64::new(80)), // QueryUniforms, grew
         storage_buffer_entry(3, ShaderStages::COMPUTE, true), // merged chunk_lookup
     ];
-    for lod_rank in 0..LOD::COUNT as u32 {
-        let base = 4 + lod_rank * 2;
+    // Bindings 4, 5 for LOD rank 0; 6, 7 for rank 1; ...
+    for base in (4u32..).step_by(2).take(LOD::COUNT) {
         entries.push(storage_buffer_entry(base, ShaderStages::COMPUTE, true)); // sdf_buffer[lod]
-        entries.push(storage_buffer_entry(base + 1, ShaderStages::COMPUTE, true)); // chunk_meta[lod]
+        entries.push(storage_buffer_entry(
+            base.wrapping_add(1),
+            ShaderStages::COMPUTE,
+            true,
+        )); // chunk_meta[lod]
     }
     entries
 }

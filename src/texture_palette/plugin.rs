@@ -1,4 +1,4 @@
-//! Registers TexturePalette asset support and extracts the app's active
+//! Registers `TexturePalette` asset support and extracts the app's active
 //! palette (if any) into the render world each frame.
 
 use bevy::asset::Assets;
@@ -8,7 +8,9 @@ use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use super::asset::TexturePalette;
 use super::properties::PaletteMaterial;
 
-/// The end user's chosen palette. Insert this yourself — via
+/// The end user's chosen palette.
+///
+/// Insert this yourself — via
 /// `commands.insert_resource(ActivePalette(handle))` — whenever your
 /// palette handle becomes available. Commonly a Startup system, since
 /// palettes are usually built procedurally rather than known at
@@ -24,7 +26,8 @@ pub struct ActivePalette(pub Handle<TexturePalette>);
 pub struct PalettePlugin;
 
 impl PalettePlugin {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }

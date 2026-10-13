@@ -67,6 +67,7 @@ pub enum PaletteValidationError {
 }
 
 /// Check if a texture format is valid for sRGB albedo textures.
+#[must_use]
 pub fn is_valid_srgb_format(format: TextureFormat) -> bool {
     matches!(
         format,
@@ -86,6 +87,7 @@ pub fn is_valid_srgb_format(format: TextureFormat) -> bool {
 }
 
 /// Check if a texture format is valid for linear data textures (normal, ARM).
+#[must_use]
 pub fn is_valid_linear_format(format: TextureFormat) -> bool {
     matches!(
         format,
@@ -109,6 +111,10 @@ pub fn is_valid_linear_format(format: TextureFormat) -> bool {
 }
 
 /// Validate an albedo texture.
+///
+/// # Errors
+///
+/// If the texture is not an sRGB, power-of-two 2D array.
 pub fn validate_albedo(image: &Image) -> Result<(), PaletteValidationError> {
     // Check dimension
     if image.texture_descriptor.dimension != TextureDimension::D2 {
@@ -148,6 +154,11 @@ pub fn validate_albedo(image: &Image) -> Result<(), PaletteValidationError> {
 }
 
 /// Validate a linear texture (normal or ARM) against the albedo texture.
+///
+/// # Errors
+///
+/// If the texture is not a linear 2D array matching the albedo's layer
+/// count and size.
 pub fn validate_linear_texture(
     image: &Image,
     albedo: &Image,
@@ -167,11 +178,10 @@ pub fn validate_linear_texture(
             return Err(PaletteValidationError::InvalidNormalFormat {
                 found: image.texture_descriptor.format,
             });
-        } else {
-            return Err(PaletteValidationError::InvalidArmFormat {
-                found: image.texture_descriptor.format,
-            });
         }
+        return Err(PaletteValidationError::InvalidArmFormat {
+            found: image.texture_descriptor.format,
+        });
     }
 
     // Check layer count matches albedo
@@ -202,7 +212,11 @@ pub fn validate_linear_texture(
 }
 
 /// Validate material count against texture layers and maximum.
-pub fn validate_material_count(
+///
+/// # Errors
+///
+/// If there are more materials than `MAX_MATERIALS` or than texture layers.
+pub const fn validate_material_count(
     material_count: usize,
     layer_count: u32,
 ) -> Result<(), PaletteValidationError> {
@@ -213,7 +227,7 @@ pub fn validate_material_count(
         });
     }
 
-    if material_count > layer_count as usize {
+    if material_count > crate::num::usize_from(layer_count) {
         return Err(PaletteValidationError::TooManyMaterials {
             material_count,
             layer_count,

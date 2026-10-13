@@ -47,7 +47,7 @@ pub struct ShowChunkBounds;
 
 /// Written by `update_cursor_focus` from the resolved `CursorHit`. Only
 /// assign when the chunk actually changes so `is_changed` stays meaningful.
-#[derive(Resource, Default, PartialEq, Clone, Copy)]
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
 pub struct CursorFocusChunk(pub Option<IVec3>);
 
 /// Max spawns + LOD retargets applied per frame, nearest first.
@@ -65,9 +65,11 @@ pub struct ChunkManager {
 }
 
 impl ChunkManager {
+    #[must_use]
     pub fn get_chunk(&self, position: &IVec3) -> Option<Entity> {
         self.arena.get(position).copied()
     }
+    #[must_use]
     pub fn is_loaded(&self, position: &IVec3) -> bool {
         self.arena.contains_key(position)
     }
@@ -80,6 +82,7 @@ impl ChunkManager {
 }
 
 #[inline]
+#[must_use]
 pub fn world_pos_to_chunk_pos(world_position: &Vec3) -> IVec3 {
     (world_position / CHUNK_SIZE).floor().as_ivec3()
 }
@@ -105,8 +108,13 @@ pub fn overlapping_chunks(center: Vec3, half_extent: Vec3) -> impl Iterator<Item
 pub struct Chunk;
 
 fn on_add_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    let chunk_pos = world.get::<ChunkPosition>(entity).unwrap().0;
-    let mut chunk_manager = world.get_resource_mut::<ChunkManager>().unwrap();
+    // ChunkPosition is a required component; ChunkManager is added by ChunkPlugin.
+    let Some(&ChunkPosition(chunk_pos)) = world.get::<ChunkPosition>(entity) else {
+        return;
+    };
+    let Some(mut chunk_manager) = world.get_resource_mut::<ChunkManager>() else {
+        return;
+    };
     if chunk_manager.is_loaded(&chunk_pos) {
         warn!(
             "New chunk at pos:{} was not spawned, there was already a chunk there",
@@ -118,11 +126,12 @@ fn on_add_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContex
 }
 
 fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    let chunk_pos = world.get::<ChunkPosition>(entity).unwrap().0;
-    world
-        .get_resource_mut::<ChunkManager>()
-        .unwrap()
-        .remove_chunk(&chunk_pos);
+    let Some(&ChunkPosition(chunk_pos)) = world.get::<ChunkPosition>(entity) else {
+        return;
+    };
+    if let Some(mut chunk_manager) = world.get_resource_mut::<ChunkManager>() {
+        chunk_manager.remove_chunk(&chunk_pos);
+    }
 }
 
 #[derive(Component, Default, Deref, DerefMut)]
@@ -131,9 +140,14 @@ fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
 pub struct ChunkPosition(pub IVec3);
 
 fn on_add_chunk_pos(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    let chunk_pos = world.get::<ChunkPosition>(entity).unwrap();
+    let Some(chunk_pos) = world.get::<ChunkPosition>(entity) else {
+        return;
+    };
     let translation = chunk_pos.as_vec3() * CHUNK_SIZE;
-    world.get_mut::<Transform>(entity).unwrap().translation = translation;
+    // Transform is a required component of ChunkPosition.
+    if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+        transform.translation = translation;
+    }
 }
 
 #[derive(Event)]
@@ -165,10 +179,11 @@ fn new_chunk_spawned(
 #[derive(Default, Deref, DerefMut, Component)]
 pub struct CurrentChunk(pub IVec3);
 
-/// `lod_bands`: finest first; each width is ADDITIVE. Distance is Chebyshev,
-/// in chunks. `[(High,1),(Medium,1)]` => High for d<=1, Medium for d==2,
+/// `lod_bands`: finest first; each width is ADDITIVE.
+///
+/// Distance is Chebyshev, in chunks.`[(High,1),(Medium,1)]` => High for d<=1, Medium for d==2,
 /// nothing beyond. `hysteresis` extends both LOD downgrades and despawn: an
-/// existing chunk keeps its finer LOD until d > band_edge + hysteresis, and
+/// existing chunk keeps its finer LOD until d > `band_edge` + hysteresis, and
 /// is despawned only when d > total + hysteresis. Upgrades and new spawns
 /// use the plain edges.
 #[derive(Component, Clone, Debug)]
@@ -202,18 +217,19 @@ pub enum Want {
 }
 
 impl ChunkLoader {
+    #[must_use]
     pub fn total_range(&self) -> i32 {
-        self.lod_bands.iter().map(|b| b.1 as i32).sum()
+        self.lod_bands.iter().map(|b| i32::from(b.1)).sum()
     }
 
     /// `current` is `Some` for chunks that already exist.
     pub fn want(&self, d: i32, current: Option<LOD>) -> Want {
-        let h = self.hysteresis as i32;
+        let h = i32::from(self.hysteresis);
         let mut acc = 0i32;
         let mut ideal = None;
         let mut current_edge = None;
         for &(lod, w) in &self.lod_bands {
-            acc += w as i32;
+            acc = acc.saturating_add(i32::from(w));
             if ideal.is_none() && d <= acc {
                 ideal = Some(lod);
             }
@@ -229,7 +245,7 @@ impl ChunkLoader {
         let Some(cur) = current else {
             return ideal.map_or(Want::Drop, Want::Lod);
         };
-        if outside && d > acc + h {
+        if outside && d > acc.saturating_add(h) {
             return Want::Drop;
         }
         let ideal = ideal.unwrap_or(last);
@@ -244,15 +260,22 @@ impl ChunkLoader {
             return Want::Lod(cur);
         }
         match current_edge {
-            Some(e) if d <= e + h => Want::Lod(cur), // hysteresis: hold the finer LOD
+            Some(e) if d <= e.saturating_add(h) => Want::Lod(cur), // hysteresis: hold the finer LOD
             _ => Want::Lod(ideal),
         }
     }
 }
 
 fn on_add_chunk_loader(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    let chunk_pos = world.get::<GlobalTransform>(entity).unwrap().translation();
-    world.get_mut::<CurrentChunk>(entity).unwrap().0 = world_pos_to_chunk_pos(&chunk_pos);
+    let Some(chunk_pos) = world
+        .get::<GlobalTransform>(entity)
+        .map(GlobalTransform::translation)
+    else {
+        return;
+    };
+    if let Some(mut current) = world.get_mut::<CurrentChunk>(entity) {
+        current.0 = world_pos_to_chunk_pos(&chunk_pos);
+    }
 }
 
 fn chunk_loader_boundry_checker(
@@ -266,12 +289,25 @@ fn chunk_loader_boundry_checker(
     }
 }
 
+/// A loader that changed chunk or config.
+type LoaderMoved = Or<(Changed<CurrentChunk>, Changed<ChunkLoader>)>;
+
 fn loaders_dirty(
-    loaders: Query<(), Or<(Changed<CurrentChunk>, Changed<ChunkLoader>)>>,
+    loaders: Query<(), LoaderMoved>,
     focus: Res<CursorFocusChunk>,
     replan: Res<ReplanRequested>,
 ) -> bool {
     !loaders.is_empty() || focus.is_changed() || replan.0
+}
+
+/// Chebyshev distance in chunks, saturating at `i32::MAX`.
+pub(crate) fn chebyshev(a: IVec3, b: IVec3) -> i32 {
+    let d = a.saturating_sub(b);
+    let max =
+        d.x.unsigned_abs()
+            .max(d.y.unsigned_abs())
+            .max(d.z.unsigned_abs());
+    i32::try_from(max).unwrap_or(i32::MAX)
 }
 
 fn effective_distance(
@@ -280,11 +316,14 @@ fn effective_distance(
     loader: &ChunkLoader,
     focus: Option<IVec3>,
 ) -> i32 {
-    let d = (pos - center).abs().max_element();
+    let d = chebyshev(pos, center);
     if let Some(f) = focus {
-        let fd = (pos - f).abs().max_element();
+        let fd = chebyshev(pos, f);
         // Focus only promotes chunks that are already in this loader's range.
-        if fd <= FOCUS_RADIUS && d <= loader.total_range() + loader.hysteresis as i32 {
+        let range = loader
+            .total_range()
+            .saturating_add(i32::from(loader.hysteresis));
+        if fd <= FOCUS_RADIUS && d <= range {
             return d.min(fd);
         }
     }
@@ -346,7 +385,7 @@ fn plan_chunk_ops(
             None if keep => {}
             None => {
                 commands.queue(move |world: &mut World| {
-                    crate::persistence::flush_and_despawn(world, entity)
+                    crate::persistence::flush_and_despawn(world, entity);
                 });
             }
         }
@@ -356,10 +395,10 @@ fn plan_chunk_ops(
     let mut spawns: HashMap<IVec3, (i32, LOD)> = HashMap::default();
     for (loader, center) in &loaders {
         let r = loader.total_range();
-        for dz in -r..=r {
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    let p = center.0 + ivec3(dx, dy, dz);
+        for dz in r.saturating_neg()..=r {
+            for dy in r.saturating_neg()..=r {
+                for dx in r.saturating_neg()..=r {
+                    let p = center.0.saturating_add(ivec3(dx, dy, dz));
                     if chunk_manager.is_loaded(&p) {
                         continue;
                     }
@@ -475,10 +514,11 @@ pub fn expire_edit_pins(
     }
 }
 
+/// Keeps `CursorFocusChunk` pointing at the chunk under the cursor.
+///
 /// Backend-agnostic: reads the resolved `CursorHit` (CPU, GPU or Auto, see
-/// `CursorQueryMode`) and keeps `CursorFocusChunk` pointing at the chunk
-/// under the cursor. Sticky: the focus only moves once the hit leaves the
-/// current FOCUS_RADIUS window, and a miss keeps the last focus. Otherwise a
+/// `CursorQueryMode`). Sticky: the focus only moves once the hit leaves the
+/// current `FOCUS_RADIUS` window, and a miss keeps the last focus. Otherwise a
 /// LOD upgrade that nudges the hit into the next chunk (or a grazing ray
 /// flickering between hit and miss) replans and reloads every frame.
 pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChunk>) {
@@ -487,9 +527,7 @@ pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChu
     };
     // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
     let new = world_pos_to_chunk_pos(&(h.pos - h.normal * 0.05));
-    let inside_window = focus
-        .0
-        .is_some_and(|f| (new - f).abs().max_element() <= FOCUS_RADIUS);
+    let inside_window = focus.0.is_some_and(|f| chebyshev(new, f) <= FOCUS_RADIUS);
     if !inside_window {
         focus.0 = Some(new);
     } // assign only on change, so is_changed stays meaningful

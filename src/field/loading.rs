@@ -6,12 +6,13 @@ use bevy::{
 };
 
 use super::generator::ChunkGeneratorRegistry;
-use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin};
+use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin, chebyshev};
 use crate::persistence::{
     ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, SaveCache, build_if_dirty,
     commit_save, read_save,
 };
 use crate::{LOD, MaxEditLod, TargetLOD};
+use bevy::ecs::system::SystemParam;
 
 /// In flight while data for `lod` is being produced off-thread. Its
 /// presence also blocks edits (see `EditableChunks`).
@@ -51,52 +52,71 @@ fn make_task(
     cache: SaveCache,
 ) -> Task<Vec<FieldSavePayload>> {
     AsyncComputeTaskPool::get().spawn(async move {
-        if let Some(save) = read_save(&cache, pos) {
-            if save.header.lod >= lod {
-                return save
-                    .fields
-                    .iter()
-                    .filter_map(|p| {
-                        let vt = registry
-                            .fields
-                            .iter()
-                            .find(|f| f.type_id == p.field_type_id)?;
-                        Some(FieldSavePayload {
-                            field_type_id: p.field_type_id.clone(),
-                            bytes: (vt.downsample)(&p.bytes, save.header.lod, lod),
-                        })
+        if let Some(save) = read_save(&cache, pos)
+            && save.header.lod >= lod
+        {
+            return save
+                .fields
+                .iter()
+                .filter_map(|p| {
+                    let vt = registry
+                        .fields
+                        .iter()
+                        .find(|f| f.type_id == p.field_type_id)?;
+                    Some(FieldSavePayload {
+                        field_type_id: p.field_type_id.clone(),
+                        bytes: (vt.downsample)(&p.bytes, save.header.lod, lod),
                     })
-                    .collect();
-            }
+                })
+                .collect();
         }
         generators.generate_all(pos, lod)
     })
 }
 
+/// A chunk that may need a load: (entity, position, target, current LOD,
+/// reinit in flight, SDF dirty, edit-pinned).
+type LoadCandidate = (
+    Entity,
+    &'static ChunkPosition,
+    &'static TargetLOD,
+    Option<&'static LOD>,
+    Has<SdfReinitTask>,
+    Has<DirtyField<SDF, f32>>,
+    Has<EditPin>,
+);
+
+/// Where a load gets its data: saves first, then the generators.
+#[derive(SystemParam)]
+pub struct LoadSources<'w> {
+    generators: Res<'w, ChunkGeneratorRegistry>,
+    registry: Res<'w, ChunkPersistenceRegistry>,
+    cache: Res<'w, SaveCache>,
+}
+
+/// How many more loads may start this frame.
+#[derive(SystemParam)]
+pub struct LoadSlots<'w, 's> {
+    in_flight: Query<'w, 's, (), With<ChunkDataTask>>,
+    cap: Res<'w, MaxInFlightLoads>,
+}
+
+impl LoadSlots<'_, '_> {
+    fn free(&self) -> usize {
+        self.cap.0.saturating_sub(self.in_flight.iter().count())
+    }
+}
+
 pub fn start_chunk_loads(
     world: &World,
-    chunks: Query<
-        (
-            Entity,
-            &ChunkPosition,
-            &TargetLOD,
-            Option<&LOD>,
-            Has<SdfReinitTask>,
-            Has<DirtyField<SDF, f32>>,
-            Has<EditPin>,
-        ),
-        (With<Chunk>, Without<ChunkDataTask>),
-    >,
+    chunks: Query<LoadCandidate, (With<Chunk>, Without<ChunkDataTask>)>,
     loaders: Query<&CurrentChunk, With<ChunkLoader>>,
-    in_flight: Query<(), With<ChunkDataTask>>,
-    cap: Res<MaxInFlightLoads>,
+    slots: LoadSlots,
     max: Res<MaxEditLod>,
-    generators: Res<ChunkGeneratorRegistry>,
-    registry: Res<ChunkPersistenceRegistry>,
-    cache: Res<SaveCache>,
+    sources: LoadSources,
     mut commands: Commands,
 ) {
-    let mut slots = cap.0.saturating_sub(in_flight.iter().count());
+    let mut slots = slots.free();
     if slots == 0 {
         return;
     }
@@ -110,7 +130,7 @@ pub fn start_chunk_loads(
             let pinned = item.6;
             let dist = loaders
                 .iter()
-                .map(|c| (pos - c.0).abs().max_element())
+                .map(|c| chebyshev(pos, c.0))
                 .min()
                 .unwrap_or(0);
             (if pinned { -1 } else { dist }, item)
@@ -127,20 +147,20 @@ pub fn start_chunk_loads(
                 continue;
             } // let JFA finish so the save has real distances
             if let Some((data, _)) = build_if_dirty(world, entity) {
-                commit_save(&cache, data);
+                commit_save(&sources.cache, data);
             }
         }
         commands.entity(entity).insert(ChunkDataTask {
             task: make_task(
                 pos.0,
                 target.0,
-                (*generators).clone(),
-                (*registry).clone(),
-                (*cache).clone(),
+                (*sources.generators).clone(),
+                (*sources.registry).clone(),
+                (*sources.cache).clone(),
             ),
             lod: target.0,
         });
-        slots -= 1;
+        slots = slots.saturating_sub(1);
     }
 }
 
@@ -164,7 +184,7 @@ pub fn resolve_chunk_data_tasks(
 
 /// Replaces every field and `LOD` in one command, so they never disagree.
 fn install_chunk(world: &mut World, entity: Entity, lod: LOD, payloads: Vec<FieldSavePayload>) {
-    if !world.get::<TargetLOD>(entity).is_some_and(|t| t.0 == lod) {
+    if world.get::<TargetLOD>(entity).is_none_or(|t| t.0 != lod) {
         if let Ok(mut em) = world.get_entity_mut(entity) {
             em.remove::<ChunkDataTask>();
         }

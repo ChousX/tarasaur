@@ -1,6 +1,9 @@
 use bevy::{
     prelude::*,
-    render::{render_resource::*, renderer::RenderDevice},
+    render::{
+        render_resource::{BindGroupEntry, Buffer, BufferDescriptor, BufferUsages},
+        renderer::RenderDevice,
+    },
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -49,6 +52,7 @@ impl CreateStorage for RenderDevice {
     }
 }
 
+#[must_use]
 pub fn entries<'a>(bufs: &[(u32, &'a Buffer)]) -> Vec<BindGroupEntry<'a>> {
     bufs.iter()
         .map(|&(binding, buf)| BindGroupEntry {

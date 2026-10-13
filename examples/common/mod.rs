@@ -6,6 +6,7 @@ use bevy::{
 };
 use tarasaur::{
     VoxelMaterial,
+    num::{f32_from_u32, i16_from_f32, u8_from_f32, usize_from},
     ops::{AccumulateExt, BlendExt},
     texture_palette::{PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette},
 };
@@ -29,8 +30,8 @@ pub fn fly_cam_system(
     for (mut transform, mut cam) in query.iter_mut() {
         if mouse_button.pressed(MouseButton::Right) {
             for ev in mouse_motion.read() {
-                cam.yaw -= ev.delta.x * cam.sensitivity;
-                cam.pitch -= ev.delta.y * cam.sensitivity;
+                cam.yaw = f32::mul_add(ev.delta.x, -cam.sensitivity, cam.yaw);
+                cam.pitch = f32::mul_add(ev.delta.y, -cam.sensitivity, cam.pitch);
                 cam.pitch = cam.pitch.clamp(-1.54, 1.54);
             }
             transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
@@ -76,19 +77,21 @@ impl VoxelMaterial for TerrainMaterial {
     const COUNT: u8 = 4;
 
     fn to_id(self) -> u8 {
-        self as u8
+        match self {
+            Self::Grass => 0,
+            Self::Stone => 1,
+            Self::Dirt => 2,
+            Self::Sand => 3,
+        }
     }
 
+    /// Ids past `COUNT` (never written by `to_id`) read as the default.
     fn from_id(id: u8) -> Self {
         match id {
-            0 => Self::Grass,
             1 => Self::Stone,
             2 => Self::Dirt,
             3 => Self::Sand,
-            _ => unreachable!(
-                "id {id} out of range for TerrainMaterial::COUNT = {}",
-                Self::COUNT
-            ),
+            _ => Self::Grass,
         }
     }
 }
@@ -122,10 +125,7 @@ pub fn setup_terrain_palette(
     mut images: ResMut<Assets<Image>>,
     mut palettes: ResMut<Assets<TexturePalette>>,
 ) {
-    let size = 64;
-    let layers = 4;
-    let bytes_per_pixel = 4;
-    let layer_size = (size * size * bytes_per_pixel) as usize;
+    let size: u32 = 64;
 
     let colors: [[u8; 3]; 4] = [
         [34, 139, 34],   // Forest Green
@@ -133,30 +133,29 @@ pub fn setup_terrain_palette(
         [112, 66, 20],   // Dirt Brown
         [225, 198, 153], // Sand Beige
     ];
+    let layers = u32::try_from(colors.len()).unwrap_or(u32::MAX);
 
-    let mut albedo_data = vec![0u8; layer_size * layers as usize];
-    let mut normal_data = vec![0u8; layer_size * layers as usize];
+    // RGBA8, layer-major then row-major, as `Image::new` expects.
+    let bytes = usize_from(size)
+        .pow(2)
+        .saturating_mul(4)
+        .saturating_mul(colors.len());
+    let mut albedo_data = Vec::with_capacity(bytes);
+    let mut normal_data = Vec::with_capacity(bytes);
 
-    for layer in 0..layers as usize {
-        let layer_offset = layer * layer_size;
-        let base_col = colors[layer];
-
+    for (seed, base_col) in (1u32..).zip(colors) {
         for y in 0..size {
             for x in 0..size {
-                let pixel_offset = layer_offset + ((y * size + x) * bytes_per_pixel) as usize;
+                let noise = hash2(x.cast_signed(), y.cast_signed(), seed);
+                let var = i16_from_f32(noise.mul_add(30.0, -15.0));
+                let tint = |c: u8| {
+                    let v = i16::from(c).saturating_add(var).clamp(0, 255);
+                    u8::try_from(v).unwrap_or(u8::MAX)
+                };
+                albedo_data.extend([tint(base_col[0]), tint(base_col[1]), tint(base_col[2]), 255]);
 
-                let noise = hash2(x as i32, y as i32, (layer + 1) as u32);
-                let var = (noise * 30.0 - 15.0) as i16;
-
-                albedo_data[pixel_offset] = (base_col[0] as i16 + var).clamp(0, 255) as u8;
-                albedo_data[pixel_offset + 1] = (base_col[1] as i16 + var).clamp(0, 255) as u8;
-                albedo_data[pixel_offset + 2] = (base_col[2] as i16 + var).clamp(0, 255) as u8;
-                albedo_data[pixel_offset + 3] = 255;
-
-                normal_data[pixel_offset] = (128.0 + (noise - 0.5) * 40.0) as u8;
-                normal_data[pixel_offset + 1] = (128.0 + (noise - 0.5) * 40.0) as u8;
-                normal_data[pixel_offset + 2] = 255;
-                normal_data[pixel_offset + 3] = 255;
+                let n = u8_from_f32((noise - 0.5).mul_add(40.0, 128.0));
+                normal_data.extend([n, n, 255, 255]);
             }
         }
     }
@@ -186,8 +185,7 @@ pub fn setup_terrain_palette(
     let albedo_handle = images.add(albedo_image);
     let normal_handle = images.add(normal_image);
 
-    let palette = PaletteBuilder::new()
-        .with_albedo(albedo_handle)
+    let palette = PaletteBuilder::new(albedo_handle)
         .with_normal(normal_handle)
         .add_material(
             PaletteMaterial::new("grass")
@@ -220,7 +218,7 @@ pub fn terrain_height(x: f32, z: f32) -> f32 {
     let mut amp = 6.0;
     let mut freq = 0.03;
     for _ in 0..4 {
-        h += (x * freq).sin() * (z * freq * 1.3).cos() * amp;
+        h = ((x * freq).sin() * (z * freq * 1.3).cos()).mul_add(amp, h);
         amp *= 0.5;
         freq *= 2.1;
     }
@@ -228,13 +226,13 @@ pub fn terrain_height(x: f32, z: f32) -> f32 {
 }
 
 pub fn hash2(x: i32, z: i32, seed: u32) -> f32 {
-    let mut h = (x as u32).wrapping_mul(374761393)
-        ^ (z as u32).wrapping_mul(668265263)
-        ^ seed.wrapping_mul(2246822519);
+    let mut h = x.cast_unsigned().wrapping_mul(374_761_393)
+        ^ z.cast_unsigned().wrapping_mul(668_265_263)
+        ^ seed.wrapping_mul(2_246_822_519);
     h ^= h >> 15;
-    h = h.wrapping_mul(2246822519);
+    h = h.wrapping_mul(2_246_822_519);
     h ^= h >> 13;
-    h = h.wrapping_mul(3266489917);
+    h = h.wrapping_mul(3_266_489_917);
     h ^= h >> 16;
-    (h as f32) / (u32::MAX as f32)
+    f32_from_u32(h) / f32_from_u32(u32::MAX)
 }

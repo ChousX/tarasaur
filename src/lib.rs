@@ -2,6 +2,7 @@
 
 pub mod chunk;
 pub mod field;
+pub mod num;
 mod plugin;
 pub mod prelude;
 pub mod texture_palette;

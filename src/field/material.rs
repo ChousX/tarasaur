@@ -24,6 +24,7 @@ impl<M: VoxelMaterial> Default for MaterialField<M> {
 }
 
 impl<M: VoxelMaterial> MaterialField<M> {
+    #[must_use]
     pub fn new(lod: LOD) -> Self {
         Self::from_raw(lod, vec![M::default().to_id(); lod.volume()])
     }
@@ -35,15 +36,19 @@ impl<M: VoxelMaterial> Field<M> for MaterialField<M> {
     }
 
     fn get(&self, x: u32, y: u32, z: u32) -> M {
-        M::from_id(self.data[flatten_with_size(x, y, z, self.size()) as usize])
+        self.data
+            .get(flatten_with_size(x, y, z, self.size()))
+            .map_or_else(M::default, |&id| M::from_id(id))
     }
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: M) {
-        let idx = flatten_with_size(x, y, z, self.size()) as usize;
+        let idx = flatten_with_size(x, y, z, self.size());
         let id = value.to_id();
-        if self.data[idx] != id {
-            self.data[idx] = id;
-            self.version += 1;
+        if let Some(slot) = self.data.get_mut(idx)
+            && *slot != id
+        {
+            *slot = id;
+            self.version = self.version.wrapping_add(1);
         }
     }
 }

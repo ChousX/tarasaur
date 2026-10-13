@@ -1,0 +1,19 @@
+# Float vector/matrix math cannot overflow or panic; the lint only flags it
+# because glam's types aren't primitives. Integer vectors (IVec3, UVec3, ...)
+# are intentionally left out: their ops panic on overflow in debug builds.
+# Names must be the path rustc prints for the type, which goes through bevy.
+arithmetic-side-effects-allowed = [
+    "bevy::bevy_math::Vec2",
+    "bevy::bevy_math::Vec3",
+    "bevy::bevy_math::Vec3A",
+    "bevy::bevy_math::Vec4",
+    "bevy::bevy_math::Quat",
+    "bevy::bevy_math::Mat3",
+    "bevy::bevy_math::Mat4",
+]
+
+# A panicking test is a failing test, which is the point of an assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true

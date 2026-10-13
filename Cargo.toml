@@ -23,6 +23,8 @@ opt-level = 3
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
+# Bevy system params (Res, Query, Extract, On, ...) must be taken by value.
+needless_pass_by_value = "allow"
 # DENY PANICS:
 unwrap_used = "deny"
 expect_used = "deny"

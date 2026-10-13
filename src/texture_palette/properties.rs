@@ -64,25 +64,29 @@ impl PaletteMaterial {
     }
 
     /// Set the texture scale.
-    pub fn with_texture_scale(mut self, scale: f32) -> Self {
+    #[must_use]
+    pub const fn with_texture_scale(mut self, scale: f32) -> Self {
         self.texture_scale = scale;
         self
     }
 
     /// Set the blend sharpness.
-    pub fn with_blend_sharpness(mut self, sharpness: f32) -> Self {
+    #[must_use]
+    pub const fn with_blend_sharpness(mut self, sharpness: f32) -> Self {
         self.blend_sharpness = sharpness;
         self
     }
 
     /// Set an optional roughness override.
-    pub fn with_roughness(mut self, roughness: f32) -> Self {
+    #[must_use]
+    pub const fn with_roughness(mut self, roughness: f32) -> Self {
         self.roughness_override = Some(roughness);
         self
     }
 
     /// Set an optional metallic override.
-    pub fn with_metallic(mut self, metallic: f32) -> Self {
+    #[must_use]
+    pub const fn with_metallic(mut self, metallic: f32) -> Self {
         self.metallic_override = Some(metallic);
         self
     }
@@ -121,11 +125,12 @@ impl From<&PaletteMaterial> for MaterialPropertiesGpu {
 /// Maximum number of materials supported in a single palette.
 ///
 /// This limit exists because we use a uniform buffer for material properties.
-pub const MAX_MATERIALS: usize = u8::MAX as usize;
+/// Equal to `u8::MAX`: material ids are stored as `u8`.
+pub const MAX_MATERIALS: usize = 255;
 
 /// GPU-side array of all material properties.
 ///
-/// Padded to MAX_MATERIALS for uniform buffer alignment.
+/// Padded to `MAX_MATERIALS` for uniform buffer alignment.
 #[derive(Clone, Debug, ShaderType)]
 pub struct MaterialPropertiesArray {
     #[shader(size(runtime))]
@@ -198,8 +203,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Too many materials")]
     fn test_too_many_materials() {
-        let materials: Vec<PaletteMaterial> = (0..MAX_MATERIALS + 1)
-            .map(|i| PaletteMaterial::new(format!("mat_{}", i)))
+        let materials: Vec<PaletteMaterial> = (0..=MAX_MATERIALS)
+            .map(|i| PaletteMaterial::new(format!("mat_{i}")))
             .collect();
 
         MaterialPropertiesArray::from_materials(&materials);

@@ -12,14 +12,14 @@ use tarasaur::{
     Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::editor::WorldEditor,
+    num::{f32_from_i32, f32_from_u32, i32_from_f32},
 };
 
 const GRID_RADIUS: i32 = 10; // chunks from -1..=1 on x and z -> 3x3 = 9 chunks
 const LOD_USED: LOD = LOD::Medium;
 
-fn chunk_count() -> i32 {
-    (2 * GRID_RADIUS + 1).pow(2)
-}
+/// A (2r+1)^2 grid, one chunk tall.
+const CHUNK_COUNT: i32 = (2 * GRID_RADIUS + 1).pow(2);
 
 #[derive(Resource, Default)]
 struct TerrainReady(bool);
@@ -34,20 +34,17 @@ struct FlyCam {
 
 fn main() {
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                    limits: WgpuLimits {
-                        max_buffer_size: 1024 * 1024 * 1024,
-                        max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                        ..default()
-                    }
-                    .into(),
+        .add_plugins(DefaultPlugins.set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                limits: WgpuLimits {
+                    max_buffer_size: 1024 * 1024 * 1024,
+                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
                     ..default()
-                })),
+                },
                 ..default()
-            }),
-        )
+            })),
+            ..default()
+        }))
         .add_plugins(TarasaurPlugin)
         .init_resource::<TerrainReady>()
         .add_systems(Startup, (spawn_camera_and_light, spawn_terrain_chunks))
@@ -104,8 +101,8 @@ fn fly_cam_system(
         // Rotate camera when Right Mouse Button is held
         if mouse_button.pressed(MouseButton::Right) {
             for ev in mouse_motion.read() {
-                fly_cam.yaw -= ev.delta.x * fly_cam.sensitivity;
-                fly_cam.pitch -= ev.delta.y * fly_cam.sensitivity;
+                fly_cam.yaw = f32::mul_add(ev.delta.x, -fly_cam.sensitivity, fly_cam.yaw);
+                fly_cam.pitch = f32::mul_add(ev.delta.y, -fly_cam.sensitivity, fly_cam.pitch);
                 fly_cam.pitch = fly_cam.pitch.clamp(-1.54, 1.54);
             }
             transform.rotation = Quat::from_euler(EulerRot::YXZ, fly_cam.yaw, fly_cam.pitch, 0.0);
@@ -155,42 +152,43 @@ fn spawn_terrain_chunks(mut commands: Commands) {
             commands.spawn((Chunk, ChunkPosition(IVec3::new(x, 0, z)), LOD_USED));
         }
     }
-    info!("[terrain_test] spawned {} chunks", chunk_count());
+    info!("[terrain_test] spawned {} chunks", CHUNK_COUNT);
 }
 
 // --- Self-contained value noise (deterministic, no external deps) ---
 
 fn hash2(x: i32, z: i32, seed: u32) -> f32 {
-    let mut h = (x as u32).wrapping_mul(374761393)
-        ^ (z as u32).wrapping_mul(668265263)
-        ^ seed.wrapping_mul(2246822519);
+    let mut h = x.cast_unsigned().wrapping_mul(374_761_393)
+        ^ z.cast_unsigned().wrapping_mul(668_265_263)
+        ^ seed.wrapping_mul(2_246_822_519);
     h ^= h >> 15;
-    h = h.wrapping_mul(2246822519);
+    h = h.wrapping_mul(2_246_822_519);
     h ^= h >> 13;
-    h = h.wrapping_mul(3266489917);
+    h = h.wrapping_mul(3_266_489_917);
     h ^= h >> 16;
-    (h as f32) / (u32::MAX as f32)
+    f32_from_u32(h) / f32_from_u32(u32::MAX)
 }
 
 #[inline]
 fn smoothstep(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
+    t * t * 2.0f32.mul_add(-t, 3.0)
 }
 
 fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
-    let x0 = x.floor() as i32;
-    let z0 = z.floor() as i32;
-    let tx = smoothstep(x - x0 as f32);
-    let tz = smoothstep(z - z0 as f32);
+    let x0 = i32_from_f32(x.floor());
+    let z0 = i32_from_f32(z.floor());
+    let tx = smoothstep(x - f32_from_i32(x0));
+    let tz = smoothstep(z - f32_from_i32(z0));
+    let (x1, z1) = (x0.wrapping_add(1), z0.wrapping_add(1));
 
     let v00 = hash2(x0, z0, seed);
-    let v10 = hash2(x0 + 1, z0, seed);
-    let v01 = hash2(x0, z0 + 1, seed);
-    let v11 = hash2(x0 + 1, z0 + 1, seed);
+    let v10 = hash2(x1, z0, seed);
+    let v01 = hash2(x0, z1, seed);
+    let v11 = hash2(x1, z1, seed);
 
-    let a = v00 + (v10 - v00) * tx;
-    let b = v01 + (v11 - v01) * tx;
-    a + (b - a) * tz
+    let a = (v10 - v00).mul_add(tx, v00);
+    let b = (v11 - v01).mul_add(tx, v01);
+    (b - a).mul_add(tz, a)
 }
 
 fn fbm(x: f32, z: f32, octaves: u32, seed: u32) -> f32 {
@@ -199,7 +197,8 @@ fn fbm(x: f32, z: f32, octaves: u32, seed: u32) -> f32 {
     let mut sum = 0.0;
     let mut max = 0.0;
     for i in 0..octaves {
-        sum += value_noise(x * frequency, z * frequency, seed.wrapping_add(i)) * amplitude;
+        sum =
+            value_noise(x * frequency, z * frequency, seed.wrapping_add(i)).mul_add(amplitude, sum);
         max += amplitude;
         amplitude *= 0.5;
         frequency *= 2.0;
@@ -213,7 +212,7 @@ fn terrain_height(world_x: f32, world_z: f32) -> f32 {
     const NOISE_SCALE: f32 = 0.08;
 
     let n = fbm(world_x * NOISE_SCALE, world_z * NOISE_SCALE, 4, 1337);
-    BASE_HEIGHT + (n - 0.5) * 2.0 * AMPLITUDE
+    ((n - 0.5) * 2.0).mul_add(AMPLITUDE, BASE_HEIGHT)
 }
 
 // --- Generation ---
@@ -223,20 +222,20 @@ fn generate_terrain(
     mut ready: ResMut<TerrainReady>,
     mut query: Query<(&ChunkPosition, &mut SDF)>,
 ) {
-    if *generated || query.iter().count() as i32 != chunk_count() {
+    if *generated || i32::try_from(query.iter().count()).ok() != Some(CHUNK_COUNT) {
         return;
     }
     *generated = true;
 
     for (ChunkPosition(chunk_pos), mut sdf) in query.iter_mut() {
         let size = sdf.size();
-        let voxel_size = CHUNK_SIZE / size.x as f32;
+        let voxel_size = CHUNK_SIZE / f32_from_u32(size.x);
         let chunk_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
 
         for z in 0..size.z {
             for y in 0..size.y {
                 for x in 0..size.x {
-                    let world = chunk_origin + Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
+                    let world = chunk_origin + UVec3::new(x, y, z).as_vec3() * voxel_size;
                     let height = terrain_height(world.x, world.z);
                     let value = if world.y < height { -1.0 } else { 1.0 };
                     sdf.set(x, y, z, value);
@@ -250,7 +249,7 @@ fn generate_terrain(
     ready.0 = true;
     info!(
         "[terrain_test] terrain generated across all {} chunks",
-        chunk_count()
+        CHUNK_COUNT
     );
 }
 
@@ -281,7 +280,7 @@ fn verify_seam(
     let mut max_diff: f32 = 0.0;
     for z in 0..size.z {
         for y in 0..size.y {
-            let l = left.get(size.x - 1, y, z);
+            let l = left.get(size.x.saturating_sub(1), y, z);
             let r = right.get(0, y, z);
             max_diff = max_diff.max((l - r).abs());
         }
@@ -321,7 +320,7 @@ fn log_final_stats(
     if *logged || !ready.0 {
         return;
     }
-    *frame += 1;
+    *frame = frame.saturating_add(1);
     if *frame < 5 {
         return;
     }

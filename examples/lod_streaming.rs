@@ -16,20 +16,17 @@ use tarasaur::{
 fn main() {
     let mut app = App::new();
 
-    app.add_plugins(
-        DefaultPlugins.set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                limits: WgpuLimits {
-                    max_buffer_size: 1024 * 1024 * 1024,
-                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                    ..default()
-                }
-                .into(),
+    app.add_plugins(DefaultPlugins.set(RenderPlugin {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+            limits: WgpuLimits {
+                max_buffer_size: 1024 * 1024 * 1024,
+                max_storage_buffer_binding_size: 512 * 1024 * 1024,
                 ..default()
-            })),
+            },
             ..default()
-        }),
-    )
+        })),
+        ..default()
+    }))
     .add_plugins(TarasaurPlugin);
 
     app.add_systems(Update, debug_stages);
@@ -70,7 +67,7 @@ fn terrain_height(x: f32, z: f32) -> f32 {
     let mut amp = 6.0;
     let mut freq = 0.03;
     for _ in 0..4 {
-        h += (x * freq).sin() * (z * freq * 1.3).cos() * amp;
+        h = ((x * freq).sin() * (z * freq * 1.3).cos()).mul_add(amp, h);
         amp *= 0.5;
         freq *= 2.1;
     }
@@ -78,7 +75,7 @@ fn terrain_height(x: f32, z: f32) -> f32 {
 }
 
 /// Runs off the main thread inside a load task — no ECS access, pure
-/// function of chunk_pos + lod, exactly what ChunkGeneratorRegistry
+/// function of `chunk_pos` + lod, exactly what `ChunkGeneratorRegistry`
 /// requires. Produces a sign volume: negative below the terrain surface,
 /// positive above, in x/y/z-flattened order. `register_sdf` turns it into
 /// real distances with a jump-flood pass.
@@ -88,19 +85,19 @@ fn terrain_height(x: f32, z: f32) -> f32 {
 /// describes the same surface.
 fn terrain_sdf(chunk_pos: IVec3, lod: LOD) -> Vec<f32> {
     let size = lod.size();
-    let voxel_size = CHUNK_SIZE / size as f32;
+    let voxel_size = CHUNK_SIZE / tarasaur::num::f32_from_u32(size);
     let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
 
-    (0..lod.volume())
-        .map(|i| {
-            let i = i as u32;
-            let x = i % size;
-            let y = (i / size) % size;
-            let z = i / (size * size);
-            let world = origin + Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
-            world.y - terrain_height(world.x, world.z)
-        })
-        .collect()
+    let mut out = Vec::with_capacity(lod.volume());
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let world = origin + UVec3::new(x, y, z).as_vec3() * voxel_size;
+                out.push(world.y - terrain_height(world.x, world.z));
+            }
+        }
+    }
+    out
 }
 
 // ============================================================================
@@ -115,8 +112,8 @@ struct FlyCam {
     yaw: f32,
 }
 
-/// The cursor's world-space focus point — a separate ChunkLoader riding
-/// along on its own entity, see spawn_player_and_cursor_marker.
+/// The cursor's world-space focus point — a separate `ChunkLoader` riding
+/// along on its own entity, see `spawn_player_and_cursor_marker`.
 #[derive(Component)]
 struct CursorFocus;
 
@@ -189,8 +186,8 @@ fn fly_cam_system(
     for (mut transform, mut cam) in query.iter_mut() {
         if mouse_button.pressed(MouseButton::Right) {
             for ev in mouse_motion.read() {
-                cam.yaw -= ev.delta.x * cam.sensitivity;
-                cam.pitch -= ev.delta.y * cam.sensitivity;
+                cam.yaw = f32::mul_add(ev.delta.x, -cam.sensitivity, cam.yaw);
+                cam.pitch = f32::mul_add(ev.delta.y, -cam.sensitivity, cam.pitch);
                 cam.pitch = cam.pitch.clamp(-1.54, 1.54);
             }
             transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
@@ -224,7 +221,7 @@ fn fly_cam_system(
     }
 }
 
-/// Moves the cursor's ChunkLoader marker to the terrain under the mouse,
+/// Moves the cursor's `ChunkLoader` marker to the terrain under the mouse,
 /// using the library's resolved `CursorHit` (F8 cycles the backend). On a
 /// miss the marker stays where it last hit.
 fn update_cursor_marker(
@@ -237,25 +234,17 @@ fn update_cursor_marker(
     }
 }
 
-fn debug_stages(
-    chunks: Query<(Has<LOD>, Has<SDF>, Has<ChunkDataTask>), With<Chunk>>,
-    mut t: Local<f32>,
-    time: Res<Time>,
-) {
+/// (has a LOD, has an SDF, load in flight).
+type ChunkStage = (Has<LOD>, Has<SDF>, Has<ChunkDataTask>);
+
+fn debug_stages(chunks: Query<ChunkStage, With<Chunk>>, mut t: Local<f32>, time: Res<Time>) {
     *t += time.delta_secs();
     if *t < 2.0 {
         return;
     }
     *t = 0.0;
-    let (mut total, mut installed, mut loading) = (0, 0, 0);
-    for (l, s, d) in &chunks {
-        total += 1;
-        if l && s {
-            installed += 1;
-        }
-        if d {
-            loading += 1;
-        }
-    }
+    let total = chunks.iter().count();
+    let installed = chunks.iter().filter(|&(lod, sdf, _)| lod && sdf).count();
+    let loading = chunks.iter().filter(|&(_, _, task)| task).count();
     info!("[stages] chunks={total} installed={installed} loading={loading}");
 }

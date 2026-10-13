@@ -3,17 +3,18 @@ use std::collections::HashMap;
 
 /// Frames a lease survives after its last touch. Hysteresis stops chunks
 /// from thrashing between released and resident at the edge of reach.
-const LEASE_FRAMES: u32 = 120;
+const LEASE_FRAMES: u64 = 120;
 
 #[derive(Resource, Default)]
 pub struct ForceResident {
-    frame: u32,
-    until: HashMap<IVec3, u32>,
+    frame: u64, // 64 bits: never wraps, so `until > frame` stays valid
+    until: HashMap<IVec3, u64>,
 }
 
 impl ForceResident {
     pub fn touch(&mut self, pos: IVec3) {
-        self.until.insert(pos, self.frame + LEASE_FRAMES);
+        self.until
+            .insert(pos, self.frame.saturating_add(LEASE_FRAMES));
     }
 
     /// Lease every chunk overlapping the sphere (world space).
@@ -24,14 +25,15 @@ impl ForceResident {
     }
 
     #[inline]
+    #[must_use]
     pub fn contains(&self, pos: &IVec3) -> bool {
         self.until.get(pos).is_some_and(|&u| u > self.frame)
     }
 }
 
 pub fn tick_force_resident(mut r: ResMut<ForceResident>) {
-    r.frame += 1;
-    if r.frame % 64 == 0 {
+    r.frame = r.frame.saturating_add(1);
+    if r.frame.is_multiple_of(64) {
         let f = r.frame;
         r.until.retain(|_, &mut u| u > f);
     }

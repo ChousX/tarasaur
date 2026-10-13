@@ -11,8 +11,7 @@ use bevy::prelude::*;
 /// ```ignore
 /// use bevy_painter::palette::{PaletteBuilder, PaletteMaterial};
 ///
-/// let palette = PaletteBuilder::new()
-///     .with_albedo(asset_server.load("terrain/albedo.ktx2"))
+/// let palette = PaletteBuilder::new(asset_server.load("terrain/albedo.ktx2"))
 ///     .with_normal(asset_server.load("terrain/normal.ktx2"))
 ///     .with_arm(asset_server.load("terrain/arm.ktx2"))
 ///     .add_material(PaletteMaterial::new("grass").with_texture_scale(1.0))
@@ -20,9 +19,8 @@ use bevy::prelude::*;
 ///     .add_material(PaletteMaterial::new("dirt"))
 ///     .build();
 /// ```
-#[derive(Default)]
 pub struct PaletteBuilder {
-    albedo: Option<Handle<Image>>,
+    albedo: Handle<Image>,
     normal: Option<Handle<Image>>,
     arm: Option<Handle<Image>>,
     materials: Vec<PaletteMaterial>,
@@ -30,22 +28,23 @@ pub struct PaletteBuilder {
 }
 
 impl PaletteBuilder {
-    /// Create a new palette builder.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the albedo (base color) texture array.
-    ///
-    /// **Required.** The builder will panic on `build()` if this is not set.
-    pub fn with_albedo(mut self, albedo: Handle<Image>) -> Self {
-        self.albedo = Some(albedo);
-        self
+    /// Create a palette builder around its albedo (base color) texture
+    /// array, the one texture every palette needs.
+    #[must_use]
+    pub const fn new(albedo: Handle<Image>) -> Self {
+        Self {
+            albedo,
+            normal: None,
+            arm: None,
+            materials: Vec::new(),
+            generate_mipmaps: false,
+        }
     }
 
     /// Set the normal map texture array.
     ///
     /// Optional. Enables triplanar normal mapping when provided.
+    #[must_use]
     pub fn with_normal(mut self, normal: Handle<Image>) -> Self {
         self.normal = Some(normal);
         self
@@ -54,6 +53,7 @@ impl PaletteBuilder {
     /// Set the ARM (AO/Roughness/Metallic) texture array.
     ///
     /// Optional. Channel layout: R = AO, G = Roughness, B = Metallic.
+    #[must_use]
     pub fn with_arm(mut self, arm: Handle<Image>) -> Self {
         self.arm = Some(arm);
         self
@@ -62,18 +62,21 @@ impl PaletteBuilder {
     /// Add a material to the palette.
     ///
     /// Materials are added in order, corresponding to texture array layers.
+    #[must_use]
     pub fn add_material(mut self, material: PaletteMaterial) -> Self {
         self.materials.push(material);
         self
     }
 
     /// Add multiple materials at once.
+    #[must_use]
     pub fn add_materials(mut self, materials: impl IntoIterator<Item = PaletteMaterial>) -> Self {
         self.materials.extend(materials);
         self
     }
 
     /// Add a material with just a name, using default properties.
+    #[must_use]
     pub fn add_material_named(self, name: impl Into<String>) -> Self {
         self.add_material(PaletteMaterial::new(name))
     }
@@ -81,37 +84,22 @@ impl PaletteBuilder {
     /// Set whether to generate mipmaps for textures without them.
     ///
     /// Default: `false` (assumes pre-mipmapped KTX2 textures).
-    pub fn with_generate_mipmaps(mut self, generate: bool) -> Self {
+    #[must_use]
+    pub const fn with_generate_mipmaps(mut self, generate: bool) -> Self {
         self.generate_mipmaps = generate;
         self
     }
 
     /// Build the texture palette.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no albedo texture was provided.
+    #[must_use]
     pub fn build(self) -> TexturePalette {
         TexturePalette {
-            albedo: self.albedo.expect("Albedo texture is required"),
+            albedo: self.albedo,
             normal: self.normal,
             arm: self.arm,
             materials: self.materials,
             generate_mipmaps: self.generate_mipmaps,
         }
-    }
-
-    /// Try to build the texture palette.
-    ///
-    /// Returns `None` if no albedo texture was provided.
-    pub fn try_build(self) -> Option<TexturePalette> {
-        Some(TexturePalette {
-            albedo: self.albedo?,
-            normal: self.normal,
-            arm: self.arm,
-            materials: self.materials,
-            generate_mipmaps: self.generate_mipmaps,
-        })
     }
 }
 
@@ -119,10 +107,11 @@ impl PaletteBuilder {
 pub trait QuickPalette {
     /// Create a palette with just an albedo texture and auto-generated material names.
     ///
-    /// Material names will be "material_0", "material_1", etc.
+    /// Material names will be "`material_0`", "`material_1`", etc.
+    #[must_use]
     fn quick_palette(albedo: Handle<Image>, material_count: usize) -> TexturePalette {
         let materials = (0..material_count)
-            .map(|i| PaletteMaterial::new(format!("material_{}", i)))
+            .map(|i| PaletteMaterial::new(format!("material_{i}")))
             .collect();
 
         TexturePalette {
@@ -143,8 +132,7 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let palette = PaletteBuilder::new()
-            .with_albedo(Handle::default())
+        let palette = PaletteBuilder::new(Handle::default())
             .add_material_named("grass")
             .add_material_named("stone")
             .build();
@@ -156,8 +144,7 @@ mod tests {
 
     #[test]
     fn test_builder_full() {
-        let palette = PaletteBuilder::new()
-            .with_albedo(Handle::default())
+        let palette = PaletteBuilder::new(Handle::default())
             .with_normal(Handle::default())
             .with_arm(Handle::default())
             .add_material(PaletteMaterial::new("grass").with_texture_scale(2.0))
@@ -168,19 +155,6 @@ mod tests {
         assert!(palette.has_arm());
         assert!(palette.generate_mipmaps);
         assert_eq!(palette.materials[0].texture_scale, 2.0);
-    }
-
-    #[test]
-    #[should_panic(expected = "Albedo texture is required")]
-    fn test_builder_missing_albedo() {
-        PaletteBuilder::new().add_material_named("test").build();
-    }
-
-    #[test]
-    fn test_try_build_missing_albedo() {
-        let result = PaletteBuilder::new().add_material_named("test").try_build();
-
-        assert!(result.is_none());
     }
 
     #[test]

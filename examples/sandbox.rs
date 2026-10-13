@@ -19,26 +19,24 @@ use tarasaur::{
     chunk::{CHUNK_SIZE, ChunkLoader},
     editor::WorldEditor,
     field::{MaterialFieldPlugin, generator::ChunkGeneratorRegistry},
+    num::{f32_from_u32, usize_from},
     voxel::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
 };
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins.set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                features: WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT,
-                limits: WgpuLimits {
-                    max_buffer_size: 1024 * 1024 * 1024,
-                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                    ..default()
-                }
-                .into(),
+    app.add_plugins(DefaultPlugins.set(RenderPlugin {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+            features: WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT,
+            limits: WgpuLimits {
+                max_buffer_size: 1024 * 1024 * 1024,
+                max_storage_buffer_binding_size: 512 * 1024 * 1024,
                 ..default()
-            })),
+            },
             ..default()
-        }),
-    )
+        })),
+        ..default()
+    }))
     // TarasaurPlugin now includes PalettePlugin.
     .add_plugins(TarasaurPlugin)
     .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
@@ -86,18 +84,19 @@ struct Columns {
 impl Columns {
     fn new(chunk_pos: IVec3, lod: LOD) -> Self {
         let size = lod.size();
-        let voxel = CHUNK_SIZE / size as f32;
+        let voxel = CHUNK_SIZE / f32_from_u32(size);
         let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
-        let n = size as usize;
-        let (mut height, mut inv_norm) = (Vec::with_capacity(n * n), Vec::with_capacity(n * n));
+        let columns = usize_from(size).pow(2);
+        let (mut height, mut inv_norm) = (Vec::with_capacity(columns), Vec::with_capacity(columns));
         let e = 0.5;
-        for z in 0..n {
-            for x in 0..n {
-                let (wx, wz) = (origin.x + x as f32 * voxel, origin.z + z as f32 * voxel);
+        for z in 0..size {
+            for x in 0..size {
+                let wx = f32_from_u32(x).mul_add(voxel, origin.x);
+                let wz = f32_from_u32(z).mul_add(voxel, origin.z);
                 let gx = (terrain_height(wx + e, wz) - terrain_height(wx - e, wz)) / (2.0 * e);
                 let gz = (terrain_height(wx, wz + e) - terrain_height(wx, wz - e)) / (2.0 * e);
                 height.push(terrain_height(wx, wz));
-                inv_norm.push(1.0 / (1.0 + gx * gx + gz * gz).sqrt());
+                inv_norm.push(1.0 / gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt());
             }
         }
         Self {
@@ -109,17 +108,21 @@ impl Columns {
         }
     }
 
-    /// x-fastest, then y, then z ordering (matches the lod_streaming example
+    /// x-fastest, then y, then z ordering (matches the `lod_streaming` example
     /// and what the fields expect).
     fn fill<T>(&self, f: impl Fn(f32, f32, f32) -> T) -> Vec<T> {
-        let n = self.size as usize;
-        let mut out = Vec::with_capacity(n * n * n);
-        for z in 0..n {
-            for y in 0..n {
-                let wy = self.origin.y + y as f32 * self.voxel;
-                for x in 0..n {
-                    let c = z * n + x;
-                    out.push(f(wy, self.height[c], self.inv_norm[c]));
+        let n = usize_from(self.size);
+        let mut out = Vec::with_capacity(n.pow(3));
+        // Columns are stored z-major: one row of x per z.
+        let rows = self
+            .height
+            .chunks_exact(n)
+            .zip(self.inv_norm.chunks_exact(n));
+        for (heights, norms) in rows {
+            for y in 0..self.size {
+                let wy = f32_from_u32(y).mul_add(self.voxel, self.origin.y);
+                for (&h, &k) in heights.iter().zip(norms) {
+                    out.push(f(wy, h, k));
                 }
             }
         }
@@ -208,7 +211,7 @@ fn terrain_edit(
     mut gizmos: Gizmos,
 ) {
     for ev in wheel.read() {
-        brush.radius = (brush.radius + ev.y * 0.5).clamp(1.0, 20.0);
+        brush.radius = f32::mul_add(ev.y, 0.5, brush.radius).clamp(1.0, 20.0);
     }
 
     let Some(hit) = hit.0.map(|h| h.pos) else {

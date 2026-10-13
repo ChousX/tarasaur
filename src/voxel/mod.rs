@@ -50,8 +50,9 @@ pub const VOXEL_RASTER_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("3c4d5e6f-7081-92a3-b4c5-d6e7f8091a2b");
 pub const CURSOR_QUERY_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("5e6f7081-92a3-b4c5-d6e7-f8091a2b3c4d");
-/// Ordering inside `RenderSystems::Prepare`. Bevy runs `Queue` *before*
-/// `Prepare`, so the compute dispatch must not live in `Queue`: it would
+/// Ordering inside `RenderSystems::Prepare`.
+///
+/// Bevy runs `Queue` *before* `Prepare`, so the compute dispatch must not live in `Queue`: it would
 /// mesh last frame's uploads while this frame's upload had just reset the
 /// draw args, and a chunk updated every frame (a held brush) never drew.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]

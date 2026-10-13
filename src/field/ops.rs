@@ -1,14 +1,17 @@
-use super::{Field, *};
+use super::{Field, IVec3, UVec3, Vec3};
+use crate::num::u8_from_f32;
 
 use bevy::shape::{Cuboid, Sphere};
 
 /// Trait to handle adding small amounts or deltas to generic field values safely.
 pub trait AccumulateExt {
+    #[must_use]
     fn accumulate(self, delta: Self) -> Self;
 }
 
 /// Trait to handle linear blending (interpolation/falloff) between generic field values.
 pub trait BlendExt {
+    #[must_use]
     fn blend_towards(self, target: Self, factor: f32) -> Self;
 }
 
@@ -25,7 +28,7 @@ impl BlendExt for f32 {
     #[inline]
     fn blend_towards(self, target: Self, factor: f32) -> Self {
         // Standard linear interpolation (lerp)
-        self + (target - self) * factor.clamp(0.0, 1.0)
+        (target - self).mul_add(factor.clamp(0.0, 1.0), self)
     }
 }
 
@@ -41,9 +44,9 @@ impl BlendExt for u8 {
     #[inline]
     fn blend_towards(self, target: Self, factor: f32) -> Self {
         let f = factor.clamp(0.0, 1.0);
-        let start = self as f32;
-        let end = target as f32;
-        (start + (end - start) * f).round() as u8
+        let start = f32::from(self);
+        let end = f32::from(target);
+        u8_from_f32((end - start).mul_add(f, start).round())
     }
 }
 
@@ -64,8 +67,8 @@ impl BlendExt for bool {
 }
 
 /// Lets a field type be written directly from a signed-distance value —
-/// only meaningful for actual distance fields (f32), unlike AccumulateExt/
-/// BlendExt which apply to every field type.
+/// only meaningful for actual distance fields (f32), unlike `AccumulateExt`/
+/// `BlendExt` which apply to every field type.
 pub trait FromSignedDistance {
     fn from_signed_distance(distance: f32) -> Self;
 }
@@ -77,6 +80,15 @@ impl FromSignedDistance for f32 {
     }
 }
 
+/// An inclusive voxel range as unsigned coordinates, or `None` if it is
+/// empty or reaches below zero on any axis.
+fn grid_range(min: IVec3, max: IVec3) -> Option<(UVec3, UVec3)> {
+    if min.cmplt(IVec3::ZERO).any() || max.cmplt(min).any() {
+        return None;
+    }
+    Some((min.as_uvec3(), max.as_uvec3()))
+}
+
 /// Extension trait for fields that support spherical operations.
 pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// Applies an operation to all voxels within a sphere.
@@ -84,7 +96,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// # Arguments
     /// * `center` - Center of the sphere in grid coordinates
     /// * `shape` - The sphere primitive (radius) to apply
-    /// * `op` - Operation to apply: receives (current_value, distance_from_center) and returns new value
+    /// * `op` - Operation to apply: receives (`current_value`, `distance_from_center`) and returns new value
     fn apply_sphere<F>(&mut self, center: Vec3, shape: Sphere, mut op: F)
     where
         F: FnMut(T, f32) -> T,
@@ -99,16 +111,19 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         let max = (center + Vec3::splat(radius + 1.0))
             .min(max_bound)
             .as_ivec3();
+        let Some((min, max)) = grid_range(min, max) else {
+            return;
+        };
 
         for z in min.z..=max.z {
             for y in min.y..=max.y {
                 for x in min.x..=max.x {
-                    let pos = Vec3::new(x as f32, y as f32, z as f32);
+                    let pos = UVec3::new(x, y, z).as_vec3();
                     let dist = pos.distance(center);
                     if dist <= radius {
-                        let current = self.get(x as u32, y as u32, z as u32);
+                        let current = self.get(x, y, z);
                         let new_value = op(current, dist);
-                        self.set(x as u32, y as u32, z as u32, new_value);
+                        self.set(x, y, z, new_value);
                     }
                 }
             }
@@ -198,16 +213,17 @@ pub trait FieldBoxOps<T: Copy + Default>: Field<T> {
         let max_bound = (center + shape.half_size).as_ivec3();
 
         let size = self.size();
-        let limit = size.as_ivec3() - IVec3::ONE;
-        let min = min_bound.max(IVec3::ZERO);
-        let max = max_bound.min(limit);
+        let limit = size.as_ivec3().saturating_sub(IVec3::ONE);
+        let Some((min, max)) = grid_range(min_bound.max(IVec3::ZERO), max_bound.min(limit)) else {
+            return;
+        };
 
         for z in min.z..=max.z {
             for y in min.y..=max.y {
                 for x in min.x..=max.x {
-                    let current = self.get(x as u32, y as u32, z as u32);
+                    let current = self.get(x, y, z);
                     let new_value = op(current);
-                    self.set(x as u32, y as u32, z as u32, new_value);
+                    self.set(x, y, z, new_value);
                 }
             }
         }
@@ -242,6 +258,7 @@ impl<T: Copy + Default, F: Field<T> + ?Sized> FieldSphereOps<T> for F {}
 impl<T: Copy + Default, F: Field<T> + ?Sized> FieldBoxOps<T> for F {}
 
 /// Gives the world-space half-extent (bounding-box radius) of a brush shape.
+///
 /// Used to figure out which chunks a world-space edit could touch, without
 /// the caller having to know how the shape is represented.
 pub trait ShapeBounds {
@@ -262,18 +279,20 @@ impl ShapeBounds for Cuboid {
     }
 }
 
-/// Produces a copy of this shape scaled by `factor` — used to convert a
-/// world-space brush shape into voxel/grid space before it reaches
+/// Produces a copy of this shape scaled by `factor`.
+///
+/// Used to convert a world-space brush shape into voxel/grid space before it reaches
 /// `FieldSphereOps`/`FieldBoxOps`, which only ever operate on raw grid
 /// indices and know nothing about world units.
 pub trait ShapeScale: Sized {
+    #[must_use]
     fn scaled_by(&self, factor: f32) -> Self;
 }
 
 impl ShapeScale for Sphere {
     #[inline]
     fn scaled_by(&self, factor: f32) -> Self {
-        Sphere {
+        Self {
             radius: self.radius * factor,
         }
     }
@@ -282,7 +301,7 @@ impl ShapeScale for Sphere {
 impl ShapeScale for Cuboid {
     #[inline]
     fn scaled_by(&self, factor: f32) -> Self {
-        Cuboid {
+        Self {
             half_size: self.half_size * factor,
         }
     }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use bevy::{
     prelude::*,
     render::{
-        render_resource::*,
+        render_resource::{BindGroup, Buffer, BufferInitDescriptor, BufferUsages},
         renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
     },
@@ -12,6 +12,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::{
     LOD,
+    num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from},
     voxel::{
         types::{CreateStorage, DrawIndexedIndirectArgs, entries},
         util::{hash_chunk_pos, make_batch_uniform_buffer},
@@ -33,28 +34,41 @@ const SCRATCH_CELLS: u32 = 8 * 1024 * 1024;
 /// Indices emitted per active cell, worst case (3 quads x 6).
 pub const INDICES_PER_CELL: u32 = 18;
 
+/// Bytes per vertex in `final_vertex_buffer` (two `vec4<f32>`).
+const VERTEX_BYTES: u64 = 32;
+
+const STORAGE_DST: BufferUsages = BufferUsages::STORAGE.union(BufferUsages::COPY_DST);
+const STORAGE_SRC: BufferUsages = BufferUsages::STORAGE.union(BufferUsages::COPY_SRC);
+
 /// Largest chunk count that keeps every per-slot buffer (the SDF dominates)
-/// under the device's actual
-/// max_storage_buffer_binding_size, with a 10% safety margin.
+/// under the device's actual `max_storage_buffer_binding_size`, with a 10%
+/// safety margin.
 fn max_chunks(
     render_device: &RenderDevice,
     total_cells: u32,
     sdf_elems_per_chunk: u32,
     budget_cells_per_chunk: u32,
 ) -> u32 {
-    let limit = (render_device.limits().max_storage_buffer_binding_size as u64 * 9) / 10;
+    let limit = render_device
+        .limits()
+        .max_storage_buffer_binding_size
+        .saturating_mul(9)
+        / 10;
 
-    let sdf_bytes = sdf_elems_per_chunk as u64 * 2; // snorm16
-    let material_bytes = sdf_elems_per_chunk as u64;
-    let vertex_bytes = budget_cells_per_chunk as u64 * 32;
-    let index_bytes = budget_cells_per_chunk as u64 * INDICES_PER_CELL as u64 * 4;
+    let sdf_bytes = u64::from(sdf_elems_per_chunk).saturating_mul(2); // snorm16
+    let material_bytes = u64::from(sdf_elems_per_chunk);
+    let vertex_bytes = u64::from(budget_cells_per_chunk).saturating_mul(VERTEX_BYTES);
+    let index_bytes = u64::from(budget_cells_per_chunk)
+        .saturating_mul(u64::from(INDICES_PER_CELL))
+        .saturating_mul(4);
 
-    let worst_bytes_per_chunk = [sdf_bytes, material_bytes, vertex_bytes, index_bytes]
-        .into_iter()
-        .max()
-        .unwrap();
+    let worst_bytes_per_chunk = sdf_bytes
+        .max(material_bytes)
+        .max(vertex_bytes)
+        .max(index_bytes);
 
-    let capped = (limit / worst_bytes_per_chunk).max(1) as u32;
+    let fit = limit.checked_div(worst_bytes_per_chunk).unwrap_or(0).max(1);
+    let capped = u32::try_from(fit).unwrap_or(u32::MAX);
     info!(
         "[VoxelChunkArena] limit={} bytes, worst-case/chunk={} bytes, capping to {} chunks (budget={} cells/chunk, {:.0}% of {})",
         limit,
@@ -72,6 +86,15 @@ fn max_chunks(
 pub struct ChunkMeta {
     pub chunk_world_origin: [f32; 3],
     pub active_list_pos: u32, // unused; kept so every shader's ChunkMeta stays 16 bytes
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BatchCompactionUniforms {
+    chunk_size: u32,
+    total_cells: u32,
+    blocks_per_chunk: u32,
+    pad0: u32,
 }
 
 /// First-fit allocator over a range of vertex cells, with coalescing frees.
@@ -96,8 +119,8 @@ impl RangeHeap {
         }
         let (&start, &free_len) = self.free.iter().find(|&(_, &l)| l >= len)?;
         self.free.remove(&start);
-        if free_len > len {
-            self.free.insert(start + len, free_len - len);
+        if let Some(rest) = free_len.checked_sub(len).filter(|&r| r > 0) {
+            self.free.insert(start.saturating_add(len), rest);
         }
         Some(start)
     }
@@ -106,27 +129,38 @@ impl RangeHeap {
         if len == 0 {
             return;
         }
-        if let Some((&prev, &prev_len)) = self.free.range(..start).next_back() {
-            if prev + prev_len == start {
-                self.free.remove(&prev);
-                start = prev;
-                len += prev_len;
-            }
+        if let Some((&prev, &prev_len)) = self.free.range(..start).next_back()
+            && prev.checked_add(prev_len) == Some(start)
+        {
+            self.free.remove(&prev);
+            start = prev;
+            len = len.saturating_add(prev_len);
         }
-        if let Some(next_len) = self.free.remove(&(start + len)) {
-            len += next_len;
+        if let Some(next_len) = self.free.remove(&start.saturating_add(len)) {
+            len = len.saturating_add(next_len);
         }
         self.free.insert(start, len);
+    }
+
+    /// (total free cells, largest free run), for logging.
+    fn stats(&self) -> (u32, u32) {
+        let total = self
+            .free
+            .values()
+            .fold(0u32, |sum, &l| sum.saturating_add(l));
+        (total, self.free.values().max().copied().unwrap_or(0))
     }
 }
 
 /// Capacity to reserve for `count` vertices: a little slack so small edits
 /// re-mesh in place, rounded to 64 cells to limit fragmentation.
-fn reserve_for(count: u32) -> u32 {
+const fn reserve_for(count: u32) -> u32 {
     if count == 0 {
-        0
-    } else {
-        (count + count / 8).next_multiple_of(64)
+        return 0;
+    }
+    match count.saturating_add(count / 8).checked_next_multiple_of(64) {
+        Some(cap) => cap,
+        None => u32::MAX,
     }
 }
 
@@ -184,10 +218,307 @@ pub struct VoxelChunkArena {
     pub guard_readback_buffer: Buffer,
     pub guard_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 
-    /// chunk_pos <-> slot, for the collision query's merged lookup table
+    /// `chunk_pos` <-> slot, for the collision query's merged lookup table
     /// (see `VoxelChunkArenaSet::rebuild_merged_lookup`).
     pub slot_of_chunk_pos: HashMap<IVec3, u32>,
     pub chunk_pos_of_slot: Vec<Option<IVec3>>, // len == max_chunks, O(1) release
+}
+
+/// Per-chunk sizes an arena's buffers are allocated from.
+struct ArenaSizes {
+    cell_count: u32,
+    texture_size: u32,
+    total_cells: u32,
+    sdf_elems_per_chunk: u32,
+    budget_cells_per_chunk: u32,
+    max_chunks: u32,
+    scratch_chunks: u32,
+    blocks_per_chunk: u32,
+}
+
+impl ArenaSizes {
+    fn new(render_device: &RenderDevice, cell_count: u32, texture_size: u32) -> Self {
+        let total_cells = cell_count.saturating_pow(3);
+        let sdf_elems_per_chunk = texture_size.saturating_pow(3);
+        // snorm16 packs 2 voxels per word: an even count keeps every slot word-aligned.
+        debug_assert!(sdf_elems_per_chunk.is_multiple_of(2));
+        let budget_cells_per_chunk =
+            u32_from_f32((f32_from_u32(total_cells) * ACTIVE_FRACTION_ESTIMATE).ceil());
+        let max_chunks = max_chunks(
+            render_device,
+            total_cells,
+            sdf_elems_per_chunk,
+            budget_cells_per_chunk,
+        );
+        // Per-dispatch scratch, indexed by position in the dispatch, not slot:
+        // only chunks re-meshed this frame need flags and offsets.
+        let scratch_chunks = SCRATCH_CELLS
+            .checked_div(total_cells)
+            .unwrap_or(1)
+            .min(max_chunks)
+            .max(1);
+        let workgroup_capacity = 512u32; // WORKGROUP_SIZE * 2
+        Self {
+            cell_count,
+            texture_size,
+            total_cells,
+            sdf_elems_per_chunk,
+            budget_cells_per_chunk,
+            max_chunks,
+            scratch_chunks,
+            blocks_per_chunk: total_cells.div_ceil(workgroup_capacity),
+        }
+    }
+}
+
+/// Every GPU buffer an arena owns; moved into `VoxelChunkArena` by `new`.
+struct ArenaBuffers {
+    sdf: Buffer,
+    material: Buffer,
+    visibility_mask: Buffer,
+    chunk_has_mask: Buffer,
+    flags: Buffer,
+    compacted_offsets: Buffer,
+    final_vertex: Buffer,
+    index: Buffer,
+    indirect_args: Buffer,
+    block_sums: Buffer,
+    chunk_meta: Buffer,
+    compaction_uniform: Buffer,
+    batch_uniform: Buffer,
+    batch_uniform_pass3: Buffer,
+    slot_vertex_base: Buffer,
+    slot_vertex_count: Buffer,
+    active_slot_map: Buffer,
+    guard_debug: Buffer,
+    guard_readback: Buffer,
+}
+
+impl ArenaBuffers {
+    fn new(render_device: &RenderDevice, sizes: &ArenaSizes) -> Self {
+        let dev = render_device;
+        let max = u64::from(sizes.max_chunks);
+        let scratch = u64::from(sizes.scratch_chunks);
+        let per_chunk = |bytes: u64| bytes.saturating_mul(max);
+        let sdf_elems = u64::from(sizes.sdf_elems_per_chunk);
+        let total_cells = u64::from(sizes.total_cells);
+        let budget = u64::from(sizes.budget_cells_per_chunk);
+
+        // 1 bit/voxel, same element count as sdf_buffer/material_buffer, but each
+        // slot gets its OWN word-aligned region (mask_words_per_chunk words) —
+        // deliberately not a flat globally-packed bit array, since that would let
+        // adjacent slots' write_buffer calls corrupt each other's boundary words
+        // whenever texture_size^3 isn't a multiple of 32 (it never is, for the
+        // LOD sizes in use).
+        let mask_words_per_chunk = u64::from(sizes.sdf_elems_per_chunk.div_ceil(32));
+        // Tiny: 1 bit per SLOT (not per voxel), packed 32 slots/word.
+        let has_mask_words = u64::from(sizes.max_chunks.div_ceil(32));
+        let index_bytes = budget
+            .saturating_mul(u64::from(INDICES_PER_CELL))
+            .saturating_mul(4);
+        let meta_bytes = u64_from_usize(std::mem::size_of::<ChunkMeta>());
+
+        Self {
+            sdf: dev.storage(
+                "arena_sdf_buffer",
+                per_chunk(sdf_elems.saturating_mul(2)),
+                STORAGE_DST,
+            ),
+            material: dev.storage("arena_material_buffer", per_chunk(sdf_elems), STORAGE_DST),
+            visibility_mask: dev.storage(
+                "arena_visibility_mask_buffer",
+                per_chunk(mask_words_per_chunk.saturating_mul(4)),
+                STORAGE_DST,
+            ),
+            chunk_has_mask: dev.storage(
+                "arena_chunk_has_mask_buffer",
+                has_mask_words.saturating_mul(4),
+                STORAGE_DST,
+            ),
+            flags: dev.storage(
+                "arena_flags_buffer",
+                total_cells.saturating_mul(4).saturating_mul(scratch),
+                STORAGE_SRC,
+            ),
+            compacted_offsets: dev.storage(
+                "arena_compacted_offsets_buffer",
+                total_cells.saturating_mul(4).saturating_mul(scratch),
+                STORAGE_SRC,
+            ),
+            final_vertex: dev.storage(
+                "arena_final_vertex_buffer",
+                per_chunk(budget.saturating_mul(VERTEX_BYTES)),
+                BufferUsages::STORAGE | BufferUsages::VERTEX,
+            ),
+            index: dev.storage(
+                "arena_index_buffer",
+                per_chunk(index_bytes),
+                BufferUsages::STORAGE | BufferUsages::INDEX,
+            ),
+            indirect_args: indirect_args_buffer(dev, sizes.max_chunks),
+            block_sums: dev.storage(
+                "arena_block_sums_buffer",
+                u64::from(sizes.blocks_per_chunk)
+                    .saturating_mul(scratch)
+                    .saturating_mul(4),
+                BufferUsages::STORAGE,
+            ),
+            chunk_meta: dev.storage(
+                "arena_chunk_meta_buffer",
+                per_chunk(meta_bytes),
+                STORAGE_DST,
+            ),
+            compaction_uniform: compaction_uniform_buffer(dev, sizes),
+            batch_uniform: batch_uniform_buffer(dev, sizes, "arena_batch_uniform_buffer", 4),
+            batch_uniform_pass3: batch_uniform_buffer(
+                dev,
+                sizes,
+                "arena_batch_uniform_buffer_pass3",
+                8,
+            ),
+            slot_vertex_base: dev.storage(
+                "arena_slot_vertex_base_buffer",
+                per_chunk(4),
+                STORAGE_DST,
+            ),
+            slot_vertex_count: dev.storage(
+                "arena_slot_vertex_count_buffer",
+                per_chunk(4),
+                STORAGE_DST,
+            ),
+            active_slot_map: dev.storage("arena_active_slot_map_buffer", per_chunk(4), STORAGE_DST),
+            guard_debug: dev.storage(
+                "arena_guard_debug_buffer",
+                16,
+                STORAGE_SRC | BufferUsages::COPY_DST,
+            ),
+            guard_readback: dev.storage(
+                "arena_guard_readback_buffer",
+                16,
+                BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            ),
+        }
+    }
+}
+
+fn compaction_uniform_buffer(render_device: &RenderDevice, sizes: &ArenaSizes) -> Buffer {
+    render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("arena_compaction_uniform_buffer"),
+        contents: bytemuck::bytes_of(&BatchCompactionUniforms {
+            chunk_size: sizes.cell_count,
+            total_cells: sizes.total_cells,
+            blocks_per_chunk: sizes.blocks_per_chunk,
+            pad0: 0,
+        }),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    })
+}
+
+/// One draw per slot, all empty until the slot gets a vertex range.
+fn indirect_args_buffer(render_device: &RenderDevice, max_chunks: u32) -> Buffer {
+    let zeroed_args: Vec<DrawIndexedIndirectArgs> = (0..max_chunks)
+        .map(|_| DrawIndexedIndirectArgs {
+            index_count: 0,
+            instance_count: 1,
+            first_index: 0, // written when the slot gets a vertex range
+            base_vertex: 0,
+            first_instance: 0,
+        })
+        .collect();
+    render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("arena_indirect_args_buffer"),
+        contents: bytemuck::cast_slice(&zeroed_args),
+        usage: BufferUsages::STORAGE
+            | BufferUsages::INDIRECT
+            | BufferUsages::COPY_DST
+            | BufferUsages::COPY_SRC,
+    })
+}
+
+/// Pass 1 uses `@workgroup_size(4, 4, 4)` and pass 3 `@workgroup_size(8, 8, 8)`,
+/// so each gets its own z-stride.
+fn batch_uniform_buffer(
+    render_device: &RenderDevice,
+    sizes: &ArenaSizes,
+    label: &'static str,
+    wg_size: u32,
+) -> Buffer {
+    let chunk_voxels = sizes.texture_size.saturating_sub(2);
+    let voxel_size = crate::CHUNK_SIZE / f32_from_u32(chunk_voxels);
+    make_batch_uniform_buffer(
+        render_device,
+        label,
+        sizes.cell_count,
+        sizes.texture_size,
+        wg_size,
+        voxel_size,
+    )
+}
+
+/// The arena's four bind groups, in field order.
+fn arena_bind_groups(
+    render_device: &RenderDevice,
+    layouts: &super::pipeline::VoxelPipelineLayouts,
+    b: &ArenaBuffers,
+) -> [BindGroup; 4] {
+    let pass1 = render_device.create_bind_group(
+        Some("arena_pass1_bind_group"),
+        &layouts.pass1_surface_layout,
+        &entries(&[
+            (0, &b.sdf),
+            (1, &b.flags),
+            (2, &b.compacted_offsets),
+            (4, &b.final_vertex),
+            (5, &b.indirect_args),
+            (6, &b.batch_uniform),
+            (7, &b.chunk_meta),
+            (8, &b.active_slot_map),
+            (9, &b.visibility_mask),
+            (10, &b.chunk_has_mask),
+        ]),
+    );
+    let pass3 = render_device.create_bind_group(
+        Some("arena_pass3_bind_group"),
+        &layouts.pass3_surface_layout,
+        &entries(&[
+            (0, &b.sdf),
+            (1, &b.flags),
+            (2, &b.compacted_offsets),
+            (3, &b.final_vertex),
+            (4, &b.index),
+            (5, &b.indirect_args),
+            (6, &b.batch_uniform_pass3),
+            (7, &b.chunk_meta),
+            (8, &b.slot_vertex_base),
+            (9, &b.slot_vertex_count),
+            (10, &b.active_slot_map),
+            (11, &b.material),
+            (12, &b.guard_debug),
+        ]),
+    );
+    let compaction = render_device.create_bind_group(
+        Some("arena_compaction_bind_group"),
+        &layouts.compaction_bind_group_layout,
+        &entries(&[
+            (0, &b.compaction_uniform),
+            (1, &b.flags),
+            (2, &b.compacted_offsets),
+            (3, &b.block_sums),
+            (5, &b.active_slot_map), // compaction addresses cells by real slot
+        ]),
+    );
+    let raster = render_device.create_bind_group(
+        Some("arena_raster_chunk_bind_group"),
+        &layouts.raster_chunk_visibility_layout,
+        &entries(&[
+            (0, &b.chunk_meta),
+            (1, &b.visibility_mask),
+            (2, &b.chunk_has_mask),
+            (3, &b.batch_uniform_pass3),
+            (4, &b.material),
+        ]),
+    );
+    [pass1, pass3, compaction, raster]
 }
 
 impl VoxelChunkArena {
@@ -197,283 +528,83 @@ impl VoxelChunkArena {
         cell_count: u32,
         texture_size: u32,
     ) -> Self {
-        let total_cells = cell_count * cell_count * cell_count;
-        let sdf_elems_per_chunk = texture_size * texture_size * texture_size;
-        // snorm16 packs 2 voxels per word: an even count keeps every slot word-aligned.
-        debug_assert!(sdf_elems_per_chunk % 2 == 0);
-        let budget_cells_per_chunk =
-            ((total_cells as f32) * ACTIVE_FRACTION_ESTIMATE).ceil() as u32;
-        let max = max_chunks(
-            render_device,
-            total_cells,
-            sdf_elems_per_chunk,
-            budget_cells_per_chunk,
-        ) as u64;
-
-        let sdf_buffer = render_device.storage(
-            "arena_sdf_buffer",
-            sdf_elems_per_chunk as u64 * 2 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let material_buffer = render_device.storage(
-            "arena_material_buffer",
-            sdf_elems_per_chunk as u64 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-
-        // 1 bit/voxel, same element count as sdf_buffer/material_buffer, but each
-        // slot gets its OWN word-aligned region (mask_words_per_chunk words) —
-        // deliberately not a flat globally-packed bit array, since that would let
-        // adjacent slots' write_buffer calls corrupt each other's boundary words
-        // whenever texture_size^3 isn't a multiple of 32 (it never is, for the
-        // LOD sizes in use).
-        let mask_words_per_chunk = sdf_elems_per_chunk.div_ceil(32);
-        let visibility_mask_buffer = render_device.storage(
-            "arena_visibility_mask_buffer",
-            mask_words_per_chunk as u64 * 4 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-
-        // Tiny: 1 bit per SLOT (not per voxel), packed 32 slots/word.
-        let has_mask_words = (max as u32).div_ceil(32);
-        let chunk_has_mask_buffer = render_device.storage(
-            "arena_chunk_has_mask_buffer",
-            has_mask_words as u64 * 4,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-
-        // Per-dispatch scratch, indexed by position in the dispatch, not slot:
-        // only chunks re-meshed this frame need flags and offsets.
-        let scratch_chunks = (SCRATCH_CELLS / total_cells).clamp(1, max as u32);
-        let scratch = scratch_chunks as u64;
-        let flags_buffer = render_device.storage(
-            "arena_flags_buffer",
-            total_cells as u64 * 4 * scratch,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        );
-
-        let compacted_offsets_buffer = render_device.storage(
-            "arena_compacted_offsets_buffer",
-            total_cells as u64 * 4 * scratch,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        );
-
-        let final_vertex_buffer = render_device.storage(
-            "arena_final_vertex_buffer",
-            budget_cells_per_chunk as u64 * 32 * max,
-            BufferUsages::STORAGE | BufferUsages::VERTEX,
-        );
-
-        let index_buffer = render_device.storage(
-            "arena_index_buffer",
-            budget_cells_per_chunk as u64 * INDICES_PER_CELL as u64 * 4 * max,
-            BufferUsages::STORAGE | BufferUsages::INDEX,
-        );
-
-        let zeroed_args: Vec<DrawIndexedIndirectArgs> = (0..max as u32)
-            .map(|_| DrawIndexedIndirectArgs {
-                index_count: 0,
-                instance_count: 1,
-                first_index: 0, // written when the slot gets a vertex range
-                base_vertex: 0,
-                first_instance: 0,
-            })
-            .collect();
-        let indirect_args_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("arena_indirect_args_buffer"),
-            contents: bytemuck::cast_slice(&zeroed_args),
-            usage: BufferUsages::STORAGE
-                | BufferUsages::INDIRECT
-                | BufferUsages::COPY_DST
-                | BufferUsages::COPY_SRC,
-        });
-
-        let workgroup_capacity = 512u32; // WORKGROUP_SIZE * 2
-        let blocks_per_chunk = total_cells.div_ceil(workgroup_capacity);
-        let block_sums_buffer = render_device.storage(
-            "arena_block_sums_buffer",
-            (blocks_per_chunk as u64 * scratch) * 4,
-            BufferUsages::STORAGE,
-        );
-
-        let chunk_meta_buffer = render_device.storage(
-            "arena_chunk_meta_buffer",
-            std::mem::size_of::<ChunkMeta>() as u64 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-
-        #[repr(C)]
-        #[derive(Clone, Copy, Pod, Zeroable)]
-        struct BatchCompactionUniforms {
-            chunk_size: u32,
-            total_cells: u32,
-            blocks_per_chunk: u32,
-            _pad0: u32,
-        }
-        let compaction_uniform_buffer =
-            render_device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("arena_compaction_uniform_buffer"),
-                contents: bytemuck::bytes_of(&BatchCompactionUniforms {
-                    chunk_size: cell_count,
-                    total_cells,
-                    blocks_per_chunk,
-                    _pad0: 0,
-                }),
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            });
-
-        let chunk_voxels = texture_size - 2;
-        let voxel_size = crate::CHUNK_SIZE / chunk_voxels as f32;
-
-        // Pass 1 uses @workgroup_size(4, 4, 4) -> its own z-stride.
-        let batch_uniform_buffer = make_batch_uniform_buffer(
-            render_device,
-            "arena_batch_uniform_buffer",
-            cell_count,
-            texture_size,
-            4,
-            voxel_size,
-        );
-
-        // Pass 3 uses @workgroup_size(8, 8, 8) -> a different z-stride.
-        let batch_uniform_buffer_pass3 = make_batch_uniform_buffer(
-            render_device,
-            "arena_batch_uniform_buffer_pass3",
-            cell_count,
-            texture_size,
-            8,
-            voxel_size,
-        );
-
-        let slot_vertex_base_buffer = render_device.storage(
-            "arena_slot_vertex_base_buffer",
-            4 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let slot_vertex_count_buffer = render_device.storage(
-            "arena_slot_vertex_count_buffer",
-            4 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let active_slot_map_buffer = render_device.storage(
-            "arena_active_slot_map_buffer",
-            4 * max,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-
-        let guard_debug_buffer = render_device.storage(
-            "arena_guard_debug_buffer",
-            16,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        );
-        let guard_readback_buffer = render_device.storage(
-            "arena_guard_readback_buffer",
-            16,
-            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        );
-
-        let pass1_bind_group = render_device.create_bind_group(
-            Some("arena_pass1_bind_group"),
-            &layouts.pass1_surface_layout,
-            &entries(&[
-                (0, &sdf_buffer),
-                (1, &flags_buffer),
-                (2, &compacted_offsets_buffer),
-                (4, &final_vertex_buffer),
-                (5, &indirect_args_buffer),
-                (6, &batch_uniform_buffer),
-                (7, &chunk_meta_buffer),
-                (8, &active_slot_map_buffer),
-                (9, &visibility_mask_buffer),
-                (10, &chunk_has_mask_buffer),
-            ]),
-        );
-
-        let pass3_bind_group = render_device.create_bind_group(
-            Some("arena_pass3_bind_group"),
-            &layouts.pass3_surface_layout,
-            &entries(&[
-                (0, &sdf_buffer),
-                (1, &flags_buffer),
-                (2, &compacted_offsets_buffer),
-                (3, &final_vertex_buffer),
-                (4, &index_buffer),
-                (5, &indirect_args_buffer),
-                (6, &batch_uniform_buffer_pass3),
-                (7, &chunk_meta_buffer),
-                (8, &slot_vertex_base_buffer),
-                (9, &slot_vertex_count_buffer),
-                (10, &active_slot_map_buffer),
-                (11, &material_buffer),
-                (12, &guard_debug_buffer),
-            ]),
-        );
-        let compaction_bind_group = render_device.create_bind_group(
-            Some("arena_compaction_bind_group"),
-            &layouts.compaction_bind_group_layout,
-            &entries(&[
-                (0, &compaction_uniform_buffer),
-                (1, &flags_buffer),
-                (2, &compacted_offsets_buffer),
-                (3, &block_sums_buffer),
-                (5, &active_slot_map_buffer), // compaction addresses cells by real slot
-            ]),
-        );
-
-        let raster_chunk_bind_group = render_device.create_bind_group(
-            Some("arena_raster_chunk_bind_group"),
-            &layouts.raster_chunk_visibility_layout,
-            &entries(&[
-                (0, &chunk_meta_buffer),
-                (1, &visibility_mask_buffer),
-                (2, &chunk_has_mask_buffer),
-                (3, &batch_uniform_buffer_pass3),
-                (4, &material_buffer),
-            ]),
-        );
-
-        Self {
-            max_chunks: max as u32,
-            scratch_chunks,
-            cell_count,
-            texture_size,
-            total_cells,
-            sdf_elems_per_chunk,
-            budget_cells_per_chunk,
-            sdf_buffer,
-            flags_buffer,
-            compacted_offsets_buffer,
-            final_vertex_buffer,
-            index_buffer,
-            indirect_args_buffer,
-            block_sums_buffer,
-            chunk_meta_buffer,
-            compaction_uniform_buffer,
-            batch_uniform_buffer,
-            batch_uniform_buffer_pass3,
+        let sizes = ArenaSizes::new(render_device, cell_count, texture_size);
+        let buffers = ArenaBuffers::new(render_device, &sizes);
+        let [
             pass1_bind_group,
             pass3_bind_group,
             compaction_bind_group,
-            free_slots: (0..(max as u32)).rev().collect(),
+            raster_chunk_bind_group,
+        ] = arena_bind_groups(render_device, layouts, &buffers);
+        let ArenaBuffers {
+            sdf,
+            material,
+            visibility_mask,
+            chunk_has_mask,
+            flags,
+            compacted_offsets,
+            final_vertex,
+            index,
+            indirect_args,
+            block_sums,
+            chunk_meta,
+            compaction_uniform,
+            batch_uniform,
+            batch_uniform_pass3,
+            slot_vertex_base,
+            slot_vertex_count,
+            active_slot_map,
+            guard_debug,
+            guard_readback,
+        } = buffers;
+        let slots = usize_from(sizes.max_chunks);
+
+        Self {
+            max_chunks: sizes.max_chunks,
+            scratch_chunks: sizes.scratch_chunks,
+            cell_count,
+            texture_size,
+            total_cells: sizes.total_cells,
+            sdf_elems_per_chunk: sizes.sdf_elems_per_chunk,
+            budget_cells_per_chunk: sizes.budget_cells_per_chunk,
+            sdf_buffer: sdf,
+            flags_buffer: flags,
+            compacted_offsets_buffer: compacted_offsets,
+            final_vertex_buffer: final_vertex,
+            index_buffer: index,
+            indirect_args_buffer: indirect_args,
+            block_sums_buffer: block_sums,
+            chunk_meta_buffer: chunk_meta,
+            compaction_uniform_buffer: compaction_uniform,
+            batch_uniform_buffer: batch_uniform,
+            batch_uniform_buffer_pass3: batch_uniform_pass3,
+            pass1_bind_group,
+            pass3_bind_group,
+            compaction_bind_group,
+            free_slots: (0..sizes.max_chunks).rev().collect(),
             slot_of_main_entity: HashMap::new(),
             active_slots: Vec::new(),
             dirty_slots: Vec::new(),
-            slot_range: vec![(0, 0); max as usize],
-            heap: RangeHeap::new(budget_cells_per_chunk * max as u32),
-            blocks_per_chunk,
-            slot_vertex_base_buffer,
-            slot_vertex_count_buffer,
-            active_slot_map_buffer,
-            guard_debug_buffer,
-            guard_readback_buffer,
-            guard_state: Default::default(),
-            material_buffer,
-            visibility_mask_buffer,
-            chunk_has_mask_buffer,
-            mask_slots: vec![false; max as usize],
+            slot_range: vec![(0, 0); slots],
+            heap: RangeHeap::new(
+                sizes
+                    .budget_cells_per_chunk
+                    .saturating_mul(sizes.max_chunks),
+            ),
+            blocks_per_chunk: sizes.blocks_per_chunk,
+            slot_vertex_base_buffer: slot_vertex_base,
+            slot_vertex_count_buffer: slot_vertex_count,
+            active_slot_map_buffer: active_slot_map,
+            guard_debug_buffer: guard_debug,
+            guard_readback_buffer: guard_readback,
+            guard_state: std::sync::Arc::default(),
+            material_buffer: material,
+            visibility_mask_buffer: visibility_mask,
+            chunk_has_mask_buffer: chunk_has_mask,
+            mask_slots: vec![false; slots],
             raster_chunk_bind_group,
             slot_of_chunk_pos: HashMap::new(),
-            chunk_pos_of_slot: vec![None; max as usize],
+            chunk_pos_of_slot: vec![None; slots],
         }
     }
 
@@ -481,35 +612,41 @@ impl VoxelChunkArena {
     /// uploaded. The has-mask bits are uploaded each frame by
     /// `prepare_visibility_for_arena`.
     pub fn set_slot_has_mask(&mut self, slot: u32, has_mask: bool) {
-        if (slot as usize) < self.mask_slots.len() {
-            self.mask_slots[slot as usize] = has_mask;
+        if let Some(m) = self.mask_slots.get_mut(usize_from(slot)) {
+            *m = has_mask;
         }
     }
 
     /// Records/updates which chunk coordinate owns `slot`, keeping
-    /// `slot_of_chunk_pos` and `chunk_pos_of_slot` in sync. Called from
-    /// `prepare_voxel_arena` right after slot allocation.
+    /// `slot_of_chunk_pos` and `chunk_pos_of_slot` in sync.
+    ///
+    /// Called from `prepare_voxel_arena` right after slot allocation.
     pub fn register_chunk_pos(&mut self, slot: u32, chunk_pos: IVec3) {
-        if self.chunk_pos_of_slot[slot as usize] == Some(chunk_pos) {
+        let Some(owner) = self.chunk_pos_of_slot.get_mut(usize_from(slot)) else {
+            return;
+        };
+        if *owner == Some(chunk_pos) {
             return;
         }
-        if let Some(old) = self.chunk_pos_of_slot[slot as usize].take() {
+        if let Some(old) = owner.replace(chunk_pos) {
             self.slot_of_chunk_pos.remove(&old);
         }
         self.slot_of_chunk_pos.insert(chunk_pos, slot);
-        self.chunk_pos_of_slot[slot as usize] = Some(chunk_pos);
     }
 
     /// Gives this chunk a slot (reusing its current one) and a vertex range
-    /// of at least `count` cells. `None` = no free slot or no room in the
-    /// heap; nothing is changed, so the chunk keeps whatever mesh it has.
+    /// of at least `count` cells.
+    ///
+    /// `None` = no free slot or no room in the heap; nothing is changed, so
+    /// the chunk keeps whatever mesh it has.
     pub fn place(&mut self, main_entity: MainEntity, count: u32) -> Option<u32> {
         let existing = self.slot_of_main_entity.get(&main_entity).copied();
         if !existing.is_some_and(|s| self.can_mark_dirty(s)) && self.dirty_full() {
             return None; // no scratch left to mesh it this frame
         }
         if let Some(slot) = existing {
-            let (base, cap) = self.slot_range[slot as usize];
+            let range = self.slot_range.get_mut(usize_from(slot))?;
+            let (base, cap) = *range;
             // Keep the range unless it is too small or far too big.
             if count <= cap && count >= cap / 4 {
                 return Some(slot);
@@ -517,39 +654,46 @@ impl VoxelChunkArena {
             let new_cap = reserve_for(count);
             let new_base = self.heap.alloc(new_cap)?;
             self.heap.free(base, cap);
-            self.slot_range[slot as usize] = (new_base, new_cap);
+            *range = (new_base, new_cap);
             return Some(slot);
         }
         let slot = *self.free_slots.last()?;
+        let range = self.slot_range.get_mut(usize_from(slot))?;
         let cap = reserve_for(count);
         let base = self.heap.alloc(cap)?;
         self.free_slots.pop();
         self.slot_of_main_entity.insert(main_entity, slot);
-        self.slot_range[slot as usize] = (base, cap);
+        *range = (base, cap);
         self.active_slots.push(slot);
         Some(slot)
     }
 
     pub fn release(&mut self, main_entity: MainEntity) {
-        if let Some(slot) = self.slot_of_main_entity.remove(&main_entity) {
-            self.free_slots.push(slot);
-            let (base, cap) = std::mem::take(&mut self.slot_range[slot as usize]);
+        let Some(slot) = self.slot_of_main_entity.remove(&main_entity) else {
+            return;
+        };
+        self.free_slots.push(slot);
+        let i = usize_from(slot);
+        if let Some(range) = self.slot_range.get_mut(i) {
+            let (base, cap) = std::mem::take(range);
             self.heap.free(base, cap);
-            self.active_slots.retain(|&s| s != slot);
-            // Its range may be handed out again this frame; never re-mesh it
-            // with the old owner's data.
-            self.dirty_slots.retain(|&s| s != slot);
+        }
+        self.active_slots.retain(|&s| s != slot);
+        // Its range may be handed out again this frame; never re-mesh it
+        // with the old owner's data.
+        self.dirty_slots.retain(|&s| s != slot);
 
-            self.mask_slots[slot as usize] = false;
-            if let Some(pos) = self.chunk_pos_of_slot[slot as usize].take() {
-                self.slot_of_chunk_pos.remove(&pos);
-            }
+        if let Some(m) = self.mask_slots.get_mut(i) {
+            *m = false;
+        }
+        if let Some(pos) = self.chunk_pos_of_slot.get_mut(i).and_then(Option::take) {
+            self.slot_of_chunk_pos.remove(&pos);
         }
     }
 
     /// This frame's dispatch already fills the per-dispatch scratch.
-    pub fn dirty_full(&self) -> bool {
-        self.dirty_slots.len() >= self.scratch_chunks as usize
+    pub const fn dirty_full(&self) -> bool {
+        self.dirty_slots.len() >= usize_from(self.scratch_chunks)
     }
 
     /// Whether `slot` can be re-meshed this frame (already queued, or room left).
@@ -587,8 +731,8 @@ impl Default for ArenaConfig {
 }
 
 /// How many arenas per LOD the cursor-query shader can currently address.
-/// cursor_query.wgsl / query_entries() bind exactly one sdf_buffer +
-/// chunk_meta per LOD, so only arena 0 is visible to queries for now.
+/// `cursor_query.wgsl` / `query_entries()` bind exactly one `sdf_buffer` +
+/// `chunk_meta` per LOD, so only arena 0 is visible to queries for now.
 pub const QUERY_ARENAS_PER_LOD: usize = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -622,7 +766,7 @@ pub struct VoxelChunkArenaSet {
 }
 
 impl VoxelChunkArenaSet {
-    /// (lod_rank, arena) for every LOD's query-visible arena.
+    /// (`lod_rank`, arena) for every LOD's query-visible arena.
     pub fn query_arenas(&self) -> impl Iterator<Item = (usize, &VoxelChunkArena)> {
         self.arenas
             .iter()
@@ -631,8 +775,8 @@ impl VoxelChunkArenaSet {
     }
 
     #[inline]
-    pub fn lod_index(lod: LOD) -> usize {
-        lod.rank() as usize
+    pub const fn lod_index(lod: LOD) -> usize {
+        usize_from(lod.rank())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &VoxelChunkArena> {
@@ -645,17 +789,20 @@ impl VoxelChunkArenaSet {
 
     /// True if no arena exists for any LOD.
     pub fn is_empty(&self) -> bool {
-        self.arenas.iter().all(|v| v.is_empty())
+        self.arenas.iter().all(std::vec::Vec::is_empty)
     }
 
     #[inline]
-    pub fn arena_mut(&mut self, lod: LOD, arena_idx: usize) -> &mut VoxelChunkArena {
-        &mut self.arenas[Self::lod_index(lod)][arena_idx]
+    pub fn arena_mut(&mut self, lod: LOD, arena_idx: usize) -> Option<&mut VoxelChunkArena> {
+        self.arenas
+            .get_mut(Self::lod_index(lod))?
+            .get_mut(arena_idx)
     }
 
     /// Finds which arena (within `lod`) already holds this entity, if any.
     pub fn find_slot(&self, lod: LOD, main_entity: MainEntity) -> Option<ArenaSlot> {
-        self.arenas[Self::lod_index(lod)]
+        self.arenas
+            .get(Self::lod_index(lod))?
             .iter()
             .enumerate()
             .find_map(|(arena_idx, a)| {
@@ -664,10 +811,13 @@ impl VoxelChunkArenaSet {
             })
     }
 
-    /// Places this chunk in a `lod` arena with room for `count` vertices:
-    ///   1. the arena already holding it, if its range fits or can grow
-    ///   2. any other arena of this LOD with a free slot and room
-    ///   3. a new arena, up to `config.max_arenas[lod]`
+    /// Places this chunk in a `lod` arena with room for `count` vertices.
+    ///
+    /// In order of preference:
+    /// 1. the arena already holding it, if its range fits or can grow
+    /// 2. any other arena of this LOD with a free slot and room
+    /// 3. a new arena, up to `config.max_arenas[lod]`
+    ///
     /// Only after it is placed is it evicted from any other arena (an old
     /// LOD, or the arena it outgrew), so it never goes undrawn. `None` = no
     /// room anywhere; nothing changed, the caller retries next frame.
@@ -679,55 +829,56 @@ impl VoxelChunkArenaSet {
         make_arena: impl FnOnce() -> VoxelChunkArena,
     ) -> Option<ArenaSlot> {
         let lod_idx = Self::lod_index(lod);
-        let current = self.find_slot(lod, main_entity).map(|s| s.arena_idx);
+        let found = self.find_slot(lod, main_entity);
+        let max_arenas = self.config.max_arenas.get(lod_idx).copied().unwrap_or(0);
+        let empty_chunks = self.empty.len();
+        let arenas = self.arenas.get_mut(lod_idx)?;
         // Out of scratch is a "this frame" limit, not a lack of room: wait
         // rather than moving the chunk or growing a new arena over it.
-        if let Some(found) = self.find_slot(lod, main_entity) {
-            if !self.arenas[lod_idx][found.arena_idx].can_mark_dirty(found.slot) {
-                return None;
-            }
-        }
-
-        let order = current
-            .into_iter()
-            .chain((0..self.arenas[lod_idx].len()).filter(|i| Some(*i) != current));
-        let mut placed = None;
-        for arena_idx in order.collect::<Vec<_>>() {
-            if let Some(slot) = self.arenas[lod_idx][arena_idx].place(main_entity, count) {
-                placed = Some(ArenaSlot { arena_idx, slot });
-                break;
-            }
-        }
-        if placed.is_none() && self.arenas[lod_idx].iter().any(VoxelChunkArena::dirty_full) {
+        if let Some(found) = found
+            && !arenas
+                .get(found.arena_idx)
+                .is_some_and(|a| a.can_mark_dirty(found.slot))
+        {
             return None;
         }
-        if placed.is_none() && self.arenas[lod_idx].len() < self.config.max_arenas[lod_idx] {
-            for (i, a) in self.arenas[lod_idx].iter().enumerate() {
+
+        let current = found.map(|s| s.arena_idx);
+        let others = (0..arenas.len()).filter(move |i| Some(*i) != current);
+        let mut placed = current.into_iter().chain(others).find_map(|arena_idx| {
+            let slot = arenas.get_mut(arena_idx)?.place(main_entity, count)?;
+            Some(ArenaSlot { arena_idx, slot })
+        });
+        if placed.is_none() && arenas.iter().any(VoxelChunkArena::dirty_full) {
+            return None;
+        }
+        if placed.is_none() && arenas.len() < max_arenas {
+            for (i, a) in arenas.iter().enumerate() {
+                let (free_cells, largest_run) = a.heap.stats();
                 info!(
                     "[VoxelChunkArenaSet] LOD {:?} arena {} full for a {}-cell chunk: slots {}/{}, free vertex cells {} (largest run {}); {} empty chunks hold no slot",
                     lod,
                     i,
                     count,
-                    a.max_chunks as usize - a.free_slots.len(),
+                    usize_from(a.max_chunks).saturating_sub(a.free_slots.len()),
                     a.max_chunks,
-                    a.heap.free.values().sum::<u32>(),
-                    a.heap.free.values().max().copied().unwrap_or(0),
-                    self.empty.len(),
+                    free_cells,
+                    largest_run,
+                    empty_chunks,
                 );
             }
             let mut arena = make_arena();
             if let Some(slot) = arena.place(main_entity, count) {
-                let list = &mut self.arenas[lod_idx];
-                list.push(arena);
+                placed = Some(ArenaSlot {
+                    arena_idx: arenas.len(),
+                    slot,
+                });
+                arenas.push(arena);
                 info!(
                     "[VoxelChunkArenaSet] LOD {:?} now has {} arena(s)",
                     lod,
-                    list.len()
+                    arenas.len()
                 );
-                placed = Some(ArenaSlot {
-                    arena_idx: list.len() - 1,
-                    slot,
-                });
             }
         }
         let placed = placed?;
@@ -750,7 +901,8 @@ impl VoxelChunkArenaSet {
     }
 
     pub fn total_max_chunks(&self) -> u32 {
-        self.iter().map(|a| a.max_chunks).sum()
+        self.iter()
+            .fold(0u32, |sum, a| sum.saturating_add(a.max_chunks))
     }
 
     pub fn rebuild_merged_lookup(
@@ -760,7 +912,7 @@ impl VoxelChunkArenaSet {
         capacity: u32,
     ) {
         const EMPTY: u32 = u32::MAX;
-        let cap = capacity as usize;
+        let cap = usize_from(capacity);
         if cap == 0 {
             return;
         }
@@ -774,30 +926,36 @@ impl VoxelChunkArenaSet {
             };
             cap
         ];
-        let mut total_entries = 0;
+        let mut total_entries: usize = 0;
+        // Linear probing; `cap` is non-zero, so the remainders can't fail.
+        let wrap = |i: usize| i.checked_rem(cap).unwrap_or(0);
 
         'outer: for (rank, arenas) in self.arenas.iter().enumerate() {
+            let rank = u32::try_from(rank).unwrap_or(0);
             for arena in arenas.iter().take(QUERY_ARENAS_PER_LOD) {
-                for (&pos, &slot) in arena.slot_of_chunk_pos.iter() {
+                for (&pos, &slot) in &arena.slot_of_chunk_pos {
                     if total_entries >= cap {
                         bevy::log::warn!("Merged lookup table exceeded capacity ({cap})!");
                         break 'outer;
                     }
-                    let packed = ((rank as u32) << 28) | (slot & 0x0FFF_FFFF);
-                    let initial_idx = (hash_chunk_pos(pos) as usize) % cap;
+                    let packed = (rank << 28) | (slot & 0x0FFF_FFFF);
+                    let initial_idx = wrap(usize_from(hash_chunk_pos(pos)));
                     let mut idx = initial_idx;
                     loop {
-                        if table[idx].packed_slot_and_rank == EMPTY {
-                            table[idx] = GpuChunkLookupEntry {
-                                pos_x: pos.x as u32,
-                                pos_y: pos.y as u32,
-                                pos_z: pos.z as u32,
+                        let Some(entry) = table.get_mut(idx) else {
+                            break 'outer;
+                        };
+                        if entry.packed_slot_and_rank == EMPTY {
+                            *entry = GpuChunkLookupEntry {
+                                pos_x: pos.x.cast_unsigned(),
+                                pos_y: pos.y.cast_unsigned(),
+                                pos_z: pos.z.cast_unsigned(),
                                 packed_slot_and_rank: packed,
                             };
-                            total_entries += 1;
+                            total_entries = total_entries.saturating_add(1);
                             break;
                         }
-                        idx = (idx + 1) % cap;
+                        idx = wrap(idx.wrapping_add(1));
                         if idx == initial_idx {
                             bevy::log::error!("Merged lookup table completely full!");
                             break 'outer;

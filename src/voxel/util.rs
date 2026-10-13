@@ -1,13 +1,21 @@
 use bevy::{
     prelude::*,
-    render::{render_resource::*, renderer::RenderDevice},
+    render::{
+        render_resource::{
+            BindGroup, Buffer, BufferInitDescriptor, BufferUsages, CommandEncoder,
+            ComputePassDescriptor, ComputePipeline,
+        },
+        renderer::RenderDevice,
+    },
 };
 
-/// Must match `hash_chunk` in cursor_query.wgsl exactly.
-pub fn hash_chunk_pos(pos: IVec3) -> u32 {
-    let x = pos.x as u32;
-    let y = pos.y as u32;
-    let z = pos.z as u32;
+/// Must match `hash_chunk` in `cursor_query.wgsl` exactly.
+#[must_use]
+pub const fn hash_chunk_pos(pos: IVec3) -> u32 {
+    // Bit reinterpretation, as WGSL's `bitcast<u32>` does.
+    let x = pos.x.cast_unsigned();
+    let y = pos.y.cast_unsigned();
+    let z = pos.z.cast_unsigned();
     x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77) ^ z.wrapping_mul(0xC2B2_AE3D)
 }
 
@@ -20,6 +28,7 @@ struct BatchUniforms {
     voxel_size: f32,
 }
 
+#[must_use]
 pub fn make_batch_uniform_buffer(
     render_device: &RenderDevice,
     label: &'static str,

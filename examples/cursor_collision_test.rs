@@ -19,20 +19,17 @@ const SPHERE_RADIUS: f32 = 7.0;
 
 fn main() {
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                    limits: WgpuLimits {
-                        max_buffer_size: 1024 * 1024 * 1024,
-                        max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                        ..default()
-                    }
-                    .into(),
+        .add_plugins(DefaultPlugins.set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                limits: WgpuLimits {
+                    max_buffer_size: 1024 * 1024 * 1024,
+                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
                     ..default()
-                })),
+                },
                 ..default()
-            }),
-        )
+            })),
+            ..default()
+        }))
         .add_plugins(TarasaurPlugin)
         .add_plugins(CursorCollisionSetupPlugin) // pins CollisionLOD to Medium
         // Test the GPU path only; the built-in brush would carve the test sphere.
@@ -56,11 +53,11 @@ struct OrbitCamera {
     speed: f32,
 }
 
-/// Auto-inserted VisibilityField defaults to fully-hidden (all-zero bits),
-/// which makes extract_voxel_chunks skip SDF extraction entirely for every
-/// chunk (is_uniform() == Some(false) short-circuits it). Waits for the
+/// Auto-inserted `VisibilityField` defaults to fully-hidden (all-zero bits),
+/// which makes `extract_voxel_chunks` skip SDF extraction entirely for every
+/// chunk (`is_uniform()` == Some(false) short-circuits it). Waits for the
 /// FieldsPlugin-populated component to actually exist on all 8 chunks
-/// before writing into it — same pattern as visibility_test.rs.
+/// before writing into it — same pattern as `visibility_test.rs`.
 fn mark_chunks_visible(mut marked: Local<bool>, mut query: Query<&mut VisibilityField>) {
     if *marked || query.iter().count() < 8 {
         return;
@@ -147,13 +144,13 @@ fn spawn_sphere_chunks(mut commands: Commands) {
 
 fn fill_sphere_sdf(field: &mut SDF, chunk_pos: IVec3, center: Vec3, radius: f32) {
     let dims = field.size();
-    let voxel_size = CHUNK_SIZE / dims.x as f32;
+    let voxel_size = CHUNK_SIZE / tarasaur::num::f32_from_u32(dims.x);
     let chunk_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
 
     for z in 0..dims.z {
         for y in 0..dims.y {
             for x in 0..dims.x {
-                let world = chunk_origin + Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
+                let world = chunk_origin + UVec3::new(x, y, z).as_vec3() * voxel_size;
                 let d = world.distance(center) - radius;
                 field.set(x, y, z, d);
             }
@@ -161,10 +158,10 @@ fn fill_sphere_sdf(field: &mut SDF, chunk_pos: IVec3, center: Vec3, radius: f32)
     }
 }
 
-/// Pins the collision arena to LOD::Medium, matching the chunks this
-/// example spawns. Overrides TarasaurPlugin's CollisionLOD default
-/// (LOD::High) regardless of plugin registration order — insert_resource
-/// always wins over init_resource, whichever runs second.
+/// Pins the collision arena to `LOD::Medium`, matching the chunks this
+/// example spawns. Overrides `TarasaurPlugin`'s `CollisionLOD` default
+/// (`LOD::High`) regardless of plugin registration order — `insert_resource`
+/// always wins over `init_resource`, whichever runs second.
 struct CursorCollisionSetupPlugin;
 
 impl Plugin for CursorCollisionSetupPlugin {

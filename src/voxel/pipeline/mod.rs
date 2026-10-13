@@ -4,7 +4,19 @@ use bevy::{
     prelude::*,
     render::{
         render_asset::RenderAssets,
-        render_resource::*,
+        render_resource::{
+            AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+            BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer,
+            BufferBindingType, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
+            CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction,
+            ComputePipelineDescriptor, DepthBiasState, DepthStencilState, Extent3d, Face,
+            FilterMode, FragmentState, MultisampleState, Origin3d, PipelineCache, PrimitiveState,
+            PrimitiveTopology, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderStages, StencilState, TexelCopyBufferLayout,
+            TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension,
+            TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+            TextureViewDimension, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+        },
         renderer::{RenderDevice, RenderQueue},
         texture::GpuImage,
     },
@@ -147,134 +159,145 @@ impl FromWorld for VoxelRasterPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         let pipeline_cache = world.resource::<PipelineCache>();
-
-        // Group 0: View Layout
-        let view_layout_entries = vec![BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-            ty: BindingType::Buffer {
-                ty: BufferBindingType::Uniform,
-                has_dynamic_offset: true,
-                min_binding_size: None,
-            },
-            count: None,
-        }];
-
+        let view_entries = view_layout_entries();
+        let material_entries = material_layout_entries();
         let view_layout =
-            render_device.create_bind_group_layout(Some("voxel_view_layout"), &view_layout_entries);
-
-        // Group 1: Material Layout (WGSL expects texture_2d_array<f32>)
-        let material_layout_entries = vec![
-            // Binding 0: Texture
-            BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Texture {
-                    sample_type: TextureSampleType::Float { filterable: true },
-                    view_dimension: TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            // Binding 1: Sampler
-            BindGroupLayoutEntry {
-                binding: 1,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                count: None,
-            },
-            // Binding 2: MaterialPropertiesArray — storage, not uniform, since
-            // it's runtime-sized (materials.len() varies per palette).
-            BindGroupLayoutEntry {
-                binding: 2,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ];
-
+            render_device.create_bind_group_layout(Some("voxel_view_layout"), &view_entries);
         let material_layout = render_device
-            .create_bind_group_layout(Some("voxel_material_layout"), &material_layout_entries);
-
-        let pipeline_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-            label: Some("voxel_raster_pipeline".into()),
-            layout: vec![
-                BindGroupLayoutDescriptor {
-                    label: Cow::Borrowed("voxel_view_layout"),
-                    entries: view_layout_entries,
-                },
-                BindGroupLayoutDescriptor {
-                    label: Cow::Borrowed("voxel_material_layout"),
-                    entries: material_layout_entries,
-                },
-                BindGroupLayoutDescriptor {
-                    label: Cow::Borrowed("voxel_raster_chunk_visibility_layout"),
-                    entries: layouts::raster_chunk_visibility_entries(),
-                },
-            ],
-            vertex: VertexState {
-                shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
-                entry_point: Some("vs_main".into()),
-                shader_defs: vec![],
-                constants: vec![],
-                buffers: vec![VertexBufferLayout {
-                    array_stride: 32,
-                    step_mode: VertexStepMode::Vertex,
-                    attributes: vec![
-                        VertexAttribute {
-                            format: VertexFormat::Float32x4,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        VertexAttribute {
-                            format: VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 1,
-                        },
-                    ],
-                }],
-            },
-            fragment: Some(FragmentState {
-                shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
-                entry_point: Some("fs_main".into()),
-                shader_defs: vec![],
-                constants: vec![],
-                targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::Rgba8UnormSrgb,
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleList,
-                cull_mode: Some(Face::Back),
-                ..default()
-            },
-            depth_stencil: Some(DepthStencilState {
-                format: TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(CompareFunction::GreaterEqual),
-                stencil: StencilState::default(),
-                bias: DepthBiasState::default(),
-            }),
-            multisample: MultisampleState {
-                count: Msaa::default().samples(),
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            zero_initialize_workgroup_memory: false,
-            immediate_size: 0,
-        });
+            .create_bind_group_layout(Some("voxel_material_layout"), &material_entries);
+        let pipeline_id = pipeline_cache
+            .queue_render_pipeline(raster_pipeline_descriptor(view_entries, material_entries));
 
         Self {
             pipeline_id,
             view_layout,
             material_layout,
         }
+    }
+}
+
+/// Group 0: the view uniform.
+fn view_layout_entries() -> Vec<BindGroupLayoutEntry> {
+    vec![BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: true,
+            min_binding_size: None,
+        },
+        count: None,
+    }]
+}
+
+/// Group 1: the palette (WGSL expects `texture_2d_array<f32>`).
+fn material_layout_entries() -> Vec<BindGroupLayoutEntry> {
+    vec![
+        // Binding 0: Texture
+        BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: true },
+                view_dimension: TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // Binding 1: Sampler
+        BindGroupLayoutEntry {
+            binding: 1,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Sampler(SamplerBindingType::Filtering),
+            count: None,
+        },
+        // Binding 2: MaterialPropertiesArray — storage, not uniform, since
+        // it's runtime-sized (materials.len() varies per palette).
+        BindGroupLayoutEntry {
+            binding: 2,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+    ]
+}
+
+fn raster_pipeline_descriptor(
+    view_entries: Vec<BindGroupLayoutEntry>,
+    material_entries: Vec<BindGroupLayoutEntry>,
+) -> RenderPipelineDescriptor {
+    RenderPipelineDescriptor {
+        label: Some("voxel_raster_pipeline".into()),
+        layout: vec![
+            BindGroupLayoutDescriptor {
+                label: Cow::Borrowed("voxel_view_layout"),
+                entries: view_entries,
+            },
+            BindGroupLayoutDescriptor {
+                label: Cow::Borrowed("voxel_material_layout"),
+                entries: material_entries,
+            },
+            BindGroupLayoutDescriptor {
+                label: Cow::Borrowed("voxel_raster_chunk_visibility_layout"),
+                entries: layouts::raster_chunk_visibility_entries(),
+            },
+        ],
+        vertex: VertexState {
+            shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
+            entry_point: Some("vs_main".into()),
+            shader_defs: vec![],
+            constants: vec![],
+            buffers: vec![VertexBufferLayout {
+                array_stride: 32,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![
+                    VertexAttribute {
+                        format: VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    VertexAttribute {
+                        format: VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 1,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(FragmentState {
+            shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
+            entry_point: Some("fs_main".into()),
+            shader_defs: vec![],
+            constants: vec![],
+            targets: vec![Some(ColorTargetState {
+                format: TextureFormat::Rgba8UnormSrgb,
+                blend: Some(BlendState::REPLACE),
+                write_mask: ColorWrites::ALL,
+            })],
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            cull_mode: Some(Face::Back),
+            ..default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::GreaterEqual),
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState {
+            count: Msaa::default().samples(),
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        zero_initialize_workgroup_memory: false,
+        immediate_size: 0,
     }
 }
 
@@ -378,8 +401,10 @@ impl FromWorld for VoxelMaterialBindGroup {
     }
 }
 
-/// Runs in RenderSystems::Prepare. Rebuilds VoxelMaterialBindGroup once
-/// the active palette's albedo image is loaded, and never again after
+/// Runs in `RenderSystems::Prepare`.
+///
+/// Rebuilds `VoxelMaterialBindGroup` once the active palette's albedo image
+/// is loaded, and never again after
 /// that for the same albedo handle — in-place edits to palette.materials
 /// after the initial build won't hot-reload; only a handle change
 /// (different palette asset) triggers a rebuild.

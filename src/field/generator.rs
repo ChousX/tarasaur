@@ -47,7 +47,7 @@ impl ChunkGeneratorRegistry {
             let inv_voxel = 1.0 / lod.voxel_size();
             let mut data = generate(pos, lod);
             debug_assert_eq!(data.len(), lod.volume());
-            for v in data.iter_mut() {
+            for v in &mut data {
                 *v *= inv_voxel;
             }
             data

@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
+use crate::field::flatten_cube;
 use crate::field::generator::ChunkGeneratorRegistry;
 use crate::field::loading::ChunkDataTask;
 use crate::field::{FieldFromRaw, FieldNew, Versionable, VoxelDataSlice};
+use crate::num::{f32_from_u32, usize_from};
 use crate::{DirtyField, field::systems::SdfReinitTask};
 use crate::{LOD, MaxEditLod};
 use crate::{SDF, chunk::ReplanRequested};
@@ -36,6 +38,7 @@ pub struct ChunkSaveData {
     pub fields: Vec<FieldSavePayload>,
 }
 
+#[must_use]
 pub fn chunk_path(p: IVec3) -> PathBuf {
     PathBuf::from(format!("./saves/chunks/chunk_{}_{}_{}.bin", p.x, p.y, p.z))
 }
@@ -43,6 +46,7 @@ pub fn chunk_path(p: IVec3) -> PathBuf {
 // ------------------------------------------------------------ save cache ----
 
 /// Writes land here first (synchronously), then hit disk asynchronously.
+///
 /// Load tasks consult it before disk, so a downgrade -> re-upgrade can never
 /// read a stale file, and a despawn can't lose a pending write.
 #[derive(Resource, Clone, Default)]
@@ -54,9 +58,16 @@ struct SaveCacheInner {
     write_lock: Mutex<()>,
 }
 
+/// Locks a cache mutex, recovering it if a panic elsewhere poisoned it: the
+/// map and the write token stay valid whatever a panicking holder was doing.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl SaveCache {
+    #[must_use]
     pub fn get(&self, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
-        self.0.map.lock().unwrap().get(&pos).cloned()
+        lock(&self.0.map).get(&pos).cloned()
     }
 }
 
@@ -73,13 +84,13 @@ pub fn read_save(cache: &SaveCache, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
 pub fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
     let pos = data.header.chunk_pos;
     let data = Arc::new(data);
-    cache.0.map.lock().unwrap().insert(pos, data.clone());
+    lock(&cache.0.map).insert(pos, data.clone());
     let cache = cache.clone();
     AsyncComputeTaskPool::get()
         .spawn(async move {
-            let _guard = cache.0.write_lock.lock().unwrap();
+            let _guard = lock(&cache.0.write_lock);
             // A newer save for this chunk superseded us while we waited: skip.
-            let current = cache.0.map.lock().unwrap().get(&pos).cloned();
+            let current = lock(&cache.0.map).get(&pos).cloned();
             if !current.is_some_and(|c| Arc::ptr_eq(&c, &data)) {
                 return;
             }
@@ -91,7 +102,7 @@ pub fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
                 Ok(bytes) => {
                     let tmp = path.with_extension("tmp");
                     if let Err(e) =
-                        std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path))
+                        std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path))
                     {
                         eprintln!("Failed to write chunk save {pos:?}: {e}");
                         return; // keep it cached so loads still see it
@@ -102,7 +113,7 @@ pub fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
                     return;
                 }
             }
-            let mut map = cache.0.map.lock().unwrap();
+            let mut map = lock(&cache.0.map);
             if map.get(&pos).is_some_and(|c| Arc::ptr_eq(c, &data)) {
                 map.remove(&pos);
             }
@@ -134,24 +145,31 @@ pub struct ChunkPersistenceRegistry {
     pub(crate) fields: Vec<FieldVTable>,
 }
 
-/// Power-of-two LOD sizes and voxel i sitting at i*CHUNK_SIZE/size make
+/// Power-of-two LOD sizes and voxel i sitting at i*`CHUNK_SIZE/size` make
 /// this an exact stride sample; no interpolation, no JFA.
+#[must_use]
 pub fn downsample_bytes<F: VoxelDataSlice>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
     let src: Vec<F::Elem> = bytemuck::pod_collect_to_vec(bytes);
-    let (fs, ts) = (from.size() as usize, to.size() as usize);
-    if src.len() != fs * fs * fs || ts == 0 || fs < ts {
-        return Vec::new(); // install falls back to a default field
+    let (fs, ts) = (from.size(), to.size());
+    // Bad input: install falls back to a default field.
+    if Some(src.len()) != usize_from(fs).checked_pow(3) || fs < ts {
+        return Vec::new();
     }
     if fs == ts {
         return bytes.to_vec();
     }
-    let ratio = fs / ts;
-    let mut out: Vec<F::Elem> = Vec::with_capacity(ts * ts * ts);
+    let Some(ratio) = fs.checked_div(ts) else {
+        return Vec::new();
+    };
+    let at = |c: u32| c.wrapping_mul(ratio);
+    let mut out: Vec<F::Elem> = Vec::with_capacity(usize_from(ts).saturating_pow(3));
     for z in 0..ts {
         for y in 0..ts {
             for x in 0..ts {
-                let i = (z * ratio * fs + y * ratio) * fs + x * ratio;
-                out.push(F::rescale(src[i], ratio as f32));
+                let Some(&v) = src.get(flatten_cube(at(x), at(y), at(z), fs)) else {
+                    return Vec::new();
+                };
+                out.push(F::rescale(v, f32_from_u32(ratio)));
             }
         }
     }

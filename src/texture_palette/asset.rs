@@ -39,7 +39,7 @@ use super::validation::{self, PaletteValidationError};
 ///     generate_mipmaps: false, // KTX2 should have mipmaps baked in
 /// };
 /// ```
-#[derive(Asset, TypePath, Clone, Debug)]
+#[derive(Asset, TypePath, Clone, Debug, Default)]
 pub struct TexturePalette {
     /// Albedo (base color) texture array.
     ///
@@ -71,31 +71,22 @@ pub struct TexturePalette {
     pub generate_mipmaps: bool,
 }
 
-impl Default for TexturePalette {
-    fn default() -> Self {
-        Self {
-            albedo: Handle::default(),
-            normal: None,
-            arm: None,
-            materials: Vec::new(),
-            generate_mipmaps: false,
-        }
-    }
-}
-
 impl TexturePalette {
     /// Get the number of materials in this palette.
-    pub fn material_count(&self) -> usize {
+    #[must_use]
+    pub const fn material_count(&self) -> usize {
         self.materials.len()
     }
 
     /// Check if this palette has normal maps.
-    pub fn has_normal_maps(&self) -> bool {
+    #[must_use]
+    pub const fn has_normal_maps(&self) -> bool {
         self.normal.is_some()
     }
 
     /// Check if this palette has ARM textures.
-    pub fn has_arm(&self) -> bool {
+    #[must_use]
+    pub const fn has_arm(&self) -> bool {
         self.arm.is_some()
     }
 
@@ -106,11 +97,11 @@ impl TexturePalette {
     /// - All textures have matching layer counts and dimensions
     /// - Material count doesn't exceed layer count
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// This method is intended to be called in a system where you can handle
-    /// the error appropriately. For automatic validation with panics, see
-    /// the palette validation system in the plugin.
+    /// The first check that fails, as a [`PaletteValidationError`]. This
+    /// method is intended to be called in a system where you can handle the
+    /// error appropriately; the plugin's palette validation system does so.
     pub fn validate(&self, images: &Assets<Image>) -> Result<(), PaletteValidationError> {
         // Validate albedo (required)
         let albedo_image = images
@@ -122,18 +113,18 @@ impl TexturePalette {
         let layer_count = albedo_image.texture_descriptor.size.depth_or_array_layers;
 
         // Validate normal (optional)
-        if let Some(ref normal_handle) = self.normal {
-            if let Some(normal_image) = images.get(normal_handle) {
-                validation::validate_linear_texture(normal_image, albedo_image, "normal")?;
-            }
-            // If not loaded yet, skip validation (will be caught on next frame)
+        if let Some(ref normal_handle) = self.normal
+            && let Some(normal_image) = images.get(normal_handle)
+        {
+            validation::validate_linear_texture(normal_image, albedo_image, "normal")?;
         }
+        // If not loaded yet, skip validation (will be caught on next frame)
 
         // Validate ARM (optional)
-        if let Some(ref arm_handle) = self.arm {
-            if let Some(arm_image) = images.get(arm_handle) {
-                validation::validate_linear_texture(arm_image, albedo_image, "arm")?;
-            }
+        if let Some(ref arm_handle) = self.arm
+            && let Some(arm_image) = images.get(arm_handle)
+        {
+            validation::validate_linear_texture(arm_image, albedo_image, "arm")?;
         }
 
         // Validate material count
@@ -145,6 +136,7 @@ impl TexturePalette {
     /// Get the layer count from the albedo texture.
     ///
     /// Returns `None` if the albedo texture isn't loaded.
+    #[must_use]
     pub fn layer_count(&self, images: &Assets<Image>) -> Option<u32> {
         images
             .get(&self.albedo)

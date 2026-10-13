@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 use super::Field;
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::system::SystemParam;
-use bevy::shape::{Cuboid, Primitive3d, Sphere};
 use bevy::prelude::*;
+use bevy::shape::{Cuboid, Primitive3d, Sphere};
 
 #[derive(Clone, Copy, Debug)]
 pub enum EditMode<V> {
@@ -33,7 +33,7 @@ pub struct EditFieldMessage<
 impl<F: Field<V>, S: Primitive3d + Send + Sync + 'static, V: Copy + Default + Send + Sync + 'static>
     EditFieldMessage<F, S, V>
 {
-    pub fn new(center: Vec3, shape: S, val: V, mode: EditMode<V>) -> Self {
+    pub const fn new(center: Vec3, shape: S, val: V, mode: EditMode<V>) -> Self {
         Self {
             center,
             shape,
@@ -70,7 +70,7 @@ where
     box_writer: MessageWriter<'w, EditFieldMessage<F, Cuboid, V>>,
 }
 
-impl<'w, F, V> WorldEditor<'w, F, V>
+impl<F, V> WorldEditor<'_, F, V>
 where
     F: Field<V>,
     V: Copy + Default + Send + Sync + 'static,

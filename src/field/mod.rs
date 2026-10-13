@@ -48,9 +48,23 @@ pub trait Field<T: Copy + Default>: Component {
 }
 
 #[inline]
-pub fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> u32 {
-    // Index = z * (width * height) + y * width + x
-    z * (size.x * size.y) + y * size.x + x
+#[must_use]
+pub const fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> usize {
+    use crate::num::usize_from;
+    // Index = (z * height + y) * width + x. Wrapping can't change a valid
+    // index; an out-of-range one just fails the caller's `get`.
+    usize_from(z)
+        .wrapping_mul(usize_from(size.y))
+        .wrapping_add(usize_from(y))
+        .wrapping_mul(usize_from(size.x))
+        .wrapping_add(usize_from(x))
+}
+
+/// [`flatten_with_size`] for a cube `size` voxels on each side.
+#[inline]
+#[must_use]
+pub const fn flatten_cube(x: u32, y: u32, z: u32, size: u32) -> usize {
+    flatten_with_size(x, y, z, UVec3::splat(size))
 }
 
 pub trait Versionable: Component {
@@ -85,7 +99,9 @@ pub trait VoxelDataSlice {
 }
 
 /// How a field samples its own data at a non-integer (neighbor-chunk)
-/// coordinate when building the padding apron. SDF distances interpolate
+/// coordinate when building the padding apron.
+///
+/// SDF distances interpolate
 /// meaningfully (trilinear); material ids are categorical and must never be
 /// blended, so they use nearest-neighbor instead.
 pub trait ApronSample: VoxelDataSlice {
@@ -136,25 +152,25 @@ pub trait FieldFromRaw: VoxelDataSlice + Sized {
 
 use crate::chunk::{Chunk, EditPin};
 
-/// The only sanctioned way to mutate a chunk field. `get_mut` returns `Some`
-/// only when the chunk is at `MaxEditLod` with no load in flight. Otherwise
-/// it pins the chunk at max LOD (upgrading it) and returns `None`, so the
-/// caller retries next frame. If the field is optional and absent, it is
-/// created at its "editable default" (for visibility: fully visible).
+/// Per-chunk state `EditableChunks` checks before handing out a field.
+type EditableChunkState = (
+    Option<&'static LOD>,
+    Has<loading::ChunkDataTask>,
+    Option<&'static mut EditPin>,
+);
+
+/// The only sanctioned way to mutate a chunk field.
+///
+/// `get_mut` returns `Some` only when the chunk is at `MaxEditLod` with no
+/// load in flight. Otherwise it pins the chunk at max LOD (upgrading it) and
+/// returns `None`, so the caller retries next frame. If the field is optional
+/// and absent, it is created at its "editable default" (for visibility:
+/// fully visible).
 #[derive(SystemParam)]
 pub struct EditableChunks<'w, 's, F: Component<Mutability = Mutable> + FieldNew> {
     max: Res<'w, MaxEditLod>,
     commands: Commands<'w, 's>,
-    chunks: Query<
-        'w,
-        's,
-        (
-            Option<&'static LOD>,
-            Has<loading::ChunkDataTask>,
-            Option<&'static mut EditPin>,
-        ),
-        With<Chunk>,
-    >,
+    chunks: Query<'w, 's, EditableChunkState, With<Chunk>>,
     fields: Query<'w, 's, &'static mut F, With<Chunk>>,
 }
 

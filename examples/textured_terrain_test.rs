@@ -9,6 +9,9 @@ use bevy::{
     },
 };
 use tarasaur::editor::WorldEditor;
+use tarasaur::num::{
+    f32_from_i32, f32_from_u32, i16_from_f32, i32_from_f32, u8_from_f32, usize_from,
+};
 use tarasaur::{
     Field, LOD, MaterialField, SDF, TarasaurPlugin, VisibilityField, VoxelDataSlice, VoxelMaterial,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
@@ -36,19 +39,21 @@ impl VoxelMaterial for TerrainMaterial {
     const COUNT: u8 = 4;
 
     fn to_id(self) -> u8 {
-        self as u8
+        match self {
+            Self::Grass => 0,
+            Self::Stone => 1,
+            Self::Dirt => 2,
+            Self::Sand => 3,
+        }
     }
 
+    /// Ids past `COUNT` (never written by `to_id`) read as the default.
     fn from_id(id: u8) -> Self {
         match id {
-            0 => Self::Grass,
             1 => Self::Stone,
             2 => Self::Dirt,
             3 => Self::Sand,
-            _ => unreachable!(
-                "id {id} out of range for TerrainMaterial::COUNT = {}",
-                Self::COUNT
-            ),
+            _ => Self::Grass,
         }
     }
 }
@@ -87,17 +92,15 @@ const LOD_BANDS: &[(i32, LOD)] = &[
 ];
 
 fn lod_for_distance(chebyshev_dist: i32) -> LOD {
-    for &(radius, lod) in LOD_BANDS {
-        if chebyshev_dist <= radius {
-            return lod;
-        }
-    }
-    unreachable!("LOD_BANDS must end with an i32::MAX catch-all");
+    // LOD_BANDS ends with an i32::MAX catch-all, so the fallback never applies.
+    LOD_BANDS
+        .iter()
+        .find(|&&(radius, _)| chebyshev_dist <= radius)
+        .map_or(LOD::Lowest, |&(_, lod)| lod)
 }
 
-fn chunk_count() -> i32 {
-    (2 * GRID_RADIUS + 1).pow(2) * 2
-}
+/// A (2r+1)^2 grid, two chunks tall.
+const CHUNK_COUNT: i32 = (2 * GRID_RADIUS + 1).pow(2) * 2;
 
 #[derive(Resource, Default)]
 struct TerrainReady(bool);
@@ -112,20 +115,17 @@ struct FlyCam {
 
 fn main() {
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                    limits: WgpuLimits {
-                        max_buffer_size: 1024 * 1024 * 1024,
-                        max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                        ..default()
-                    }
-                    .into(),
+        .add_plugins(DefaultPlugins.set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                limits: WgpuLimits {
+                    max_buffer_size: 1024 * 1024 * 1024,
+                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
                     ..default()
-                })),
+                },
                 ..default()
-            }),
-        )
+            })),
+            ..default()
+        }))
         .add_plugins(TarasaurPlugin)
         .add_plugins(PalettePlugin::new())
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new())
@@ -160,22 +160,24 @@ fn log_material_distribution(
     if *logged || !ready.0 {
         return;
     }
-    *frame += 1;
+    *frame = frame.saturating_add(1);
     if *frame < 5 {
         return;
     }
     *logged = true;
 
-    let mut counts = [0u64; TerrainMaterial::COUNT as usize];
+    let mut counts = [0u64; 4]; // one per TerrainMaterial variant
     for field in query.iter() {
         for &id in field.data_slice() {
-            counts[id as usize] += 1;
+            if let Some(c) = counts.get_mut(usize::from(id)) {
+                *c = c.saturating_add(1);
+            }
         }
     }
 
+    let [grass, stone, dirt, sand] = counts;
     info!(
-        "[lod_terrain_test] material voxel counts: grass={} stone={} dirt={} sand={}",
-        counts[0], counts[1], counts[2], counts[3]
+        "[lod_terrain_test] material voxel counts: grass={grass} stone={stone} dirt={dirt} sand={sand}"
     );
 }
 
@@ -184,10 +186,7 @@ fn setup_terrain_palette(
     mut images: ResMut<Assets<Image>>,
     mut palettes: ResMut<Assets<TexturePalette>>,
 ) {
-    let size = 64;
-    let layers = 4;
-    let bytes_per_pixel = 4;
-    let layer_size = (size * size * bytes_per_pixel) as usize;
+    let size: u32 = 64;
 
     let colors: [[u8; 3]; 4] = [
         [34, 139, 34],   // Forest Green
@@ -195,30 +194,29 @@ fn setup_terrain_palette(
         [112, 66, 20],   // Dirt Brown
         [225, 198, 153], // Sand Beige
     ];
+    let layers = u32::try_from(colors.len()).unwrap_or(u32::MAX);
 
-    let mut albedo_data = vec![0u8; layer_size * layers as usize];
-    let mut normal_data = vec![0u8; layer_size * layers as usize];
+    // RGBA8, layer-major then row-major, as `Image::new` expects.
+    let bytes = usize_from(size)
+        .pow(2)
+        .saturating_mul(4)
+        .saturating_mul(colors.len());
+    let mut albedo_data = Vec::with_capacity(bytes);
+    let mut normal_data = Vec::with_capacity(bytes);
 
-    for layer in 0..layers as usize {
-        let layer_offset = layer * layer_size;
-        let base_col = colors[layer];
-
+    for (seed, base_col) in (1u32..).zip(colors) {
         for y in 0..size {
             for x in 0..size {
-                let pixel_offset = layer_offset + ((y * size + x) * bytes_per_pixel) as usize;
+                let noise = hash2(x.cast_signed(), y.cast_signed(), seed);
+                let var = i16_from_f32(noise.mul_add(30.0, -15.0));
+                let tint = |c: u8| {
+                    let v = i16::from(c).saturating_add(var).clamp(0, 255);
+                    u8::try_from(v).unwrap_or(u8::MAX)
+                };
+                albedo_data.extend([tint(base_col[0]), tint(base_col[1]), tint(base_col[2]), 255]);
 
-                let noise = hash2(x as i32, y as i32, (layer + 1) as u32);
-                let var = (noise * 30.0 - 15.0) as i16;
-
-                albedo_data[pixel_offset] = (base_col[0] as i16 + var).clamp(0, 255) as u8;
-                albedo_data[pixel_offset + 1] = (base_col[1] as i16 + var).clamp(0, 255) as u8;
-                albedo_data[pixel_offset + 2] = (base_col[2] as i16 + var).clamp(0, 255) as u8;
-                albedo_data[pixel_offset + 3] = 255;
-
-                normal_data[pixel_offset] = (128.0 + (noise - 0.5) * 40.0) as u8;
-                normal_data[pixel_offset + 1] = (128.0 + (noise - 0.5) * 40.0) as u8;
-                normal_data[pixel_offset + 2] = 255;
-                normal_data[pixel_offset + 3] = 255;
+                let n = u8_from_f32((noise - 0.5).mul_add(40.0, 128.0));
+                normal_data.extend([n, n, 255, 255]);
             }
         }
     }
@@ -248,8 +246,7 @@ fn setup_terrain_palette(
     let albedo_handle = images.add(albedo_image);
     let normal_handle = images.add(normal_image);
 
-    let palette = PaletteBuilder::new()
-        .with_albedo(albedo_handle)
+    let palette = PaletteBuilder::new(albedo_handle)
         .with_normal(normal_handle)
         .add_material(
             PaletteMaterial::new("grass")
@@ -313,8 +310,8 @@ fn fly_cam_system(
     for (mut transform, mut fly_cam) in query.iter_mut() {
         if mouse_button.pressed(MouseButton::Right) {
             for ev in mouse_motion.read() {
-                fly_cam.yaw -= ev.delta.x * fly_cam.sensitivity;
-                fly_cam.pitch -= ev.delta.y * fly_cam.sensitivity;
+                fly_cam.yaw = f32::mul_add(ev.delta.x, -fly_cam.sensitivity, fly_cam.yaw);
+                fly_cam.pitch = f32::mul_add(ev.delta.y, -fly_cam.sensitivity, fly_cam.pitch);
                 fly_cam.pitch = fly_cam.pitch.clamp(-1.54, 1.54);
             }
             transform.rotation = Quat::from_euler(EulerRot::YXZ, fly_cam.yaw, fly_cam.pitch, 0.0);
@@ -365,7 +362,8 @@ fn spawn_terrain_chunks(mut commands: Commands) {
             for y in 0..=1 {
                 let dist = x.abs().max(z.abs());
                 let lod = lod_for_distance(dist);
-                *counts.entry(lod).or_insert(0) += 1;
+                let count = counts.entry(lod).or_insert(0);
+                *count = count.saturating_add(1);
                 commands.spawn((Chunk, ChunkPosition(IVec3::new(x, y, z)), lod));
             }
         }
@@ -373,43 +371,42 @@ fn spawn_terrain_chunks(mut commands: Commands) {
 
     info!(
         "[lod_terrain_test] spawned {} chunks across bands {:?} -> counts: {:?}",
-        chunk_count(),
-        LOD_BANDS,
-        counts
+        CHUNK_COUNT, LOD_BANDS, counts
     );
 }
 
 fn hash2(x: i32, z: i32, seed: u32) -> f32 {
-    let mut h = (x as u32).wrapping_mul(374761393)
-        ^ (z as u32).wrapping_mul(668265263)
-        ^ seed.wrapping_mul(2246822519);
+    let mut h = x.cast_unsigned().wrapping_mul(374_761_393)
+        ^ z.cast_unsigned().wrapping_mul(668_265_263)
+        ^ seed.wrapping_mul(2_246_822_519);
     h ^= h >> 15;
-    h = h.wrapping_mul(2246822519);
+    h = h.wrapping_mul(2_246_822_519);
     h ^= h >> 13;
-    h = h.wrapping_mul(3266489917);
+    h = h.wrapping_mul(3_266_489_917);
     h ^= h >> 16;
-    (h as f32) / (u32::MAX as f32)
+    f32_from_u32(h) / f32_from_u32(u32::MAX)
 }
 
 #[inline]
 fn smoothstep(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
+    t * t * 2.0f32.mul_add(-t, 3.0)
 }
 
 fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
-    let x0 = x.floor() as i32;
-    let z0 = z.floor() as i32;
-    let tx = smoothstep(x - x0 as f32);
-    let tz = smoothstep(z - z0 as f32);
+    let x0 = i32_from_f32(x.floor());
+    let z0 = i32_from_f32(z.floor());
+    let tx = smoothstep(x - f32_from_i32(x0));
+    let tz = smoothstep(z - f32_from_i32(z0));
+    let (x1, z1) = (x0.wrapping_add(1), z0.wrapping_add(1));
 
     let v00 = hash2(x0, z0, seed);
-    let v10 = hash2(x0 + 1, z0, seed);
-    let v01 = hash2(x0, z0 + 1, seed);
-    let v11 = hash2(x0 + 1, z0 + 1, seed);
+    let v10 = hash2(x1, z0, seed);
+    let v01 = hash2(x0, z1, seed);
+    let v11 = hash2(x1, z1, seed);
 
-    let a = v00 + (v10 - v00) * tx;
-    let b = v01 + (v11 - v01) * tx;
-    a + (b - a) * tz
+    let a = (v10 - v00).mul_add(tx, v00);
+    let b = (v11 - v01).mul_add(tx, v01);
+    (b - a).mul_add(tz, a)
 }
 
 fn fbm(x: f32, z: f32, octaves: u32, seed: u32) -> f32 {
@@ -418,7 +415,8 @@ fn fbm(x: f32, z: f32, octaves: u32, seed: u32) -> f32 {
     let mut sum = 0.0;
     let mut max = 0.0;
     for i in 0..octaves {
-        sum += value_noise(x * frequency, z * frequency, seed.wrapping_add(i)) * amplitude;
+        sum =
+            value_noise(x * frequency, z * frequency, seed.wrapping_add(i)).mul_add(amplitude, sum);
         max += amplitude;
         amplitude *= 0.5;
         frequency *= 2.0;
@@ -435,9 +433,9 @@ fn terrain_height(world_x: f32, world_z: f32) -> f32 {
     let ridge = (0.5 - (base - 0.5).abs()) * 2.0;
     let mountain_mask = fbm(world_x * 0.01, world_z * 0.01, 3, 42);
 
-    let combined_noise = base + (ridge * mountain_mask * 0.6);
+    let combined_noise = (ridge * mountain_mask).mul_add(0.6, base);
 
-    BASE_HEIGHT + (combined_noise - 0.5) * 2.0 * AMPLITUDE
+    ((combined_noise - 0.5) * 2.0).mul_add(AMPLITUDE, BASE_HEIGHT)
 }
 
 fn generate_terrain(
@@ -450,20 +448,20 @@ fn generate_terrain(
     )>,
     mut visibility_editor: WorldEditor<VisibilityField, bool>,
 ) {
-    if *generated || query.iter().count() as i32 != chunk_count() {
+    if *generated || i32::try_from(query.iter().count()).ok() != Some(CHUNK_COUNT) {
         return;
     }
     *generated = true;
 
     for (ChunkPosition(chunk_pos), mut sdf, mut mat_field) in query.iter_mut() {
         let size = sdf.size();
-        let voxel_size = CHUNK_SIZE / size.x as f32;
+        let voxel_size = CHUNK_SIZE / f32_from_u32(size.x);
         let chunk_origin = chunk_pos.as_vec3() * CHUNK_SIZE;
 
         for z in 0..size.z {
             for y in 0..size.y {
                 for x in 0..size.x {
-                    let world = chunk_origin + Vec3::new(x as f32, y as f32, z as f32) * voxel_size;
+                    let world = chunk_origin + UVec3::new(x, y, z).as_vec3() * voxel_size;
                     let height = terrain_height(world.x, world.z);
                     let value = if world.y < height { -1.0 } else { 1.0 };
                     let mat = determine_material(height, world.y);
@@ -484,15 +482,12 @@ fn generate_terrain(
     // region" within this one frame — no race, no delay needed. Mixing
     // box + sphere would put the two edits in different systems with no
     // defined relative order.
-    let world_min = Vec3::new(
-        -GRID_RADIUS as f32 * CHUNK_SIZE,
-        0.0,
-        -GRID_RADIUS as f32 * CHUNK_SIZE,
-    );
+    let radius = f32_from_i32(GRID_RADIUS);
+    let world_min = Vec3::new(-radius * CHUNK_SIZE, 0.0, -radius * CHUNK_SIZE);
     let world_max = Vec3::new(
-        (GRID_RADIUS + 1) as f32 * CHUNK_SIZE,
+        (radius + 1.0) * CHUNK_SIZE,
         2.0 * CHUNK_SIZE,
-        (GRID_RADIUS + 1) as f32 * CHUNK_SIZE,
+        (radius + 1.0) * CHUNK_SIZE,
     );
     let world_center = (world_min + world_max) * 0.5;
     //let world_half_extent = (world_max - world_min) * 0.5;
@@ -501,7 +496,7 @@ fn generate_terrain(
     ready.0 = true;
     info!(
         "[lod_terrain_test] terrain generated across all {} chunks",
-        chunk_count()
+        CHUNK_COUNT
     );
 }
 
@@ -514,7 +509,7 @@ fn log_lod_distribution(
     if *logged || !ready.0 {
         return;
     }
-    *frame += 1;
+    *frame = frame.saturating_add(1);
     if *frame < 5 {
         return;
     }
@@ -531,12 +526,12 @@ fn log_lod_distribution(
             max = max.max(v);
         }
         let entry = per_lod.entry(*lod).or_insert((0, f32::MAX, f32::MIN));
-        entry.0 += 1;
+        entry.0 = entry.0.saturating_add(1);
         entry.1 = entry.1.min(min);
         entry.2 = entry.2.max(max);
     }
 
-    for (lod, (count, min, max)) in per_lod.iter() {
+    for (lod, (count, min, max)) in &per_lod {
         info!(
             "[lod_terrain_test] LOD {:?}: {} chunks, sdf range=[{:.3}, {:.3}]",
             lod, count, min, max

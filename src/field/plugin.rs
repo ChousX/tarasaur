@@ -1,9 +1,9 @@
 use std::marker::PhantomData;
 
 use bevy::ecs::component::Mutable;
-use bevy::shape::{Cuboid, Sphere};
 use bevy::prelude::*;
 use bevy::render::{Render, RenderApp};
+use bevy::shape::{Cuboid, Sphere};
 
 use crate::chunk::NewChunkSpawned;
 use crate::editor::{SdfCsgSphere, SdfSphereStamp};
@@ -34,15 +34,17 @@ pub enum FieldSet {
     Reinit,
 }
 
-/// Registers a single material channel (`MaterialField<M>`) with the app —
-/// its edit messages/systems, and the observer that attaches it to new
-/// chunks. Add one of these per material enum you use; most projects need
+/// Registers a single material channel (`MaterialField<M>`) with the app.
+///
+/// That is its edit messages/systems, and the observer that attaches it to
+/// new chunks. Add one of these per material enum you use; most projects need
 /// exactly one, but nothing stops registering a second channel (e.g. a
 /// separate cave-stratum material) alongside it.
 pub struct MaterialFieldPlugin<M: VoxelMaterial>(PhantomData<M>);
 
 impl<M: VoxelMaterial> MaterialFieldPlugin<M> {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self(PhantomData)
     }
 }
