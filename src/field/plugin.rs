@@ -6,13 +6,13 @@ use bevy::prelude::*;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::chunk::NewChunkSpawned;
-use crate::editor::SdfSphereStamp;
+use crate::editor::{SdfCsgSphere, SdfSphereStamp};
 use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDF, VisibilityField};
 use crate::persistence::RegisterSaveableFieldExt;
 use crate::systems::{
-    clear_dirty_visibility, detect_topology_desync, process_sdf_sphere_stamps,
-    resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
+    clear_dirty_visibility, detect_topology_desync, process_sdf_csg_spheres,
+    process_sdf_sphere_stamps, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
 use crate::voxel::systems::{
     extract_voxel_chunks, prepare_material_for_arena, prepare_voxel_arena,
@@ -101,6 +101,9 @@ impl Plugin for FieldsPlugin {
 
         app.add_message::<SdfSphereStamp>()
             .add_systems(Update, process_sdf_sphere_stamps.in_set(FieldSet::Edit));
+
+        app.add_message::<SdfCsgSphere>()
+            .add_systems(Update, process_sdf_csg_spheres);
     }
 }
 

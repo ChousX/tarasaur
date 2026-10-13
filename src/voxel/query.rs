@@ -358,7 +358,7 @@ pub fn prepare_voxel_queries(
         chunk_size: CHUNK_SIZE,
         lookup_capacity: query_buffers.merged_lookup_capacity,
         max_dda_steps: 64,
-        max_sphere_steps: 96,
+        max_sphere_steps: 256,
         lod_active_mask,
         _pad0: 0,
         _pad1: 0,

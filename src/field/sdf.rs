@@ -254,7 +254,7 @@ impl FieldLOD for SDF {
     }
 }
 
-/// The Jump Flood Algorithm pass extracted from `SDFField::reinit` — same
+/// The Jump Flood Algorithm
 /// four stages (seed the boundary, flood outward at halving strides,
 /// resolve ping-pong buffer, compute final signed distances), just
 /// operating on borrowed buffers instead of `&mut self` so it can run
@@ -277,7 +277,10 @@ pub fn jump_flood_distance_field(
     fn flatten(x: u32, y: u32, z: u32, size: u32) -> usize {
         (z * size * size + y * size + x) as usize
     }
-
+    #[inline]
+    fn in_bounds(x: i32, y: i32, z: i32, size: u32) -> bool {
+        x >= 0 && y >= 0 && z >= 0 && x < size as i32 && y < size as i32 && z < size as i32
+    }
     #[inline]
     fn dist_sq(x1: u32, y1: u32, z1: u32, x2: u32, y2: u32, z2: u32) -> f32 {
         let dx = x1 as f32 - x2 as f32;
@@ -286,54 +289,47 @@ pub fn jump_flood_distance_field(
         dx * dx + dy * dy + dz * dz
     }
 
-    // 1. Identify and seed the initial zero-crossing boundary layer.
+    // 1. Seed boundary voxels (same `<= 0.0` test as pass1 / inside_count).
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
                 let idx = flatten(x, y, z, size);
-                let current_sign = data[idx].is_sign_negative();
-
+                let inside = data[idx] <= 0.0;
                 let mut is_boundary = false;
                 for (dx, dy, dz) in CARDINAL_NEIGHBORS {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    let nz = z as i32 + dz;
-
-                    if nx >= 0
-                        && nx < size as i32
-                        && ny >= 0
-                        && ny < size as i32
-                        && nz >= 0
-                        && nz < size as i32
+                    let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                    if in_bounds(nx, ny, nz, size)
+                        && (data[flatten(nx as u32, ny as u32, nz as u32, size)] <= 0.0) != inside
                     {
-                        let n_idx = flatten(nx as u32, ny as u32, nz as u32, size);
-                        if data[n_idx].is_sign_negative() != current_sign {
-                            is_boundary = true;
-                            break;
-                        }
+                        is_boundary = true;
+                        break;
                     }
                 }
-
-                if is_boundary {
-                    seeds[idx] = PackedCoord::new(x, y, z);
+                seeds[idx] = if is_boundary {
+                    PackedCoord::new(x, y, z)
                 } else {
-                    seeds[idx] = PackedCoord::EMPTY;
-                }
+                    PackedCoord::EMPTY
+                };
             }
         }
     }
 
-    // 2. Main Jump Flood loop (e.g., 32 -> 16 -> 8 -> 4 -> 2 -> 1).
-    let mut step = (size / 2) as i32;
-    let mut use_scratch_as_dest = true;
+    // 2. Flood: size/2 .. 1, then two refinement passes (2, 1).
+    let mut steps: Vec<i32> = Vec::new();
+    let mut s = (size / 2) as i32;
+    while s > 0 {
+        steps.push(s);
+        s /= 2;
+    }
+    steps.push(2);
+    steps.push(1);
 
-    while step > 0 {
+    let mut use_scratch_as_dest = true;
+    for step in steps {
         for z in 0..size {
             for y in 0..size {
                 for x in 0..size {
                     let current_idx = flatten(x, y, z, size);
-
-                    // Select source buffer based on current ping-pong orientation.
                     let src_buffer: &[PackedCoord] =
                         if use_scratch_as_dest { seeds } else { scratch };
 
@@ -345,22 +341,15 @@ pub fn jump_flood_distance_field(
                         dist_sq(x, y, z, sx, sy, sz)
                     };
 
-                    // Evaluate 26 neighbors at our active jump stride length.
                     for (dx, dy, dz) in JFA_NEIGHBOR_OFFSETS {
-                        let nx = x as i32 + dx * step;
-                        let ny = y as i32 + dy * step;
-                        let nz = z as i32 + dz * step;
-
-                        if nx >= 0
-                            && nx < size as i32
-                            && ny >= 0
-                            && ny < size as i32
-                            && nz >= 0
-                            && nz < size as i32
-                        {
-                            let neighbor_idx = flatten(nx as u32, ny as u32, nz as u32, size);
-                            let neighbor_seed = src_buffer[neighbor_idx];
-
+                        let (nx, ny, nz) = (
+                            x as i32 + dx * step,
+                            y as i32 + dy * step,
+                            z as i32 + dz * step,
+                        );
+                        if in_bounds(nx, ny, nz, size) {
+                            let neighbor_seed =
+                                src_buffer[flatten(nx as u32, ny as u32, nz as u32, size)];
                             if !neighbor_seed.is_empty() {
                                 let (sx, sy, sz) = neighbor_seed.unpack();
                                 let d_sq = dist_sq(x, y, z, sx, sy, sz);
@@ -372,7 +361,6 @@ pub fn jump_flood_distance_field(
                         }
                     }
 
-                    // Commit result to opposite buffer.
                     if use_scratch_as_dest {
                         scratch[current_idx] = best_seed;
                     } else {
@@ -381,49 +369,40 @@ pub fn jump_flood_distance_field(
                 }
             }
         }
-
         use_scratch_as_dest = !use_scratch_as_dest;
-        step /= 2;
     }
-
-    // If the final pass ended inside the scratch buffer, copy it back over
-    // into persistent storage.
     if !use_scratch_as_dest {
         seeds.copy_from_slice(scratch);
     }
 
-    // 3. Final distance pass. Reads `data` (still the original input) and writes
-    // to `out`, so seed offsets are read from unmodified values.
-    let mut out = vec![0.0f32; data.len()];
-
-    // Distance from a boundary voxel's centre to the surface, in voxels, by
-    // linear interpolation along the crossing edge.
-    let surface_offset = |x: u32, y: u32, z: u32| -> f32 {
-        let i = flatten(x, y, z, size);
-        let v = data[i];
-        let inside = v <= 0.0;
-        let mut best = 0.5f32;
+    // 3. Exact distance to the interpolated zero-crossing points on the
+    // sign-changing edges of voxel `s` (squared; f32::MAX if it has none).
+    let crossing_dist_sq = |px: u32, py: u32, pz: u32, sx: i32, sy: i32, sz: i32| -> f32 {
+        if !in_bounds(sx, sy, sz, size) {
+            return f32::MAX;
+        }
+        let vs = data[flatten(sx as u32, sy as u32, sz as u32, size)];
+        let s_in = vs <= 0.0;
+        let mut best = f32::MAX;
         for (dx, dy, dz) in CARDINAL_NEIGHBORS {
-            let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
-            if nx < 0
-                || ny < 0
-                || nz < 0
-                || nx >= size as i32
-                || ny >= size as i32
-                || nz >= size as i32
-            {
+            let (nx, ny, nz) = (sx + dx, sy + dy, sz + dz);
+            if !in_bounds(nx, ny, nz, size) {
                 continue;
             }
             let vn = data[flatten(nx as u32, ny as u32, nz as u32, size)];
-            if (vn <= 0.0) != inside {
-                let (a, b) = (v.abs(), vn.abs());
-                let d = if a + b > 0.0 { a / (a + b) } else { 0.5 };
-                best = best.min(d);
+            if (vn <= 0.0) != s_in {
+                let (a, b) = (vs.abs(), vn.abs());
+                let t = if a + b > 0.0 { a / (a + b) } else { 0.5 };
+                let ex = px as f32 - (sx as f32 + dx as f32 * t);
+                let ey = py as f32 - (sy as f32 + dy as f32 * t);
+                let ez = pz as f32 - (sz as f32 + dz as f32 * t);
+                best = best.min(ex * ex + ey * ey + ez * ez);
             }
         }
         best
     };
 
+    let mut out = vec![0.0f32; data.len()];
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
@@ -433,9 +412,20 @@ pub fn jump_flood_distance_field(
                     size as f32
                 } else {
                     let (sx, sy, sz) = seeds[idx].unpack();
-                    dist_sq(x, y, z, sx, sy, sz).sqrt() + surface_offset(sx, sy, sz)
+                    let (sx, sy, sz) = (sx as i32, sy as i32, sz as i32);
+                    // The seed and its 6 neighbours: the true nearest crossing
+                    // can sit on a neighbouring boundary voxel.
+                    let mut best = crossing_dist_sq(x, y, z, sx, sy, sz);
+                    for (dx, dy, dz) in CARDINAL_NEIGHBORS {
+                        best = best.min(crossing_dist_sq(x, y, z, sx + dx, sy + dy, sz + dz));
+                    }
+                    if best == f32::MAX {
+                        size as f32
+                    } else {
+                        best.sqrt()
+                    }
                 };
-                let mag = mag.max(1e-4); // never exactly zero
+                let mag = mag.max(1e-4);
                 out[idx] = if inside { -mag } else { mag };
             }
         }
@@ -443,14 +433,11 @@ pub fn jump_flood_distance_field(
     data.copy_from_slice(&out);
 }
 
-/// `Some(true)` = every voxel negative-signed, `Some(false)` = every voxel
-/// non-negative, `None` = mixed. Uses `is_sign_negative` because that is the
-/// sign convention the JFA itself uses.
+/// `Some(true)` = every voxel inside (`<= 0.0`), `Some(false)` = every voxel
+/// outside, `None` = mixed. Same test as `inside_count` and the GPU passes.
 pub fn uniform_sign_volume(data: &[f32]) -> Option<bool> {
-    let first = data.first()?.is_sign_negative();
-    data.iter()
-        .all(|v| v.is_sign_negative() == first)
-        .then_some(first)
+    let first = *data.first()? <= 0.0;
+    data.iter().all(|v| (*v <= 0.0) == first).then_some(first)
 }
 
 /// Signs in `data` -> signed distances (in voxels of this LOD). Uniform

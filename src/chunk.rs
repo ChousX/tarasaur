@@ -6,7 +6,7 @@ use bevy::{
 };
 use std::collections::VecDeque;
 
-use crate::{LOD, TargetLOD};
+use crate::{LOD, TargetLOD, voxel::cursor::CursorHit};
 
 pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
@@ -24,6 +24,7 @@ impl Plugin for ChunkPlugin {
                 (
                     chunk_loader_boundry_checker,
                     expire_edit_pins,
+                    update_cursor_focus, // must run before plan_chunk_ops
                     plan_chunk_ops.run_if(loaders_dirty),
                     apply_chunk_ops,
                 )
@@ -44,8 +45,8 @@ pub const FOCUS_RADIUS: i32 = 1;
 #[derive(Resource, Default)]
 pub struct ShowChunkBounds;
 
-/// Written by whatever reads cursor query hits. Only assign when the chunk
-/// actually changes so `is_changed` stays meaningful.
+/// Written by `update_cursor_focus` from the resolved `CursorHit`. Only
+/// assign when the chunk actually changes so `is_changed` stays meaningful.
 #[derive(Resource, Default, PartialEq, Clone, Copy)]
 pub struct CursorFocusChunk(pub Option<IVec3>);
 
@@ -468,16 +469,13 @@ pub fn expire_edit_pins(
     }
 }
 
-pub fn update_cursor_focus(
-    results: Res<crate::voxel::query::VoxelQueryResults>,
-    mut focus: ResMut<CursorFocusChunk>,
-) {
-    // Assumes the cursor ray is query 0; match on `user_id` if you issue several.
-    let Some(hit) = results.0.first() else { return };
-    let new = (hit.did_hit != 0).then(|| {
+/// Backend-agnostic: reads the resolved `CursorHit` (CPU, GPU or Auto, see
+/// `CursorQueryMode`) and keeps `CursorFocusChunk` pointing at the chunk
+/// under the cursor.
+pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChunk>) {
+    let new = hit.0.as_ref().map(|h| {
         // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
-        let p = Vec3::from(hit.hit_pos_world) - Vec3::from(hit.hit_normal) * 0.05;
-        world_pos_to_chunk_pos(&p)
+        world_pos_to_chunk_pos(&(h.pos - h.normal * 0.05))
     });
     if focus.0 != new {
         focus.0 = new;

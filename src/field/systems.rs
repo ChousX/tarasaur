@@ -4,10 +4,11 @@ use super::{
     ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
 };
 use crate::{
-    CHUNK_SIZE, ChunkPosition, DirtyField, VisibilityField,
+    CHUNK_SIZE, ChunkPosition, DirtyField, MaxEditLod, VisibilityField,
     chunk::{ChunkManager, world_pos_to_chunk_pos},
-    editor::SdfSphereStamp,
+    editor::{SdfCsgSphere, SdfSphereStamp},
     ops::{FieldSphereOps, ShapeEditOps},
+    voxel::resident::ForceResident,
 };
 use bevy::{
     ecs::{component::Mutable, message::MessageReader},
@@ -250,5 +251,53 @@ pub fn clear_dirty_visibility(
         commands
             .entity(entity)
             .remove::<DirtyField<VisibilityField, bool>>();
+    }
+}
+
+const SDF_CSG_REACH_VOXELS: f32 = 4.0;
+
+pub fn process_sdf_csg_spheres(
+    mut events: MessageReader<SdfCsgSphere>,
+    mut editable: EditableChunks<SDF>,
+    chunk_manager: Res<ChunkManager>,
+    max: Res<MaxEditLod>,
+    mut deferred: Local<Vec<(IVec3, SdfCsgSphere, u32)>>,
+    mut resident: ResMut<ForceResident>,
+) {
+    let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
+    let mut work = std::mem::take(&mut *deferred);
+    for &op in events.read() {
+        for p in overlapping_chunks(op.center, Vec3::splat(op.radius + reach_world)) {
+            work.push((p, op, 0));
+        }
+        resident.touch_sphere(op.center, op.radius + reach_world);
+    }
+    for (chunk_pos, op, age) in work {
+        let Some(entity) = chunk_manager.get_chunk(&chunk_pos) else {
+            continue;
+        };
+        match editable.get_mut(entity) {
+            Some(mut sdf) => {
+                let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
+                let voxel_size = CHUNK_SIZE / sdf.size().x as f32;
+                // No DirtyField: CSG output is already a valid distance field.
+                // `set` bumps version/inside_count, which drives re-extract.
+                sdf.csg_sphere(
+                    (op.center - origin) / voxel_size,
+                    op.radius / voxel_size,
+                    SDF_CSG_REACH_VOXELS,
+                    op.subtract,
+                );
+            }
+            None if age + 1 < MAX_DEFER_FRAMES => deferred.push((chunk_pos, op, age + 1)),
+            None => warn!(
+                "[csg] chunk {:?} never reached MaxEditLod, edit dropped",
+                chunk_pos
+            ),
+        }
+    }
+    if deferred.len() > MAX_DEFERRED {
+        let excess = deferred.len() - MAX_DEFERRED;
+        deferred.drain(..excess);
     }
 }

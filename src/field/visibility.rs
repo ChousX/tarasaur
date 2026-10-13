@@ -125,12 +125,9 @@ impl Versionable for VisibilityField {
     }
 }
 
-/// Only a MIXED mask needs GPU data. All-true uploads nothing, which clears
-/// the slot's has-mask flag and leaves the chunk fully visible. All-false is
-/// filtered out before this is consulted.
 impl ExtractGate for VisibilityField {
     fn should_extract(&self) -> bool {
-        self.is_mixed()
+        !self.is_all_full() // mixed OR all-empty; all-full needs no mask
     }
 }
 

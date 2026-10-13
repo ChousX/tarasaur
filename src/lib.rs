@@ -1,5 +1,4 @@
 pub mod chunk;
-pub mod cursor;
 pub mod field;
 mod plugin;
 pub mod prelude;

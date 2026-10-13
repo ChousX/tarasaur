@@ -164,6 +164,27 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             |_, dist| T::from_signed_distance(dist - sdf_radius),
         );
     }
+
+    /// Exact CSG against a sphere. Subtract = max(old, -s), add = min(old, s),
+    /// with s = dist - radius. Keeps sub-voxel detail, needs no JFA, and is
+    /// seamless across chunks because it depends only on world position.
+    /// `reach` (voxels, >= 2) extends the write past the surface.
+    fn csg_sphere(&mut self, center: Vec3, radius: f32, reach: f32, subtract: bool)
+    where
+        T: SignedDistance,
+    {
+        self.apply_sphere(
+            center,
+            Sphere {
+                radius: radius + reach,
+            },
+            |cur, dist| {
+                let s = dist - radius;
+                let c = cur.distance();
+                T::from_signed_distance(if subtract { c.max(-s) } else { c.min(s) })
+            },
+        );
+    }
 }
 
 /// Extension trait for fields that support box operations.
@@ -309,5 +330,15 @@ impl<T: Copy + Default, F: Field<T> + ?Sized> ShapeEditOps<T, Cuboid> for F {
         T: BlendExt,
     {
         self.blend_box(c, s, t, r);
+    }
+}
+
+pub trait SignedDistance: FromSignedDistance {
+    fn distance(self) -> f32;
+}
+impl SignedDistance for f32 {
+    #[inline]
+    fn distance(self) -> f32 {
+        self
     }
 }

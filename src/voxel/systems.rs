@@ -25,6 +25,7 @@ use crate::{
             OverflowTelemetry, VoxelChunkArena, VoxelChunkArenaSet,
         },
         pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
+        resident::ForceResident,
     },
 };
 
@@ -340,6 +341,7 @@ pub fn dispatch_voxel_compute_passes_batched(
         if active == 0 {
             continue;
         }
+        /*
         static LAST: AtomicU32 = AtomicU32::new(0);
         if active != LAST.swap(active, Ordering::Relaxed) {
             info!(
@@ -347,6 +349,7 @@ pub fn dispatch_voxel_compute_passes_batched(
                 arena.texture_size, active, arena.max_chunks
             );
         }
+        */
         let wg1 = arena.cell_count.div_ceil(4);
         dispatch(
             &mut encoder,
@@ -553,6 +556,7 @@ pub fn extract_voxel_chunks<T>(
     visibility_query: Extract<Query<Option<&VisibilityField>>>,
     mut last_versions: Local<std::collections::HashMap<IVec3, (LOD, [u64; 8])>>,
     surface_query: Extract<Query<(), With<crate::field::surface::HasSurface>>>,
+    forced: Extract<Res<ForceResident>>,
 ) where
     T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
@@ -563,13 +567,12 @@ pub fn extract_voxel_chunks<T>(
         }
         if visibility_query
             .get(entity)
-            .is_ok_and(|v| v.is_some_and(|vv| vv.is_all_full() == false))
+            .is_ok_and(|v| v.is_some_and(|vv| vv.is_all_empty()))
+            && !forced.contains(&pos.0)
         {
-            last_versions.remove(&pos.0); // so un-hiding re-extracts
-            //       I am not sure about this ^
+            last_versions.remove(&pos.0); // so leasing/un-hiding re-extracts
             continue;
         }
-
         let size = lod.size();
         let expected_elems = lod.volume();
         if field.data_slice().len() != expected_elems {
@@ -908,7 +911,7 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
 pub fn release_despawned_chunks(
     live: Extract<
         Query<
-            (Entity, Option<&VisibilityField>),
+            (Entity, &ChunkPosition, Option<&VisibilityField>),
             (
                 With<crate::Chunk>,
                 With<LOD>,
@@ -916,6 +919,7 @@ pub fn release_despawned_chunks(
             ),
         >,
     >,
+    forced: Extract<Res<ForceResident>>,
     arena_set: Option<ResMut<VoxelChunkArenaSet>>,
 ) {
     let Some(mut arena_set) = arena_set else {
@@ -923,8 +927,8 @@ pub fn release_despawned_chunks(
     };
     let wanted: std::collections::HashSet<MainEntity> = live
         .iter()
-        .filter(|(_, v)| !v.is_some_and(|v| v.is_all_empty()))
-        .map(|(e, _)| MainEntity::from(e))
+        .filter(|(_, pos, v)| !v.is_some_and(|v| v.is_all_empty()) || forced.contains(&pos.0))
+        .map(|(e, _, _)| MainEntity::from(e))
         .collect();
     let stale: Vec<MainEntity> = arena_set
         .iter()

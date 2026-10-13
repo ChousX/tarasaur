@@ -135,3 +135,10 @@ pub struct SdfSphereStamp {
     pub bound_radius: f32,
     pub sdf_radius: f32,
 }
+
+#[derive(Message, Clone, Copy)]
+pub struct SdfCsgSphere {
+    pub center: Vec3,
+    pub radius: f32,
+    pub subtract: bool, // true = dig, false = add material
+}

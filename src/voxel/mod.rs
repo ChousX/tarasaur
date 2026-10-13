@@ -1,8 +1,11 @@
 mod arena;
 pub mod buffers;
+pub mod cursor;
 pub mod pipeline;
 pub mod query;
+pub mod resident;
 pub mod systems;
+pub mod terrain_ray;
 pub mod types;
 pub mod util;
 
@@ -20,6 +23,7 @@ use crate::{
     SDF, VisibilityField,
     voxel::{
         arena::{OverflowTelemetry, VoxelChunkArenaSet},
+        cursor::CursorPlugin,
         pipeline::{
             VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
             update_voxel_material_bind_group,
@@ -31,6 +35,7 @@ use crate::{
             drain_voxel_query_results, extract_voxel_queries, map_voxel_query_results,
             prepare_voxel_queries,
         },
+        resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         systems::{
             dispatch_voxel_compute_passes_batched, extract_visibility_removed,
             map_overflow_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
@@ -104,6 +109,11 @@ impl Plugin for VoxelRenderPlugin {
             (clear_pending_voxel_queries, drain_voxel_query_results),
         );
 
+        app.init_resource::<ForceResident>()
+            .add_systems(First, tick_force_resident)
+            .add_systems(Update, lease_chunks_near_camera);
+
+        app.add_plugins(CursorPlugin);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

@@ -147,20 +147,21 @@ fn sphere_trace_chunk(rank: u32, slot: u32, chunk_origin: vec3<f32>, ray_origin:
     var t = t_enter;
     let texture_size = select(select(select(params.lod_texture_size.x, params.lod_texture_size.y, rank == 1u), params.lod_texture_size.z, rank == 2u), params.lod_texture_size.w, rank == 3u);
     let voxel_size = select(select(select(params.lod_voxel_size.x, params.lod_voxel_size.y, rank == 1u), params.lod_voxel_size.z, rank == 2u), params.lod_voxel_size.w, rank == 3u);
-    let surface_epsilon = select(select(select(params.lod_surface_epsilon.x, params.lod_surface_epsilon.y, rank == 1u), params.lod_surface_epsilon.z, rank == 2u), params.lod_surface_epsilon.w, rank == 3u);
-    let cell_count_f = f32(texture_size) - 2.0;
+
+    let size_f = f32(texture_size) - 2.0;   // chunk spans local [0, size_f]
+    let tol = 1e-3;
 
     for (var i = 0u; i < params.max_sphere_steps; i = i + 1u) {
         let world_pos = ray_origin + dir * t;
-        let local_pos = (world_pos - chunk_origin) / voxel_size + vec3<f32>(1.0);
+        let local_pos = (world_pos - chunk_origin) / voxel_size;   // mesh has no +1 offset
 
-        if (any(local_pos < vec3<f32>(0.0)) || any(local_pos > vec3<f32>(cell_count_f))) {
+        if (any(local_pos < vec3<f32>(-tol)) || any(local_pos > vec3<f32>(size_f + tol))) {
             result.hit_distance = t;
             return result;
         }
 
-        let d = sample_sdf(rank, slot, texture_size, local_pos);
-        if (d < surface_epsilon) {
+        let d = sample_sdf(rank, slot, texture_size, local_pos);   // d is in voxels
+        if (d < 0.05) {
             result.did_hit = 1u;
             result.hit_pos_world = world_pos;
             result.hit_distance = t;
@@ -169,7 +170,7 @@ fn sphere_trace_chunk(rank: u32, slot: u32, chunk_origin: vec3<f32>, ray_origin:
             return result;
         }
 
-        t = t + max(d * voxel_size, voxel_size * 0.1);
+        t = t + max(d * voxel_size * 0.9, voxel_size * 0.1);
         if (t > t_max) {
             result.hit_distance = t_max;
             return result;
