@@ -72,6 +72,11 @@ pub trait Versionable: Component {
 pub trait VoxelDataSlice {
     type Elem: bytemuck::Pod + Default;
     fn data_slice(&self) -> &[Self::Elem];
+    /// The bytes uploaded to the GPU for a padded volume. Default: the raw
+    /// elements; SDF overrides it to pack 16-bit values.
+    fn gpu_bytes(vol: &[Self::Elem]) -> Vec<u8> {
+        bytemuck::cast_slice(vol).to_vec()
+    }
     #[inline]
     /// Converts a value sampled from a grid `ratio`x finer (or, if <1,
     /// coarser) than the destination. Only distances care: SDF values are

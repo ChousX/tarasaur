@@ -23,7 +23,7 @@ struct ChunkMeta {
     active_list_pos: u32,
 }
 
-@group(0) @binding(0) var<storage, read> sdf_buffer: array<f32>;
+@group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;
 @group(0) @binding(1) var<storage, read> flags_buffer: array<u32>;
 @group(0) @binding(2) var<storage, read> compacted_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read_write> vertex_buffer: array<Vertex>;
@@ -44,6 +44,14 @@ fn get_cell_index(local_coord: vec3<u32>, cell_offset: u32) -> u32 {
     return cell_offset + local_coord.x
         + (local_coord.y * uniforms.cell_count)
         + (local_coord.z * uniforms.cell_count * uniforms.cell_count);
+}
+
+// snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
+const SDF_BAND: f32 = 8.0; // keep in sync with field::sdf::SDF_BAND
+
+fn decode_sdf(word: u32, idx: u32) -> f32 {
+    let v = unpack2x16snorm(word);
+    return select(v.x, v.y, (idx & 1u) == 1u) * SDF_BAND;
 }
 
 fn sdf_offset_for(slot: u32) -> u32 {
@@ -70,7 +78,8 @@ fn sample_sdf(sdf_base: u32, coord: vec3<i32>) -> f32 {
     let clamped = clamp(coord, vec3<i32>(0), vec3<i32>(max_coord));
     let idx = u32(clamped.z) * uniforms.texture_size * uniforms.texture_size
         + u32(clamped.y) * uniforms.texture_size + u32(clamped.x);
-    return sdf_buffer[sdf_base + idx];
+    let i = sdf_base + idx;
+    return decode_sdf(sdf_buffer[i >> 1u], i);
 }
 
 fn sample_sdf_trilinear(sdf_base: u32, p: vec3<f32>) -> f32 {

@@ -1,5 +1,13 @@
-@group(0) @binding(0) var<storage, read> sdf_buffer: array<f32>;
+@group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;
 @group(0) @binding(1) var<storage, read_write> flags_buffer: array<u32>;
+
+// snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
+const SDF_BAND: f32 = 8.0; // keep in sync with field::sdf::SDF_BAND
+
+fn decode_sdf(word: u32, idx: u32) -> f32 {
+    let v = unpack2x16snorm(word);
+    return select(v.x, v.y, (idx & 1u) == 1u) * SDF_BAND;
+}
 struct IndirectDrawArgs {
     index_count: atomic<u32>,
     instance_count: u32,
@@ -84,7 +92,8 @@ fn cs_main(
     var inside_count = 0u;
     for (var i = 0u; i < 8u; i = i + 1u) {
         let pos = cell_coord + offsets[i];
-        let val = sdf_buffer[sdf_base + flatten_sdf_idx(pos, uniforms.texture_size)];
+        let idx = sdf_base + flatten_sdf_idx(pos, uniforms.texture_size);
+        let val = decode_sdf(sdf_buffer[idx >> 1u], idx);
         if (val <= 0.0) {
             inside_count = inside_count + 1u;
         }

@@ -100,9 +100,10 @@ fn newest_pending<T: Send + Sync + 'static>(
 /// chunk's vertex range before the GPU meshes it.
 fn count_active_cells(padded: &[u8], texture_size: u32) -> u32 {
     let n = texture_size as usize;
+    // snorm16, as uploaded (see quantize_sdf): same sign test as pass1.
     let inside: Vec<u8> = padded
-        .chunks_exact(4)
-        .map(|b| u8::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]]) <= 0.0))
+        .chunks_exact(2)
+        .map(|b| u8::from(i16::from_le_bytes([b[0], b[1]]) <= 0))
         .collect();
     if n < 2 || inside.len() != n * n * n {
         return 0;
@@ -176,7 +177,7 @@ pub fn prepare_voxel_arena(
     for ((extracted_entity, x), (_, count)) in batch.into_iter().zip(counts) {
         let (lod, size) = (x.lod, x.size);
         if count == 0 {
-            // No geometry: holding a slot (1.15 MB of SDF at High) would draw
+            // No geometry: holding a slot (575 KB of SDF at High) would draw
             // nothing. Any old slot drew nothing for this data either.
             arena_set.release(x.main_entity);
             arena_set.empty.insert(x.main_entity);
@@ -216,7 +217,7 @@ pub fn prepare_voxel_arena(
             "mixed LOD in one arena — bucket by LOD"
         );
 
-        let sdf_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64 * 4;
+        let sdf_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64 * 2; // snorm16
         render_queue.write_buffer(&arena.sdf_buffer, sdf_offset_bytes, &x.padded_data);
 
         let meta = ChunkMeta {
@@ -703,7 +704,7 @@ pub fn extract_voxel_chunks<T>(
                 }
             }
             fill_apron::<T>(&mut vol, pos.0, &chunk_manager, &query);
-            bytemuck::cast_slice(&vol).to_vec()
+            T::gpu_bytes(&vol)
         } else {
             Vec::new()
         };
@@ -1035,13 +1036,14 @@ pub fn release_despawned_chunks(
 #[cfg(test)]
 mod tests {
     use super::count_active_cells;
+    use crate::{VoxelDataSlice, field::SDF};
 
     fn volume(n: usize, inside: &[(usize, usize, usize)]) -> Vec<u8> {
         let mut v = vec![1.0f32; n * n * n];
         for &(x, y, z) in inside {
             v[(z * n + y) * n + x] = -1.0;
         }
-        bytemuck::cast_slice(&v).to_vec()
+        SDF::gpu_bytes(&v)
     }
 
     #[test]

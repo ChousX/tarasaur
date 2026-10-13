@@ -44,7 +44,7 @@ fn max_chunks(
 ) -> u32 {
     let limit = (render_device.limits().max_storage_buffer_binding_size as u64 * 9) / 10;
 
-    let sdf_bytes = sdf_elems_per_chunk as u64 * 4;
+    let sdf_bytes = sdf_elems_per_chunk as u64 * 2; // snorm16
     let material_bytes = sdf_elems_per_chunk as u64;
     let vertex_bytes = budget_cells_per_chunk as u64 * 32;
     let index_bytes = budget_cells_per_chunk as u64 * INDICES_PER_CELL as u64 * 4;
@@ -207,6 +207,8 @@ impl VoxelChunkArena {
     ) -> Self {
         let total_cells = cell_count * cell_count * cell_count;
         let sdf_elems_per_chunk = texture_size * texture_size * texture_size;
+        // snorm16 packs 2 voxels per word: an even count keeps every slot word-aligned.
+        debug_assert!(sdf_elems_per_chunk % 2 == 0);
         let budget_cells_per_chunk =
             ((total_cells as f32) * ACTIVE_FRACTION_ESTIMATE).ceil() as u32;
         let max = max_chunks(
@@ -219,7 +221,7 @@ impl VoxelChunkArena {
         let lookup_capacity = next_pow2((max as u32).saturating_mul(2)).max(4);
         let sdf_buffer = render_device.storage(
             "arena_sdf_buffer",
-            sdf_elems_per_chunk as u64 * 4 * max,
+            sdf_elems_per_chunk as u64 * 2 * max,
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let material_buffer = render_device.storage(

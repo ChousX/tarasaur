@@ -275,6 +275,22 @@ impl VoxelDataSlice for SDF {
     fn data_slice(&self) -> &[f32] {
         &self.data
     }
+
+    fn gpu_bytes(vol: &[f32]) -> Vec<u8> {
+        let packed: Vec<i16> = vol.iter().map(|&v| quantize_sdf(v)).collect();
+        bytemuck::cast_slice(&packed).to_vec()
+    }
+}
+
+/// Quantizes an SDF value to snorm16 over +/-`SDF_BAND`, as the GPU copy
+/// stores it (the shaders decode with `unpack2x16snorm`). Sign-exact: a
+/// positive value never rounds to 0, which the GPU would read as inside, so
+/// the CPU cell count and the mesh always agree on which voxels are solid.
+#[inline]
+pub fn quantize_sdf(v: f32) -> i16 {
+    let q = (v / SDF_BAND).clamp(-1.0, 1.0) * i16::MAX as f32;
+    let q = q.round() as i16;
+    if v > 0.0 { q.max(1) } else { q }
 }
 
 impl FieldFromRaw for SDF {
@@ -555,5 +571,22 @@ mod band_tests {
         assert!((1..7).all(|i| sdf.border_version(i) == 0));
         sdf.set(0, 0, 0, -1.0); // corner: every neighbour
         assert!((0..7).all(|i| sdf.border_version(i) >= 1));
+    }
+
+    #[test]
+    fn quantize_keeps_sign_and_precision() {
+        use super::quantize_sdf;
+        // Decode exactly as WGSL's unpack2x16snorm does.
+        let decode = |q: i16| (q as f32 / i16::MAX as f32).max(-1.0) * SDF_BAND;
+        for &v in &[1e-9, 1e-5, 0.5, 3.7, 8.0, 50.0] {
+            assert!(decode(quantize_sdf(v)) > 0.0, "{v} must stay outside");
+            assert!(decode(quantize_sdf(-v)) <= 0.0, "-{v} must stay inside");
+        }
+        assert_eq!(quantize_sdf(0.0), 0); // 0 is inside, as in f32
+        let step = SDF_BAND / i16::MAX as f32;
+        for i in -800..=800 {
+            let v = i as f32 * 0.01;
+            assert!((decode(quantize_sdf(v)) - v).abs() <= step);
+        }
     }
 }

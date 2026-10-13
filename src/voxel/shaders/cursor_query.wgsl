@@ -38,13 +38,13 @@ struct QueryUniforms {
 @group(0) @binding(2) var<uniform> params: QueryUniforms;
 @group(0) @binding(3) var<storage, read> chunk_lookup: array<vec4<u32>>; // x,y,z,(lod_rank<<28|slot)
 
-@group(0) @binding(4)  var<storage, read> sdf_buffer_0: array<f32>;
+@group(0) @binding(4)  var<storage, read> sdf_buffer_0: array<u32>;
 @group(0) @binding(5)  var<storage, read> chunk_meta_0: array<ChunkMetaGpu>;
-@group(0) @binding(6)  var<storage, read> sdf_buffer_1: array<f32>;
+@group(0) @binding(6)  var<storage, read> sdf_buffer_1: array<u32>;
 @group(0) @binding(7)  var<storage, read> chunk_meta_1: array<ChunkMetaGpu>;
-@group(0) @binding(8)  var<storage, read> sdf_buffer_2: array<f32>;
+@group(0) @binding(8)  var<storage, read> sdf_buffer_2: array<u32>;
 @group(0) @binding(9)  var<storage, read> chunk_meta_2: array<ChunkMetaGpu>;
-@group(0) @binding(10) var<storage, read> sdf_buffer_3: array<f32>;
+@group(0) @binding(10) var<storage, read> sdf_buffer_3: array<u32>;
 @group(0) @binding(11) var<storage, read> chunk_meta_3: array<ChunkMetaGpu>;
 
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
@@ -72,6 +72,19 @@ fn lookup_chunk(cx: i32, cy: i32, cz: i32) -> vec2<u32> { // (lod_rank, slot), s
     return vec2<u32>(0u, EMPTY_SLOT);
 }
 
+// snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
+const SDF_BAND: f32 = 8.0; // keep in sync with field::sdf::SDF_BAND
+
+fn read_sdf(rank: u32, idx: u32) -> f32 {
+    var word: u32;
+    if (rank == 0u) { word = sdf_buffer_0[idx >> 1u]; }
+    else if (rank == 1u) { word = sdf_buffer_1[idx >> 1u]; }
+    else if (rank == 2u) { word = sdf_buffer_2[idx >> 1u]; }
+    else { word = sdf_buffer_3[idx >> 1u]; }
+    let v = unpack2x16snorm(word);
+    return select(v.x, v.y, (idx & 1u) == 1u) * SDF_BAND;
+}
+
 fn sdf_index(base: u32, x: u32, y: u32, z: u32, s: u32) -> u32 {
     return base + (z * s + y) * s + x;
 }
@@ -91,30 +104,10 @@ fn sample_sdf(rank: u32, slot: u32, texture_size: u32, local_pos: vec3<f32>) -> 
     let s = texture_size;
     let base = slot * s * s * s;
 
-    var c000: f32; var c100: f32; var c010: f32; var c110: f32;
-    var c001: f32; var c101: f32; var c011: f32; var c111: f32;
-
-    if (rank == 0u) {
-        c000 = sdf_buffer_0[sdf_index(base, x0, y0, z0, s)]; c100 = sdf_buffer_0[sdf_index(base, x1, y0, z0, s)];
-        c010 = sdf_buffer_0[sdf_index(base, x0, y1, z0, s)]; c110 = sdf_buffer_0[sdf_index(base, x1, y1, z0, s)];
-        c001 = sdf_buffer_0[sdf_index(base, x0, y0, z1, s)]; c101 = sdf_buffer_0[sdf_index(base, x1, y0, z1, s)];
-        c011 = sdf_buffer_0[sdf_index(base, x0, y1, z1, s)]; c111 = sdf_buffer_0[sdf_index(base, x1, y1, z1, s)];
-    } else if (rank == 1u) {
-        c000 = sdf_buffer_1[sdf_index(base, x0, y0, z0, s)]; c100 = sdf_buffer_1[sdf_index(base, x1, y0, z0, s)];
-        c010 = sdf_buffer_1[sdf_index(base, x0, y1, z0, s)]; c110 = sdf_buffer_1[sdf_index(base, x1, y1, z0, s)];
-        c001 = sdf_buffer_1[sdf_index(base, x0, y0, z1, s)]; c101 = sdf_buffer_1[sdf_index(base, x1, y0, z1, s)];
-        c011 = sdf_buffer_1[sdf_index(base, x0, y1, z1, s)]; c111 = sdf_buffer_1[sdf_index(base, x1, y1, z1, s)];
-    } else if (rank == 2u) {
-        c000 = sdf_buffer_2[sdf_index(base, x0, y0, z0, s)]; c100 = sdf_buffer_2[sdf_index(base, x1, y0, z0, s)];
-        c010 = sdf_buffer_2[sdf_index(base, x0, y1, z0, s)]; c110 = sdf_buffer_2[sdf_index(base, x1, y1, z0, s)];
-        c001 = sdf_buffer_2[sdf_index(base, x0, y0, z1, s)]; c101 = sdf_buffer_2[sdf_index(base, x1, y0, z1, s)];
-        c011 = sdf_buffer_2[sdf_index(base, x0, y1, z1, s)]; c111 = sdf_buffer_2[sdf_index(base, x1, y1, z1, s)];
-    } else {
-        c000 = sdf_buffer_3[sdf_index(base, x0, y0, z0, s)]; c100 = sdf_buffer_3[sdf_index(base, x1, y0, z0, s)];
-        c010 = sdf_buffer_3[sdf_index(base, x0, y1, z0, s)]; c110 = sdf_buffer_3[sdf_index(base, x1, y1, z0, s)];
-        c001 = sdf_buffer_3[sdf_index(base, x0, y0, z1, s)]; c101 = sdf_buffer_3[sdf_index(base, x1, y0, z1, s)];
-        c011 = sdf_buffer_3[sdf_index(base, x0, y1, z1, s)]; c111 = sdf_buffer_3[sdf_index(base, x1, y1, z1, s)];
-    }
+    let c000 = read_sdf(rank, sdf_index(base, x0, y0, z0, s)); let c100 = read_sdf(rank, sdf_index(base, x1, y0, z0, s));
+    let c010 = read_sdf(rank, sdf_index(base, x0, y1, z0, s)); let c110 = read_sdf(rank, sdf_index(base, x1, y1, z0, s));
+    let c001 = read_sdf(rank, sdf_index(base, x0, y0, z1, s)); let c101 = read_sdf(rank, sdf_index(base, x1, y0, z1, s));
+    let c011 = read_sdf(rank, sdf_index(base, x0, y1, z1, s)); let c111 = read_sdf(rank, sdf_index(base, x1, y1, z1, s));
 
     let c00 = mix(c000, c100, t.x); let c10 = mix(c010, c110, t.x);
     let c01 = mix(c001, c101, t.x); let c11 = mix(c011, c111, t.x);

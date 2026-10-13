@@ -57,7 +57,7 @@ pub fn compaction_entries() -> Vec<BindGroupLayoutEntry> {
 /// Binding layout for `surface_nets_pass1`.
 pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
-        storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: now array<f32>, not a texture
+        storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: snorm16, 2 voxels per u32
         storage_buffer_entry(1, ShaderStages::COMPUTE, false),
         storage_buffer_entry(2, ShaderStages::COMPUTE, false),
         storage_buffer_entry(4, ShaderStages::COMPUTE | ShaderStages::VERTEX, false),
@@ -77,7 +77,7 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
 /// voxel_raster.wgsl against raster_chunk_visibility_entries() below.
 pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
-        storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: now array<f32>, not a texture
+        storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: snorm16, 2 voxels per u32
         storage_buffer_entry(1, ShaderStages::COMPUTE, true),
         storage_buffer_entry(2, ShaderStages::COMPUTE, true),
         storage_buffer_entry(3, ShaderStages::COMPUTE, false),
