@@ -34,7 +34,12 @@ impl Default for OverflowTelemetry {
     }
 }
 
-const ACTIVE_FRACTION_ESTIMATE: f32 = 0.20; // tune from telemetry
+// Fraction of cells per chunk provisioned for vertex/index output. The
+// budget is pooled across an arena (compute_chunk_bases.wgsl), so this only
+// has to cover the arena-wide average. Sandbox terrain measured 1.2-3.4%;
+// 6% leaves ~1.75x headroom for edits. Overflow is reported by
+// `map_overflow_readbacks` in debug builds.
+const ACTIVE_FRACTION_ESTIMATE: f32 = 0.06;
 
 /// Largest chunk count that keeps every per-chunk-strided buffer (vertex
 /// buffers dominate, at 32 bytes/cell) under the device's actual
