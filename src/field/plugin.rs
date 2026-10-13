@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use bevy::ecs::component::Mutable;
 use bevy::math::primitives::{Cuboid, Sphere};
 use bevy::prelude::*;
-use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::render::{Render, RenderApp};
 
 use crate::chunk::NewChunkSpawned;
 use crate::editor::{SdfCsgSphere, SdfSphereStamp};
@@ -67,8 +67,8 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
             .add_systems(
                 Render,
                 prepare_material_for_arena::<M>
-                    .after(prepare_voxel_arena::<SDF>)
-                    .in_set(RenderSystems::Prepare),
+                    .after(prepare_voxel_arena)
+                    .in_set(crate::voxel::VoxelPrepareSet::Upload),
             );
     }
 }

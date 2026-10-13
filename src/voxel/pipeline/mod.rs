@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use crate::{
     texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
     voxel::{
-        COMPUTE_CHUNK_BASES_SHADER_HANDLE, CURSOR_QUERY_SHADER_HANDLE,
+        CURSOR_QUERY_SHADER_HANDLE,
         STREAM_COMPACTION_SHADER_HANDLE, SURFACE_NETS_PASS1_SHADER_HANDLE,
         SURFACE_NETS_PASS3_SHADER_HANDLE,
     },
@@ -26,7 +26,6 @@ pub struct VoxelPipelineLayouts {
     pub pass1_surface_layout: BindGroupLayout,
     pub pass3_surface_layout: BindGroupLayout,
     pub compaction_bind_group_layout: BindGroupLayout,
-    pub chunk_bases_layout: BindGroupLayout,
     pub raster_chunk_visibility_layout: BindGroupLayout,
     pub query_layout: BindGroupLayout,
 }
@@ -50,11 +49,6 @@ impl FromWorld for VoxelPipelineLayouts {
             &layouts::compaction_entries(),
         );
 
-        let chunk_bases_layout = render_device.create_bind_group_layout(
-            Some("voxel_chunk_bases_layout"),
-            &layouts::chunk_bases_entries(),
-        );
-
         let raster_chunk_visibility_layout = render_device.create_bind_group_layout(
             Some("voxel_raster_chunk_visibility_layout"),
             &layouts::raster_chunk_visibility_entries(),
@@ -67,7 +61,6 @@ impl FromWorld for VoxelPipelineLayouts {
             pass1_surface_layout,
             pass3_surface_layout,
             compaction_bind_group_layout,
-            chunk_bases_layout,
             raster_chunk_visibility_layout,
             query_layout,
         }
@@ -82,8 +75,6 @@ pub struct VoxelComputePipeline {
     pub stream_compaction_pipeline_id: CachedComputePipelineId,
     pub scan_block_sums_pipeline_id: CachedComputePipelineId,
     pub stream_compaction_resolve_pipeline_id: CachedComputePipelineId,
-    pub write_chunk_active_count_pipeline_id: CachedComputePipelineId,
-    pub chunk_bases_pipeline_id: CachedComputePipelineId,
     pub pass3_pipeline_id: CachedComputePipelineId,
     pub query_pipeline_id: CachedComputePipelineId,
 }
@@ -151,36 +142,6 @@ impl FromWorld for VoxelComputePipeline {
                 zero_initialize_workgroup_memory: false,
             });
 
-        // 3.5 Write per-chunk active cell counts (one thread per active chunk)
-        let write_chunk_active_count_pipeline_id =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some(Cow::Borrowed("write_chunk_active_count_pipeline")),
-                layout: vec![BindGroupLayoutDescriptor {
-                    label: Cow::Borrowed("voxel_compaction_pipeline_layout"),
-                    entries: layouts::compaction_entries(),
-                }],
-                shader: STREAM_COMPACTION_SHADER_HANDLE,
-                entry_point: Some(Cow::Borrowed("write_chunk_active_count")),
-                shader_defs: vec![],
-                immediate_size: 0,
-                zero_initialize_workgroup_memory: false,
-            });
-
-        // 3.75 Compute per-chunk dynamic vertex/index bases (single workgroup, serial)
-        let chunk_bases_pipeline_id =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some(Cow::Borrowed("compute_chunk_bases_pipeline")),
-                layout: vec![BindGroupLayoutDescriptor {
-                    label: Cow::Borrowed("voxel_chunk_bases_pipeline_layout"),
-                    entries: layouts::chunk_bases_entries(),
-                }],
-                shader: COMPUTE_CHUNK_BASES_SHADER_HANDLE,
-                entry_point: Some(Cow::Borrowed("cs_main")),
-                shader_defs: vec![],
-                immediate_size: 0,
-                zero_initialize_workgroup_memory: false,
-            });
-
         // 4. Pass 3 Pipeline (Index Assembly & Indirect Arguments)
         let pass3_pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(Cow::Borrowed("surface_nets_pass3_pipeline")),
@@ -215,8 +176,6 @@ impl FromWorld for VoxelComputePipeline {
             stream_compaction_pipeline_id,
             scan_block_sums_pipeline_id,
             stream_compaction_resolve_pipeline_id,
-            write_chunk_active_count_pipeline_id,
-            chunk_bases_pipeline_id,
             pass3_pipeline_id,
             query_pipeline_id,
         }

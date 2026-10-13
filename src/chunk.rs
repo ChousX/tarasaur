@@ -471,13 +471,20 @@ pub fn expire_edit_pins(
 
 /// Backend-agnostic: reads the resolved `CursorHit` (CPU, GPU or Auto, see
 /// `CursorQueryMode`) and keeps `CursorFocusChunk` pointing at the chunk
-/// under the cursor.
+/// under the cursor. Sticky: the focus only moves once the hit leaves the
+/// current FOCUS_RADIUS window, and a miss keeps the last focus. Otherwise a
+/// LOD upgrade that nudges the hit into the next chunk (or a grazing ray
+/// flickering between hit and miss) replans and reloads every frame.
 pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChunk>) {
-    let new = hit.0.as_ref().map(|h| {
-        // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
-        world_pos_to_chunk_pos(&(h.pos - h.normal * 0.05))
-    });
-    if focus.0 != new {
-        focus.0 = new;
+    let Some(h) = hit.0.as_ref() else {
+        return;
+    };
+    // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
+    let new = world_pos_to_chunk_pos(&(h.pos - h.normal * 0.05));
+    let inside_window = focus
+        .0
+        .is_some_and(|f| (new - f).abs().max_element() <= FOCUS_RADIUS);
+    if !inside_window {
+        focus.0 = Some(new);
     } // assign only on change, so is_changed stays meaningful
 }

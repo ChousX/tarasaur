@@ -1,10 +1,8 @@
 use super::util::dispatch;
-use std::{
-    marker::PhantomData,
-    sync::atomic::Ordering,
-};
+use std::{collections::HashMap, marker::PhantomData, sync::atomic::Ordering};
 
 use bevy::{
+    diagnostic::FrameCount,
     prelude::*,
     render::{
         Extract,
@@ -14,18 +12,17 @@ use bevy::{
         sync_world::MainEntity,
         view::{ViewDepthTexture, ViewTarget, ViewUniformOffset, ViewUniforms},
     },
+    tasks::ComputeTaskPool,
 };
 
 use crate::{
-    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField,
+    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField, SDF,
     Versionable, VisibilityField, VoxelMaterial,
     voxel::{
-        arena::{
-            ArenaSlot, ChunkMeta, OVERFLOW_COPIED, OVERFLOW_FREE, OVERFLOW_MAPPED,
-            OverflowTelemetry, VoxelChunkArena, VoxelChunkArenaSet,
-        },
+        arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
         resident::ForceResident,
+        types::DrawIndexedIndirectArgs,
     },
 };
 
@@ -38,27 +35,148 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub padded_data: Vec<u8>,
     pub size: u32,
     pub lod: LOD,
+    /// Main-world frame it was extracted in. An upload can wait several
+    /// frames; when a newer one for the same chunk arrives, the newest wins.
+    pub seq: u32,
     pub _type: PhantomData<T>,
 }
 
-pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
+/// Max cells re-meshed per frame, summed over all arenas. Uploads past it
+/// wait for the next frame while the chunk keeps its current mesh, so a
+/// burst of loads is spread out instead of landing in one frame.
+#[derive(Resource)]
+pub struct RemeshBudget {
+    pub cells_per_frame: u32,
+}
+
+impl Default for RemeshBudget {
+    fn default() -> Self {
+        Self {
+            cells_per_frame: 4_000_000, // ~15 High chunks
+        }
+    }
+}
+
+/// Keeps the newest extraction per chunk, despawning older ones and any for
+/// chunks that are no longer live. Returns `(waiting_since, entity)`, oldest
+/// wait first. The newest data inherits the oldest wait, so a chunk that is
+/// re-extracted every frame (e.g. under a held brush) can't starve behind
+/// the budget. Anything not despawned stays in the render world and is
+/// retried next frame.
+fn newest_pending<T: Send + Sync + 'static>(
+    arena_set: &VoxelChunkArenaSet,
+    extracted: &Query<(Entity, &ExtractedChunkField<T>)>,
+    commands: &mut Commands,
+) -> Vec<(u32, Entity)> {
+    // main entity -> (oldest seq, newest seq, newest entity)
+    let mut newest: HashMap<MainEntity, (u32, u32, Entity)> = HashMap::new();
+    for (e, x) in extracted.iter() {
+        if !arena_set.live.contains(&x.main_entity) {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let Some(entry) = newest.get_mut(&x.main_entity) else {
+            newest.insert(x.main_entity, (x.seq, x.seq, e));
+            continue;
+        };
+        entry.0 = entry.0.min(x.seq);
+        if x.seq > entry.1 {
+            commands.entity(entry.2).despawn();
+            (entry.1, entry.2) = (x.seq, e);
+        } else {
+            commands.entity(e).despawn();
+        }
+    }
+    let mut pending: Vec<_> = newest
+        .into_values()
+        .map(|(since, _, e)| (since, e))
+        .collect();
+    pending.sort_unstable_by_key(|p| p.0);
+    pending
+}
+
+/// Active cells in a padded SDF volume, using exactly pass1's test: a cell
+/// is active when some but not all of its 8 corners are `<= 0`. Sizes the
+/// chunk's vertex range before the GPU meshes it.
+fn count_active_cells(padded: &[u8], texture_size: u32) -> u32 {
+    let n = texture_size as usize;
+    let inside: Vec<u8> = padded
+        .chunks_exact(4)
+        .map(|b| u8::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]]) <= 0.0))
+        .collect();
+    if n < 2 || inside.len() != n * n * n {
+        return 0;
+    }
+    let row = |y: usize, z: usize| (z * n + y) * n;
+    let mut total = 0;
+    for z in 0..n - 1 {
+        for y in 0..n - 1 {
+            let (a, b, c, d) = (row(y, z), row(y + 1, z), row(y, z + 1), row(y + 1, z + 1));
+            let column = |x: usize| inside[a + x] + inside[b + x] + inside[c + x] + inside[d + x];
+            let mut prev = column(0);
+            for x in 1..n {
+                let next = column(x);
+                let corners = prev + next;
+                total += u32::from(corners > 0 && corners < 8);
+                prev = next;
+            }
+        }
+    }
+    total
+}
+
+/// Uploads changed chunks' SDF and gives each an exact-size vertex range.
+/// Never drops one: past the per-frame budget, or with no room in any arena,
+/// the upload waits and the chunk keeps drawing its current mesh (an old
+/// LOD is only released once the new one is placed).
+pub fn prepare_voxel_arena(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     render_device: Res<RenderDevice>,
     layouts: Res<VoxelPipelineLayouts>,
     render_queue: Res<RenderQueue>,
-    extracted_chunks: Query<(Entity, &ExtractedChunkField<T>)>,
+    budget: Res<RemeshBudget>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<SDF>)>,
     mut commands: Commands,
+    mut out_of_room: Local<bool>,
 ) {
-    for arena in arena_set.iter_mut() {
-        arena.dirty_slots.clear();
+    arena_set.deferred.clear();
+    let pending = newest_pending(&arena_set, &extracted_chunks, &mut commands);
+
+    // Chunks already resident at this LOD (edits, neighbour apron changes)
+    // always update this frame so edits stay continuous. The budget only
+    // paces new placements (fresh loads, LOD changes), oldest first and
+    // always at least one.
+    let mut cells_left = budget.cells_per_frame;
+    let mut placed_new = false;
+    let mut batch = Vec::new();
+    for (_, e) in pending {
+        let Ok((_, x)) = extracted_chunks.get(e) else {
+            continue;
+        };
+        if arena_set.find_slot(x.lod, x.main_entity).is_none() {
+            let cells = (x.size - 1).pow(3);
+            if placed_new && cells > cells_left {
+                arena_set.deferred.insert(x.main_entity);
+                continue;
+            }
+            placed_new = true;
+            cells_left = cells_left.saturating_sub(cells);
+        }
+        batch.push((e, x));
     }
 
-    for (extracted_entity, extracted_sdf) in extracted_chunks.iter() {
-        let lod = extracted_sdf.lod;
-        let size = extracted_sdf.size;
+    let mut counts: Vec<(usize, u32)> = ComputeTaskPool::get().scope(|s| {
+        for (i, (_, x)) in batch.iter().enumerate() {
+            s.spawn(async move { (i, count_active_cells(&x.padded_data, x.size)) });
+        }
+    });
+    counts.sort_unstable_by_key(|c| c.0);
 
+    let mut any_out_of_room = false;
+    for ((extracted_entity, x), (_, count)) in batch.into_iter().zip(counts) {
+        let (lod, size) = (x.lod, x.size);
         let Some(ArenaSlot { arena_idx, slot }) =
-            arena_set.slot_for(lod, extracted_sdf.main_entity, || {
+            arena_set.place(lod, x.main_entity, count, || {
                 info!(
                     "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
                     lod,
@@ -68,105 +186,84 @@ pub fn prepare_voxel_arena<T: Send + Sync + 'static>(
                 VoxelChunkArena::new(&render_device, &layouts, size - 1, size)
             })
         else {
-            warn!(
-                "[prepare_voxel_arena] all arenas for LOD {:?} full, dropping chunk {:?}",
-                lod, extracted_sdf.chunk_pos
-            );
-            commands.entity(extracted_entity).despawn();
+            if !*out_of_room {
+                warn!(
+                    "[prepare_voxel_arena] no room for LOD {:?} chunk {:?}; it keeps its current mesh until space frees up",
+                    lod, x.chunk_pos
+                );
+            }
+            any_out_of_room = true;
+            arena_set.deferred.insert(x.main_entity);
             continue;
         };
         let arena = arena_set.arena_mut(lod, arena_idx);
-
-        if !arena.active_slots.contains(&slot) {
-            arena.active_slots.push(slot);
-        }
-        arena.register_chunk_pos(slot, extracted_sdf.chunk_pos);
+        arena.register_chunk_pos(slot, x.chunk_pos);
         debug_assert_eq!(
             size, arena.texture_size,
             "mixed LOD in one arena — bucket by LOD"
         );
 
-        // Upload this chunk's padded SDF data into its slot of the shared sdf_buffer.
         let sdf_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64 * 4;
-        render_queue.write_buffer(
-            &arena.sdf_buffer,
-            sdf_offset_bytes,
-            &extracted_sdf.padded_data,
-        );
+        render_queue.write_buffer(&arena.sdf_buffer, sdf_offset_bytes, &x.padded_data);
 
-        let chunk_world_origin = extracted_sdf.chunk_pos.as_vec3() * CHUNK_SIZE;
-
-        // active_list_pos is unknown until arena.active_slots is finalized for
-        // this frame (see the patch loop below, after all chunks are processed).
-        // Written as 0 here as a placeholder; patched immediately after.
         let meta = ChunkMeta {
-            chunk_world_origin: chunk_world_origin.into(),
+            chunk_world_origin: (x.chunk_pos.as_vec3() * CHUNK_SIZE).into(),
             active_list_pos: 0,
         };
+        let meta_size = std::mem::size_of::<ChunkMeta>() as u64;
         render_queue.write_buffer(
             &arena.chunk_meta_buffer,
-            slot as u64 * std::mem::size_of::<ChunkMeta>() as u64,
+            slot as u64 * meta_size,
             bytemuck::bytes_of(&meta),
         );
 
+        let (base, _) = arena.slot_range[slot as usize];
+        let slot_word = slot as u64 * 4;
+        render_queue.write_buffer(
+            &arena.slot_vertex_base_buffer,
+            slot_word,
+            bytemuck::bytes_of(&base),
+        );
+        render_queue.write_buffer(
+            &arena.slot_vertex_count_buffer,
+            slot_word,
+            bytemuck::bytes_of(&count),
+        );
+        let args = DrawIndexedIndirectArgs {
+            index_count: 0, // pass3 fills it in this frame
+            instance_count: 1,
+            first_index: base * INDICES_PER_CELL,
+            base_vertex: 0,
+            first_instance: 0,
+        };
+        render_queue.write_buffer(
+            &arena.indirect_args_buffer,
+            slot as u64 * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64,
+            bytemuck::bytes_of(&args),
+        );
+
         arena.dirty_slots.push(slot);
-        arena.needs_remesh = true;
         commands.entity(extracted_entity).despawn();
     }
-
-    for arena in arena_set.iter_mut() {
-        if !arena.needs_remesh {
-            continue; // nothing will dispatch this frame; skip all the metadata writes
-        }
-        const ACTIVE_LIST_POS_OFFSET: u64 = std::mem::offset_of!(ChunkMeta, active_list_pos) as u64;
-
-        for (pos, &slot) in arena.active_slots.iter().enumerate() {
-            let offset =
-                slot as u64 * std::mem::size_of::<ChunkMeta>() as u64 + ACTIVE_LIST_POS_OFFSET;
-            render_queue.write_buffer(
-                &arena.chunk_meta_buffer,
-                offset,
-                bytemuck::bytes_of(&(pos as u32)),
-            );
-        }
-
-        let slot_map: Vec<u32> = arena.active_slots.clone();
-        render_queue.write_buffer(
-            &arena.active_slot_map_buffer,
-            0,
-            bytemuck::cast_slice(&slot_map),
-        );
-
-        // Clear overflow flag for this frame.
-        render_queue.write_buffer(&arena.overflow_flag_buffer, 0, bytemuck::bytes_of(&0u32));
-
-        // Update active_count in the chunk-bases uniform (first field of
-        // ChunkBasesUniforms; budget fields are set once at construction and
-        // never change, so this partial write is safe).
-        render_queue.write_buffer(
-            &arena.chunk_bases_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&(arena.active_slots.len() as u32)),
-        );
-    }
+    *out_of_room = any_out_of_room;
 }
 
-/// Sibling to `prepare_voxel_arena`, not a reuse of it — that function's
-/// body is SDF-specific (hardcodes `sdf_buffer`/`sdf_elems_per_chunk`/
-/// `meta.sdf_offset`) despite being generic over `T`. This system owns the
-/// material upload instead of trying to force-fit into that one.
-///
-/// Must run after `prepare_voxel_arena::<SDFField>` in the same Prepare
-/// set — that system owns slot allocation and the initial full `ChunkMeta`
-/// write; this one only ever looks a slot up.
+/// Sibling to `prepare_voxel_arena`: uploads material ids into the slot it
+/// placed. Must run after it, so `deferred` and new slots are current.
 pub fn prepare_material_for_arena<M: VoxelMaterial>(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<MaterialField<M>>)>,
     mut commands: Commands,
 ) {
-    for (extracted_entity, extracted_material) in extracted_chunks.iter() {
-        let Some(ArenaSlot { arena_idx, .. }) =
+    for (_, extracted_entity) in newest_pending(&arena_set, &extracted_chunks, &mut commands) {
+        let Ok((_, extracted_material)) = extracted_chunks.get(extracted_entity) else {
+            continue;
+        };
+        if arena_set.deferred.contains(&extracted_material.main_entity) {
+            continue; // waits with its SDF
+        }
+        let Some(ArenaSlot { arena_idx, slot }) =
             arena_set.find_slot(extracted_material.lod, extracted_material.main_entity)
         else {
             warn!(
@@ -177,15 +274,6 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
             continue;
         };
         let arena = arena_set.arena_mut(extracted_material.lod, arena_idx);
-
-        let Some(slot) = arena.existing_slot(extracted_material.main_entity) else {
-            warn!(
-                "[prepare_material_for_arena] no slot yet for chunk {:?}, dropping this frame's material upload",
-                extracted_material.chunk_pos
-            );
-            commands.entity(extracted_entity).despawn();
-            continue;
-        };
 
         debug_assert_eq!(
             extracted_material.size, arena.texture_size,
@@ -198,7 +286,7 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
             material_offset_bytes,
             &extracted_material.padded_data,
         );
-        arena.needs_remesh = true;
+        arena.dirty_slots.push(slot); // pass3 bakes materials into vertices
 
         commands.entity(extracted_entity).despawn();
     }
@@ -210,8 +298,14 @@ pub fn prepare_visibility_for_arena(
     extracted_chunks: Query<(Entity, &ExtractedChunkField<VisibilityField>)>,
     mut commands: Commands,
 ) {
-    for (extracted_entity, extracted_mask) in extracted_chunks.iter() {
-        let Some(ArenaSlot { arena_idx, .. }) =
+    for (_, extracted_entity) in newest_pending(&arena_set, &extracted_chunks, &mut commands) {
+        let Ok((_, extracted_mask)) = extracted_chunks.get(extracted_entity) else {
+            continue;
+        };
+        if arena_set.deferred.contains(&extracted_mask.main_entity) {
+            continue; // waits with its SDF
+        }
+        let Some(ArenaSlot { arena_idx, slot }) =
             arena_set.find_slot(extracted_mask.lod, extracted_mask.main_entity)
         else {
             if !extracted_mask.padded_data.is_empty() {
@@ -225,20 +319,9 @@ pub fn prepare_visibility_for_arena(
         };
         let arena = arena_set.arena_mut(extracted_mask.lod, arena_idx);
 
-        let Some(slot) = arena.existing_slot(extracted_mask.main_entity) else {
-            warn!(
-                "[prepare_visibility_for_arena] no slot yet for chunk {:?}, dropping this frame's mask",
-                extracted_mask.chunk_pos
-            );
-            commands.entity(extracted_entity).despawn();
-            continue;
-        };
-
         if extracted_mask.padded_data.is_empty() {
-            // Chunk transitioned to uniform this frame — clear the flag;
-            // the previous frame's mask data, if any, is now stale and
-            // pass1 will stop consulting it once chunk_has_mask reflects
-            // this.
+            // Chunk transitioned to uniform — clear the flag; any previous
+            // mask data is now stale and the raster stops consulting it.
             arena.set_slot_has_mask(slot, false);
             commands.entity(extracted_entity).despawn();
             continue;
@@ -277,15 +360,16 @@ pub fn prepare_visibility_for_arena(
     }
 }
 
+/// Re-meshes only the dirty slots of each arena. Every slot owns a fixed
+/// vertex/index range, so untouched chunks keep their geometry as-is.
 pub fn dispatch_voxel_compute_passes_batched(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
     mut arena_set: ResMut<VoxelChunkArenaSet>,
-    telemetry: Res<OverflowTelemetry>,
 ) {
-    if arena_set.is_empty() || !arena_set.iter().any(|a| a.needs_remesh) {
+    if !arena_set.iter().any(|a| !a.dirty_slots.is_empty()) {
         return;
     }
 
@@ -294,16 +378,12 @@ pub fn dispatch_voxel_compute_passes_batched(
         Some(stream_compaction_pipeline),
         Some(scan_block_sums_pipeline),
         Some(stream_compaction_resolve_pipeline),
-        Some(write_chunk_active_count_pipeline),
-        Some(chunk_bases_pipeline),
         Some(pass3_pipeline),
     ) = (
         pipeline_cache.get_compute_pipeline(pipeline.pass1_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.scan_block_sums_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_resolve_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.write_chunk_active_count_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.chunk_bases_pipeline_id),
         pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
     )
     else {
@@ -312,11 +392,6 @@ pub fn dispatch_voxel_compute_passes_batched(
             ("scan", pipeline.stream_compaction_pipeline_id),
             ("scan_block_sums", pipeline.scan_block_sums_pipeline_id),
             ("resolve", pipeline.stream_compaction_resolve_pipeline_id),
-            (
-                "write_active_count",
-                pipeline.write_chunk_active_count_pipeline_id,
-            ),
-            ("chunk_bases", pipeline.chunk_bases_pipeline_id),
             ("pass3", pipeline.pass3_pipeline_id),
         ];
         for (name, id) in ids {
@@ -327,72 +402,56 @@ pub fn dispatch_voxel_compute_passes_batched(
                 );
             }
         }
-        return;
+        return; // dirty slots stay dirty until the pipelines are ready
     };
 
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_compute_encoder_batched"),
     });
     for arena in arena_set.iter_mut() {
-        if !arena.needs_remesh {
+        if arena.dirty_slots.is_empty() {
             continue;
         }
-        let active = arena.active_chunk_count();
-        if active == 0 {
-            continue;
-        }
-        /*
-        static LAST: AtomicU32 = AtomicU32::new(0);
-        if active != LAST.swap(active, Ordering::Relaxed) {
-            info!(
-                "[arena] texture_size={} active={} max={}",
-                arena.texture_size, active, arena.max_chunks
-            );
-        }
-        */
+        arena.dirty_slots.sort_unstable();
+        arena.dirty_slots.dedup();
+        let n = arena.dirty_slots.len() as u32;
+        render_queue.write_buffer(
+            &arena.active_slot_map_buffer,
+            0,
+            bytemuck::cast_slice(&arena.dirty_slots),
+        );
+
         let wg1 = arena.cell_count.div_ceil(4);
         dispatch(
             &mut encoder,
             "surface_nets_pass1_batched",
             pass1_pipeline,
             &arena.pass1_bind_group,
-            (wg1, wg1, wg1 * active),
+            (wg1, wg1, wg1 * n),
         );
+        // Scan/resolve: x = block within a chunk, y = chunk. Keeps x under
+        // the 65535-workgroup limit however many chunks are dispatched.
         let wg_scan = arena.blocks_per_chunk;
         dispatch(
             &mut encoder,
             "stream_compaction_scan_batched",
             stream_compaction_pipeline,
             &arena.compaction_bind_group,
-            (wg_scan * active, 1, 1),
+            (wg_scan, n, 1),
         );
         dispatch(
             &mut encoder,
             "stream_compaction_scan_block_sums_batched",
             scan_block_sums_pipeline,
             &arena.compaction_bind_group,
-            (active, 1, 1),
+            (n, 1, 1),
         );
         dispatch(
             &mut encoder,
             "stream_compaction_resolve_batched",
             stream_compaction_resolve_pipeline,
             &arena.compaction_bind_group,
-            (wg_scan * active, 1, 1),
-        );
-        dispatch(
-            &mut encoder,
-            "stream_compaction_write_active_counts",
-            write_chunk_active_count_pipeline,
-            &arena.compaction_bind_group,
-            (active, 1, 1),
-        );
-        dispatch(
-            &mut encoder,
-            "compute_chunk_bases",
-            chunk_bases_pipeline,
-            &arena.chunk_bases_bind_group,
-            (1, 1, 1),
+            (wg_scan, n, 1),
         );
         let wg3 = arena.cell_count.div_ceil(8);
         dispatch(
@@ -400,23 +459,20 @@ pub fn dispatch_voxel_compute_passes_batched(
             "surface_nets_pass3_batched",
             pass3_pipeline,
             &arena.pass3_bind_group,
-            (wg3, wg3, wg3 * active),
+            (wg3, wg3, wg3 * n),
         );
-
-        if telemetry.0 && arena.overflow_state.load(Ordering::Acquire) == OVERFLOW_FREE {
+        if arena.guard_state.load(Ordering::Acquire) == GUARD_FREE {
             encoder.copy_buffer_to_buffer(
-                &arena.overflow_flag_buffer,
+                &arena.guard_debug_buffer,
                 0,
-                &arena.overflow_readback_buffer,
+                &arena.guard_readback_buffer,
                 0,
-                4,
+                16,
             );
-            // The submit below always follows, and the map system runs later this frame.
-            arena
-                .overflow_state
-                .store(OVERFLOW_COPIED, Ordering::Release);
+            encoder.clear_buffer(&arena.guard_debug_buffer, 0, None);
+            arena.guard_state.store(GUARD_COPIED, Ordering::Release);
         }
-        arena.needs_remesh = false;
+        arena.dirty_slots.clear();
     }
     render_queue.submit(std::iter::once(encoder.finish()));
 }
@@ -492,9 +548,10 @@ pub fn voxel_raster_pass(
         render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
         render_pass.set_bind_group(2, &arena.raster_chunk_bind_group, &[]);
 
-        // indirect_args is dense: entry i belongs to active_slots[i].
-        for i in 0..arena.active_slots.len() as u64 {
-            render_pass.draw_indexed_indirect(&arena.indirect_args_buffer, i * ARGS_STRIDE);
+        // indirect_args is indexed by slot.
+        for &slot in &arena.active_slots {
+            render_pass
+                .draw_indexed_indirect(&arena.indirect_args_buffer, slot as u64 * ARGS_STRIDE);
         }
     }
 }
@@ -526,6 +583,7 @@ pub fn extract_visibility_removed(
     mut commands: Commands,
     mut removed: Extract<RemovedComponents<VisibilityField>>,
     chunks: Extract<Query<(&ChunkPosition, &LOD, Has<VisibilityField>)>>,
+    frame: Extract<Res<FrameCount>>,
 ) {
     for entity in removed.read() {
         let Ok((pos, lod, still_has)) = chunks.get(entity) else {
@@ -540,6 +598,7 @@ pub fn extract_visibility_removed(
             padded_data: Vec::new(),
             size: lod.size() + PADDING,
             lod: *lod,
+            seq: frame.0,
             _type: PhantomData,
         });
     }
@@ -550,15 +609,16 @@ pub fn extract_voxel_chunks<T>(
     chunk_manager: Extract<Res<ChunkManager>>,
     query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
     visibility_query: Extract<Query<Option<&VisibilityField>>>,
-    mut last_versions: Local<std::collections::HashMap<IVec3, (LOD, [u64; 8])>>,
+    mut last_versions: Local<std::collections::HashMap<Entity, (LOD, [u64; 8])>>,
     surface_query: Extract<Query<(), With<crate::field::surface::HasSurface>>>,
     forced: Extract<Res<ForceResident>>,
+    frame: Extract<Res<FrameCount>>,
 ) where
     T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
     for (entity, pos, field, lod) in query.iter() {
         if !surface_query.contains(entity) {
-            last_versions.remove(&pos.0); // so gaining a surface re-extracts
+            last_versions.remove(&entity); // so gaining a surface re-extracts
             continue;
         }
         if visibility_query
@@ -566,7 +626,7 @@ pub fn extract_voxel_chunks<T>(
             .is_ok_and(|v| v.is_some_and(|vv| vv.is_all_empty()))
             && !forced.contains(&pos.0)
         {
-            last_versions.remove(&pos.0); // so leasing/un-hiding re-extracts
+            last_versions.remove(&entity); // so leasing/un-hiding re-extracts
             continue;
         }
         let size = lod.size();
@@ -586,11 +646,14 @@ pub fn extract_voxel_chunks<T>(
             }
         }
 
+        // Keyed by entity, not position: a chunk that despawns and respawns at
+        // the same spot comes back at version 0 with unchanged neighbours, so a
+        // position key matched and the new entity never got an arena slot.
         let key = (*lod, versions);
-        if last_versions.get(&pos.0) == Some(&key) {
+        if last_versions.get(&entity) == Some(&key) {
             continue;
         }
-        last_versions.insert(pos.0, key);
+        last_versions.insert(entity, key);
 
         let padded_size = size + PADDING;
 
@@ -619,9 +682,11 @@ pub fn extract_voxel_chunks<T>(
             padded_data,
             size: padded_size,
             lod: *lod,
+            seq: frame.0,
             _type: PhantomData,
         });
     }
+    last_versions.retain(|e, _| query.contains(*e)); // drop despawned chunks
 }
 
 const PADDING: u32 = 2;
@@ -647,25 +712,22 @@ pub fn fill_apron<T>(
     let idx =
         |x: u32, y: u32, z: u32| -> usize { ((z * padded_size + y) * padded_size + x) as usize };
 
-    let neighbor_info = |offset: IVec3| -> Option<(Box<[T::Elem]>, u32)> {
+    // Borrowed and resolved once per neighbour. This used to clone the whole
+    // neighbour field on every one of the 26 fill_region calls (~26 MB of
+    // memcpy per High chunk), inside ExtractSchedule where it stalls both worlds.
+    let neighbors = NEIGHBORS_MASK.map(|offset| {
         let n_entity = chunk_manager.get_chunk(&(chunk_pos + offset))?;
-        let Ok((_, _, n_field, n_lod)) = query.get(n_entity) else {
-            return None;
-        };
+        let (_, _, n_field, n_lod) = query.get(n_entity).ok()?;
         let n_size = n_lod.size();
-        let expected = (n_size * n_size * n_size) as usize;
-        if n_field.data_slice().len() != expected {
-            // Same LOD/field race as extract_voxel_chunks's own guard, one
-            // hop over: this neighbor's LOD was bumped but its field hasn't
-            // been resized by sync_field_lod yet this frame. Treat as "no
-            // neighbor data available" for this frame — fill_region's None
-            // branch already handles that by falling back to the current
-            // chunk's own edge data, which is a safe (if slightly less
-            // accurate for one frame) apron value.
-            return None;
-        }
-        let data = n_field.data_slice().to_vec().into_boxed_slice();
-        Some((data, n_size))
+        // A size mismatch means a neighbour mid-LOD-change: treat it as
+        // missing and let fill_region fall back to this chunk's edge data.
+        (n_field.data_slice().len() == n_lod.volume()).then(|| (n_field.data_slice(), n_size))
+    });
+    let neighbor_info = |offset: IVec3| {
+        NEIGHBORS_MASK
+            .iter()
+            .position(|o| *o == offset)
+            .and_then(|i| neighbors[i])
     };
 
     // --- Faces: +x, +y, +z ---
@@ -800,13 +862,13 @@ pub fn fill_apron<T>(
     }
 }
 
-fn fill_region<T: ApronSample>(
+fn fill_region<'a, T: ApronSample>(
     vol: &mut [T::Elem],
     chunk_size: u32,
     offset: IVec3,
     iter_ranges: &[(u32, u32, u32)],
     fallback_idx: impl Fn(u32, u32, u32) -> usize,
-    neighbor_info: &impl Fn(IVec3) -> Option<(Box<[T::Elem]>, u32)>,
+    neighbor_info: &impl Fn(IVec3) -> Option<(&'a [T::Elem], u32)>,
     idx: &impl Fn(u32, u32, u32) -> usize,
 ) {
     if let Some((nx_data, n_size)) = neighbor_info(offset) {
@@ -833,7 +895,7 @@ fn fill_region<T: ApronSample>(
             let ny_coord = local_y * scale_ratio;
             let nz_coord = local_z * scale_ratio;
             let val = T::rescale(
-                T::sample_apron(&nx_data, n_size, nx_coord, ny_coord, nz_coord),
+                T::sample_apron(nx_data, n_size, nx_coord, ny_coord, nz_coord),
                 scale_ratio,
             );
             vol[idx(cx, cy, cz)] = val;
@@ -934,53 +996,65 @@ pub fn release_despawned_chunks(
     for e in stale {
         arena_set.release(e);
     }
+    arena_set.live = wanted;
 }
 
-pub fn map_overflow_readbacks(
-    telemetry: Res<OverflowTelemetry>,
-    arena_set: Res<VoxelChunkArenaSet>,
-) {
-    if !telemetry.0 {
-        return;
+#[cfg(test)]
+mod tests {
+    use super::count_active_cells;
+
+    fn volume(n: usize, inside: &[(usize, usize, usize)]) -> Vec<u8> {
+        let mut v = vec![1.0f32; n * n * n];
+        for &(x, y, z) in inside {
+            v[(z * n + y) * n + x] = -1.0;
+        }
+        bytemuck::cast_slice(&v).to_vec()
     }
+
+    #[test]
+    fn counts_cells_with_a_sign_change() {
+        assert_eq!(count_active_cells(&volume(4, &[]), 4), 0);
+        // A centre voxel touches all 8 cells around it.
+        assert_eq!(count_active_cells(&volume(3, &[(1, 1, 1)]), 3), 8);
+        // A corner voxel touches only the one cell it's a corner of.
+        assert_eq!(count_active_cells(&volume(4, &[(0, 0, 0)]), 4), 1);
+    }
+}
+
+// Temporary diagnostic for pass3's range guard; remove once the vanishing
+// chunks during edits are understood.
+const GUARD_FREE: u8 = 0;
+const GUARD_COPIED: u8 = 1;
+const GUARD_MAPPED: u8 = 2;
+
+pub fn map_guard_readbacks(arena_set: Res<VoxelChunkArenaSet>) {
     for (rank, arenas) in arena_set.arenas.iter().enumerate() {
         for (arena_idx, arena) in arenas.iter().enumerate() {
-            let state = arena.overflow_state.clone();
+            let state = arena.guard_state.clone();
             if state
-                .compare_exchange(
-                    OVERFLOW_COPIED,
-                    OVERFLOW_MAPPED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(GUARD_COPIED, GUARD_MAPPED, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
             {
                 continue;
             }
-
-            let buf = arena.overflow_readback_buffer.clone();
-            let buf2 = buf.clone();
-            let texture_size = arena.texture_size;
-            let max_chunks = arena.max_chunks;
-
-            buf2.slice(..).map_async(MapMode::Read, move |result| {
-                if result.is_err() {
-                    state.store(OVERFLOW_FREE, Ordering::Release); // don't strand the buffer
-                    return;
+            let buf = arena.guard_readback_buffer.clone();
+            let chunk_pos_of_slot = arena.chunk_pos_of_slot.clone();
+            buf.clone().slice(..).map_async(MapMode::Read, move |result| {
+                if result.is_ok() {
+                    let v: [u32; 4] = {
+                        let data = buf.slice(..).get_mapped_range();
+                        *bytemuck::from_bytes(&data[..16])
+                    };
+                    buf.unmap();
+                    if v[0] != 0 {
+                        let pos = chunk_pos_of_slot.get(v[1] as usize).copied().flatten();
+                        warn!(
+                            "[guard] LOD rank {rank} arena {arena_idx}: {} chunk(s) skipped; last slot {} at {:?}: gpu_count {} > cpu_count {}",
+                            v[0], v[1], pos, v[2], v[3]
+                        );
+                    }
                 }
-                let value = {
-                    let data = buf.slice(..).get_mapped_range();
-                    u32::from_le_bytes(data[..4].try_into().unwrap())
-                };
-                buf.unmap();
-                if value != 0 {
-                    warn!(
-                        "[overflow] LOD rank {rank} arena {arena_idx} (texture_size={texture_size}, \
-                         max_chunks={max_chunks}) dropped chunks: vertex budget exceeded. \
-                         Raise ACTIVE_FRACTION_ESTIMATE in arena.rs."
-                    );
-                }
-                state.store(OVERFLOW_FREE, Ordering::Release);
+                state.store(GUARD_FREE, Ordering::Release);
             });
         }
     }

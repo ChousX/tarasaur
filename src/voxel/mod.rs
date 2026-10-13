@@ -21,7 +21,7 @@ use systems::extract_voxel_chunks;
 use crate::{
     SDF, VisibilityField,
     voxel::{
-        arena::{OverflowTelemetry, VoxelChunkArenaSet},
+        arena::VoxelChunkArenaSet,
         cursor::CursorPlugin,
         pipeline::{
             VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
@@ -37,7 +37,7 @@ use crate::{
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         systems::{
             dispatch_voxel_compute_passes_batched, extract_visibility_removed,
-            map_overflow_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
+            RemeshBudget, map_guard_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
             release_despawned_chunks, voxel_raster_pass,
         },
     },
@@ -51,10 +51,20 @@ pub const SURFACE_NETS_PASS3_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a");
 pub const VOXEL_RASTER_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("3c4d5e6f-7081-92a3-b4c5-d6e7f8091a2b");
-pub const COMPUTE_CHUNK_BASES_SHADER_HANDLE: Handle<Shader> =
-    uuid_handle!("4d5e6f70-8192-a3b4-c5d6-e7f8091a2b3c");
 pub const CURSOR_QUERY_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("5e6f7081-92a3-b4c5-d6e7-f8091a2b3c4d");
+/// Ordering inside `RenderSystems::Prepare`. Bevy runs `Queue` *before*
+/// `Prepare`, so the compute dispatch must not live in `Queue`: it would
+/// mesh last frame's uploads while this frame's upload had just reset the
+/// draw args, and a chunk updated every frame (a held brush) never drew.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VoxelPrepareSet {
+    /// Writes chunk data, ranges and draw args into the arenas.
+    Upload,
+    /// Re-meshes what `Upload` dirtied, in the same frame.
+    Dispatch,
+}
+
 pub struct VoxelRenderPlugin;
 
 impl Plugin for VoxelRenderPlugin {
@@ -82,13 +92,6 @@ impl Plugin for VoxelRenderPlugin {
             app,
             VOXEL_RASTER_SHADER_HANDLE,
             "shaders/voxel_raster.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            COMPUTE_CHUNK_BASES_SHADER_HANDLE,
-            "shaders/compute_chunk_bases.wgsl",
             Shader::from_wgsl
         );
 
@@ -123,7 +126,7 @@ impl Plugin for VoxelRenderPlugin {
 
         render_app
             .init_resource::<VoxelChunkArenaSet>()
-            .init_resource::<OverflowTelemetry>()
+            .init_resource::<RemeshBudget>()
             .add_systems(
                 ExtractSchedule,
                 (
@@ -137,28 +140,31 @@ impl Plugin for VoxelRenderPlugin {
                 )
                     .chain(),
             )
+            .configure_sets(
+                Render,
+                (VoxelPrepareSet::Upload, VoxelPrepareSet::Dispatch)
+                    .chain()
+                    .in_set(RenderSystems::Prepare),
+            )
             .add_systems(
                 Render,
                 (
-                    (prepare_voxel_arena::<SDF>, prepare_visibility_for_arena)
+                    (prepare_voxel_arena, prepare_visibility_for_arena)
                         .chain()
-                        .in_set(RenderSystems::Prepare),
+                        .in_set(VoxelPrepareSet::Upload),
                     update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
                     prepare_voxel_queries
-                        .in_set(RenderSystems::Prepare)
+                        .in_set(VoxelPrepareSet::Upload)
                         .after(prepare_visibility_for_arena),
-                    dispatch_voxel_compute_passes_batched.in_set(RenderSystems::Queue),
+                    dispatch_voxel_compute_passes_batched.in_set(VoxelPrepareSet::Dispatch),
                     dispatch_voxel_query_pass
-                        .in_set(RenderSystems::Queue)
+                        .in_set(VoxelPrepareSet::Dispatch)
                         .after(dispatch_voxel_compute_passes_batched),
                     map_voxel_query_results.in_set(RenderSystems::Cleanup),
+                    map_guard_readbacks.in_set(RenderSystems::Cleanup),
                 ),
             )
-            .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass))
-            .add_systems(
-                Render,
-                map_overflow_readbacks.in_set(RenderSystems::Cleanup),
-            );
+            .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass));
     }
 
     fn finish(&self, app: &mut App) {

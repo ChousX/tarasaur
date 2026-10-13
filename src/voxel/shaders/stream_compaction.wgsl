@@ -9,23 +9,15 @@ struct BatchCompactionUniforms {
 @group(0) @binding(1) var<storage, read_write> cell_flags: array<u32>;
 @group(0) @binding(2) var<storage, read_write> compacted_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read_write> block_sums: array<u32>;
-@group(0) @binding(4) var<storage, read_write> chunk_active_counts: array<u32>;
 @group(0) @binding(5) var<storage, read> active_slot_map: array<u32>;
 
 // Indexing convention (matches pass1/pass3/compute_chunk_bases):
 //   chunk_idx  = position in the active list (dispatch order)
 //   real_slot  = active_slot_map[chunk_idx] = the arena slot
 // Per-cell buffers (cell_flags, compacted_offsets) are laid out per real slot.
-// Per-dispatch buffers (block_sums, chunk_active_counts) are indexed by chunk_idx.
-
-@compute @workgroup_size(1, 1, 1)
-fn write_chunk_active_count(@builtin(workgroup_id) wg_id: vec3<u32>) {
-    let chunk_idx = wg_id.x;
-    let real_slot = active_slot_map[chunk_idx];
-    let cell_offset = real_slot * uniforms.total_cells;
-    let last = cell_offset + uniforms.total_cells - 1u;
-    chunk_active_counts[chunk_idx] = compacted_offsets[last] + cell_flags[last];
-}
+// block_sums is per dispatch, indexed by chunk_idx. scan_workgroup and
+// resolve_block_offsets are dispatched as (blocks_per_chunk, chunk_count):
+// x = block within the chunk, y = chunk, so x never nears the 65535 limit.
 
 const WORKGROUP_SIZE: u32 = 256u;
 var<workgroup> shared_data: array<u32, WORKGROUP_SIZE * 2u>;
@@ -36,8 +28,8 @@ fn scan_workgroup(
     @builtin(workgroup_id) wg_id: vec3<u32>
 ) {
     let thid = local_id.x;
-    let chunk_idx = wg_id.x / uniforms.blocks_per_chunk;
-    let local_bid = wg_id.x % uniforms.blocks_per_chunk;
+    let chunk_idx = wg_id.y;
+    let local_bid = wg_id.x;
 
     let real_slot = active_slot_map[chunk_idx];
     let cell_offset = real_slot * uniforms.total_cells;
@@ -101,8 +93,8 @@ fn resolve_block_offsets(
     @builtin(workgroup_id) wg_id: vec3<u32>
 ) {
     let thid = local_id.x;
-    let chunk_idx = wg_id.x / uniforms.blocks_per_chunk;
-    let local_bid = wg_id.x % uniforms.blocks_per_chunk;
+    let chunk_idx = wg_id.y;
+    let local_bid = wg_id.x;
 
     let real_slot = active_slot_map[chunk_idx];
     let cell_offset = real_slot * uniforms.total_cells;

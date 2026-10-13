@@ -31,8 +31,12 @@ struct ChunkMeta {
 @group(0) @binding(5) var<storage, read_write> indirect_args: array<IndirectDrawArgs>;
 @group(0) @binding(6) var<uniform> uniforms: BatchUniforms;
 @group(0) @binding(7) var<storage, read> chunk_meta: array<ChunkMeta>;
-@group(0) @binding(8) var<storage, read> chunk_vertex_base: array<u32>;
-@group(0) @binding(9) var<storage, read> chunk_index_base: array<u32>;
+// Per slot, CPU-written: each slot owns [base, base + count) vertices and
+// 18x that range of indices, so re-meshing one chunk never moves another.
+@group(0) @binding(8) var<storage, read> slot_vertex_base: array<u32>;
+@group(0) @binding(9) var<storage, read> slot_vertex_count: array<u32>;
+// Temporary diagnostic: [trips, slot, gpu_count, cpu_count] for the range guard.
+@group(0) @binding(12) var<storage, read_write> guard_debug: array<atomic<u32>, 4>;
 @group(0) @binding(10) var<storage, read> active_slot_map: array<u32>;
 @group(0) @binding(11) var<storage, read> material_buffer: array<u32>;
 
@@ -205,18 +209,31 @@ fn cs_main(
         return;
     }
 
-    // chunk_idx = position in the active list. It indexes every per-dispatch
-    // buffer (bases, indirect_args). real_slot indexes per-slot buffers
-    // (sdf, flags, offsets, materials, chunk_meta).
+    // chunk_idx = position in this dispatch. real_slot indexes every
+    // per-slot buffer (sdf, flags, offsets, materials, chunk_meta, ranges,
+    // indirect_args).
     let real_slot = active_slot_map[chunk_idx];
     let cmeta = chunk_meta[real_slot];
     let sdf_base = sdf_offset_for(real_slot);
     let cell_base = cell_offset_for(real_slot);
     let cell_idx = get_cell_index(id, cell_base);
 
-    let vbase = chunk_vertex_base[chunk_idx];
-    if (vbase == 0xFFFFFFFFu) { return; } // dropped by compute_chunk_bases (overflow)
-    let idx_base = chunk_index_base[chunk_idx];
+    let vbase = slot_vertex_base[real_slot];
+    let idx_base = vbase * 18u;
+    // The range was sized from a CPU count of the same test pass1 uses. If
+    // they ever disagreed, writing on would spill into another chunk's
+    // range, so emit nothing instead.
+    let last_cell = cell_base + uniforms.cell_count * uniforms.cell_count * uniforms.cell_count - 1u;
+    let gpu_count = compacted_offsets[last_cell] + flags_buffer[last_cell];
+    if (gpu_count > slot_vertex_count[real_slot]) {
+        if (all(id == vec3<u32>(0u))) {
+            atomicAdd(&guard_debug[0], 1u);
+            atomicStore(&guard_debug[1], real_slot);
+            atomicStore(&guard_debug[2], gpu_count);
+            atomicStore(&guard_debug[3], slot_vertex_count[real_slot]);
+        }
+        return;
+    }
 
     // --- PART 1: VERTEX GENERATION FOR ACTIVE DUAL CELLS ---
     if (flags_buffer[cell_idx] == 1u) {
@@ -296,7 +313,7 @@ fn cs_main(
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
@@ -330,7 +347,7 @@ fn cs_main(
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
@@ -364,7 +381,7 @@ fn cs_main(
             let v2 = vbase + compacted_offsets[idx_2];
             let v3 = vbase + compacted_offsets[idx_3];
 
-            let base_idx = idx_base + atomicAdd(&indirect_args[chunk_idx].index_count, 6u);
+            let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
             if (curr_inside) {
                 final_index_buffer[base_idx + 0u] = v0;
                 final_index_buffer[base_idx + 1u] = v1;
