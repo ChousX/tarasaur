@@ -6,7 +6,7 @@ use bevy::{
 };
 
 use super::generator::ChunkGeneratorRegistry;
-use crate::chunk::{Chunk, ChunkPosition};
+use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin};
 use crate::persistence::{
     ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, SaveCache,
     build_if_dirty, commit_save, read_save,
@@ -83,9 +83,11 @@ pub fn start_chunk_loads(
             Option<&LOD>,
             Has<SdfReinitTask>,
             Has<DirtyField<SDF, f32>>,
+            Has<EditPin>,
         ),
         (With<Chunk>, Without<ChunkDataTask>),
     >,
+    loaders: Query<&CurrentChunk, With<ChunkLoader>>,
     in_flight: Query<(), With<ChunkDataTask>>,
     cap: Res<MaxInFlightLoads>,
     max: Res<MaxEditLod>,
@@ -95,12 +97,30 @@ pub fn start_chunk_loads(
     mut commands: Commands,
 ) {
     let mut slots = cap.0.saturating_sub(in_flight.iter().count());
-    for (entity, pos, target, lod, reinit, dirty) in &chunks {
+    if slots == 0 {
+        return;
+    }
+    // Nearest-first (Chebyshev, to the closest loader); edit-pinned chunks
+    // first of all, since an edit is waiting on them.
+    let mut wanted: Vec<_> = chunks
+        .iter()
+        .filter(|(_, _, target, lod, ..)| *lod != Some(&target.0))
+        .map(|item| {
+            let pos = item.1.0;
+            let pinned = item.6;
+            let dist = loaders
+                .iter()
+                .map(|c| (pos - c.0).abs().max_element())
+                .min()
+                .unwrap_or(0);
+            (if pinned { -1 } else { dist }, item)
+        })
+        .collect();
+    wanted.sort_unstable_by_key(|(d, _)| *d);
+
+    for (_, (entity, pos, target, lod, reinit, dirty, _)) in wanted {
         if slots == 0 {
             break;
-        }
-        if lod == Some(&target.0) {
-            continue;
         }
         if lod == Some(&max.0) {
             if reinit || dirty {

@@ -35,7 +35,7 @@ struct ChunkMeta {
 // 18x that range of indices, so re-meshing one chunk never moves another.
 @group(0) @binding(8) var<storage, read> slot_vertex_base: array<u32>;
 @group(0) @binding(9) var<storage, read> slot_vertex_count: array<u32>;
-// Temporary diagnostic: [trips, slot, gpu_count, cpu_count] for the range guard.
+// Range-guard telemetry: [trips, slot, gpu_count, cpu_count]; see map_guard_readbacks.
 @group(0) @binding(12) var<storage, read_write> guard_debug: array<atomic<u32>, 4>;
 @group(0) @binding(10) var<storage, read> active_slot_map: array<u32>;
 @group(0) @binding(11) var<storage, read> material_buffer: array<u32>;

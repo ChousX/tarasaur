@@ -93,7 +93,7 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
         // it (material tallying happens per-vertex, not per-cell), so no
         // change needed to pass1_surface_entries() or compaction_entries().
         storage_buffer_entry(11, ShaderStages::COMPUTE, true),
-        storage_buffer_entry(12, ShaderStages::COMPUTE, false), // guard_debug (temporary diagnostic)
+        storage_buffer_entry(12, ShaderStages::COMPUTE, false), // guard_debug: range-guard telemetry
     ]
 }
 

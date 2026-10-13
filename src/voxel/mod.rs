@@ -37,7 +37,7 @@ use crate::{
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         systems::{
             dispatch_voxel_compute_passes_batched, extract_visibility_removed,
-            RemeshBudget, map_guard_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
+            GuardTelemetry, RemeshBudget, map_guard_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
             release_despawned_chunks, voxel_raster_pass,
         },
     },
@@ -127,6 +127,7 @@ impl Plugin for VoxelRenderPlugin {
         render_app
             .init_resource::<VoxelChunkArenaSet>()
             .init_resource::<RemeshBudget>()
+            .init_resource::<GuardTelemetry>()
             .add_systems(
                 ExtractSchedule,
                 (

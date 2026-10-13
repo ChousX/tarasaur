@@ -46,6 +46,9 @@ pub struct SDF {
     scratch: Vec<PackedCoord>,
     inside_count: u32, // voxels with value <= 0.0, same test as pass1
     pub version: u64,
+    /// Per `NEIGHBORS_MASK` entry: bumped only when the low slab that
+    /// neighbour's apron reads changes. See `Versionable::border_version`.
+    border_versions: [u64; 7],
 }
 
 impl Default for SDF {
@@ -63,6 +66,7 @@ impl SDF {
             scratch: Vec::new(),
             inside_count: 0,
             version: 0,
+            border_versions: [0; 7],
         }
     }
     fn recount(&mut self) {
@@ -102,6 +106,7 @@ impl SDF {
 
     pub fn reinit(&mut self) {
         self.version += 1;
+        self.touch_all_borders();
         let volume = self.lod.volume();
         // Guarantee buffers match the expected volume before sampling
         if self.data.len() != volume {
@@ -141,9 +146,44 @@ impl SDF {
     /// checking the result isn't stale (see `resolve_sdf_reinit_tasks`) —
     /// this just does the write and bumps version like any other mutation.
     pub fn apply_reinit_result(&mut self, data: Box<[f32]>) {
-        self.data = data;
+        let old = std::mem::replace(&mut self.data, data);
         self.recount();
         self.version += 1;
+        // Only bump the borders the JFA actually changed, so neighbours whose
+        // apron is untouched don't re-mesh after every stroke.
+        let n = self.lod.size();
+        let pad = crate::voxel::systems::PADDING;
+        for z in 0..n {
+            for y in 0..n {
+                let x_end = if z < pad || y < pad { n } else { pad.min(n) };
+                for x in 0..x_end {
+                    let i = self.flatten(x, y, z);
+                    if old.get(i) != self.data.get(i) {
+                        self.touch_border(x, y, z);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bumps the border versions of every neighbour whose apron reads (x, y, z).
+    fn touch_border(&mut self, x: u32, y: u32, z: u32) {
+        let pad = crate::voxel::systems::PADDING;
+        let near = [x < pad, y < pad, z < pad];
+        if !near.contains(&true) {
+            return;
+        }
+        for (i, off) in crate::voxel::systems::NEIGHBORS_MASK.iter().enumerate() {
+            if (off.x == 0 || near[0]) && (off.y == 0 || near[1]) && (off.z == 0 || near[2]) {
+                self.border_versions[i] += 1;
+            }
+        }
+    }
+
+    fn touch_all_borders(&mut self) {
+        for v in &mut self.border_versions {
+            *v += 1;
+        }
     }
 }
 
@@ -207,6 +247,7 @@ impl Field<f32> for SDF {
             }
             self.data[i] = value;
             self.version += 1;
+            self.touch_border(x, y, z);
         }
     }
 }
@@ -217,9 +258,14 @@ impl Versionable for SDF {
         self.version
     }
 
+    fn border_version(&self, neighbor: usize) -> u64 {
+        self.border_versions.get(neighbor).copied().unwrap_or(self.version)
+    }
+
     #[inline]
     fn incorment_version(&mut self) {
         self.version += 1;
+        self.touch_all_borders();
     }
 }
 
@@ -245,6 +291,7 @@ impl FieldFromRaw for SDF {
             scratch: Vec::new(),
             inside_count,
             version: 0,
+            border_versions: [0; 7],
         }
     }
 }
@@ -494,5 +541,19 @@ mod band_tests {
         sdf.set(1, 1, 1, 400.0);
         assert_eq!(sdf.get(1, 1, 1), SDF_BAND);
         assert_eq!(sdf.uniform_sign(), None); // sign still tracked
+    }
+
+    #[test]
+    fn border_versions_only_bump_for_touched_faces() {
+        use crate::Versionable;
+        let n = LOD::Lowest.volume();
+        let mut sdf = SDF::from_raw(LOD::Lowest, vec![1.0; n]);
+        sdf.set(3, 3, 3, -1.0); // interior of a 4^3 grid: no neighbour reads it
+        assert!((0..7).all(|i| sdf.border_version(i) == 0));
+        sdf.set(0, 3, 3, -1.0); // x = 0 slab: only the +x neighbour (index 0)
+        assert_eq!(sdf.border_version(0), 1);
+        assert!((1..7).all(|i| sdf.border_version(i) == 0));
+        sdf.set(0, 0, 0, -1.0); // corner: every neighbour
+        assert!((0..7).all(|i| sdf.border_version(i) >= 1));
     }
 }

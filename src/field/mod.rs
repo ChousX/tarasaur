@@ -58,6 +58,12 @@ pub trait Versionable: Component {
     fn version(&self) -> u64;
     /// Sets the value at the given grid coordinates.
     fn incorment_version(&mut self);
+    /// Version of only the voxels that `NEIGHBORS_MASK[neighbor]`'s chunk reads
+    /// into its apron (the low slab(s) facing it), at equal LOD. Lets an edit
+    /// that misses a face skip re-meshing the chunk across it. Default: any change.
+    fn border_version(&self, _neighbor: usize) -> u64 {
+        self.version()
+    }
 }
 
 /// A field whose backing storage can be uploaded to the GPU as a flat byte

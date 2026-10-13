@@ -183,8 +183,8 @@ pub struct VoxelChunkArena {
     pub slot_vertex_count_buffer: Buffer, // [slot] -> exact active cell count, CPU-written
     pub active_slot_map_buffer: Buffer,   // [dispatch idx] -> slot, CPU-written per dispatch
 
-    // Temporary diagnostic: pass3 records [trips, slot, gpu_count, cpu_count]
-    // when its range guard fires; read back by `map_guard_readbacks`.
+    // pass3 records [trips, slot, gpu_count, cpu_count] when its range guard
+    // fires; read back by `map_guard_readbacks` when `GuardTelemetry` is on.
     pub guard_debug_buffer: Buffer,
     pub guard_readback_buffer: Buffer,
     pub guard_state: std::sync::Arc<std::sync::atomic::AtomicU8>,

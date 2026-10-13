@@ -392,6 +392,7 @@ pub fn dispatch_voxel_compute_passes_batched(
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
     mut arena_set: ResMut<VoxelChunkArenaSet>,
+    telemetry: Res<GuardTelemetry>,
 ) {
     if !arena_set.iter().any(|a| !a.dirty_slots.is_empty()) {
         return;
@@ -485,7 +486,7 @@ pub fn dispatch_voxel_compute_passes_batched(
             &arena.pass3_bind_group,
             (wg3, wg3, wg3 * n),
         );
-        if arena.guard_state.load(Ordering::Acquire) == GUARD_FREE {
+        if telemetry.0 && arena.guard_state.load(Ordering::Acquire) == GUARD_FREE {
             encoder.copy_buffer_to_buffer(
                 &arena.guard_debug_buffer,
                 0,
@@ -664,8 +665,15 @@ pub fn extract_voxel_chunks<T>(
         for (i, offset) in NEIGHBORS_MASK.iter().enumerate() {
             if let Some(n_entity) = chunk_manager.get_chunk(&(pos.0 + *offset)) {
                 if let Ok((_, _, n_field, n_lod)) = query.get(n_entity) {
+                    // At equal LOD the apron reads only the neighbour's facing slab;
+                    // across LODs it resamples more of it, so use the full version.
+                    let v = if n_lod == lod {
+                        n_field.border_version(i)
+                    } else {
+                        n_field.version()
+                    };
                     // fold neighbour LOD in: a reload resets version to 0
-                    versions[i + 1] = n_field.version() ^ ((n_lod.rank() as u64 + 1) << 56);
+                    versions[i + 1] = v ^ ((n_lod.rank() as u64 + 1) << 56);
                 }
             }
         }
@@ -713,7 +721,7 @@ pub fn extract_voxel_chunks<T>(
     last_versions.retain(|e, _| query.contains(*e)); // drop despawned chunks
 }
 
-const PADDING: u32 = 2;
+pub(crate) const PADDING: u32 = 2;
 
 pub fn fill_apron<T>(
     vol: &mut [T::Elem],
@@ -1046,13 +1054,26 @@ mod tests {
     }
 }
 
-// Temporary diagnostic for pass3's range guard; remove once the vanishing
-// chunks during edits are understood.
+/// Logs pass3's range guard (a chunk skipped because the GPU counted more
+/// cells than its CPU-sized range). Should never fire; costs one small
+/// readback per arena per frame, so on in debug builds only.
+#[derive(Resource)]
+pub struct GuardTelemetry(pub bool);
+
+impl Default for GuardTelemetry {
+    fn default() -> Self {
+        Self(cfg!(debug_assertions))
+    }
+}
+
 const GUARD_FREE: u8 = 0;
 const GUARD_COPIED: u8 = 1;
 const GUARD_MAPPED: u8 = 2;
 
-pub fn map_guard_readbacks(arena_set: Res<VoxelChunkArenaSet>) {
+pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelChunkArenaSet>) {
+    if !telemetry.0 {
+        return;
+    }
     for (rank, arenas) in arena_set.arenas.iter().enumerate() {
         for (arena_idx, arena) in arenas.iter().enumerate() {
             let state = arena.guard_state.clone();
