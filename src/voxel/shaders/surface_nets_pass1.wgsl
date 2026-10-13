@@ -47,8 +47,8 @@ fn sdf_offset_for(slot: u32) -> u32 {
     return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
 }
 
-fn cell_offset_for(slot: u32) -> u32 {
-    return slot * uniforms.cell_count * uniforms.cell_count * uniforms.cell_count;
+fn cell_offset_for(chunk_idx: u32) -> u32 {
+    return chunk_idx * uniforms.cell_count * uniforms.cell_count * uniforms.cell_count;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -63,7 +63,7 @@ fn cs_main(
 
     let real_slot = active_slot_map[chunk_idx];
     let sdf_base = sdf_offset_for(real_slot);
-    let cell_base = cell_offset_for(real_slot);
+    let cell_base = cell_offset_for(chunk_idx); // flags/offsets are per-dispatch scratch
     let cell_count = uniforms.cell_count;
 
     if (all(cell_coord == vec3<u32>(0u))) {

@@ -11,11 +11,12 @@ struct BatchCompactionUniforms {
 @group(0) @binding(3) var<storage, read_write> block_sums: array<u32>;
 @group(0) @binding(5) var<storage, read> active_slot_map: array<u32>;
 
-// Indexing convention (matches pass1/pass3/compute_chunk_bases):
-//   chunk_idx  = position in the active list (dispatch order)
-//   real_slot  = active_slot_map[chunk_idx] = the arena slot
-// Per-cell buffers (cell_flags, compacted_offsets) are laid out per real slot.
-// block_sums is per dispatch, indexed by chunk_idx. scan_workgroup and
+// Indexing convention (matches pass1/pass3):
+//   chunk_idx = position in this dispatch
+// cell_flags, compacted_offsets and block_sums are per-dispatch scratch,
+// indexed by chunk_idx; only the passes that touch per-slot data (pass1
+// reads sdf, pass3 writes geometry) look up the real slot.
+// scan_workgroup and
 // resolve_block_offsets are dispatched as (blocks_per_chunk, chunk_count):
 // x = block within the chunk, y = chunk, so x never nears the 65535 limit.
 
@@ -31,8 +32,7 @@ fn scan_workgroup(
     let chunk_idx = wg_id.y;
     let local_bid = wg_id.x;
 
-    let real_slot = active_slot_map[chunk_idx];
-    let cell_offset = real_slot * uniforms.total_cells;
+    let cell_offset = chunk_idx * uniforms.total_cells; // per-dispatch scratch
     let block_offset = chunk_idx * uniforms.blocks_per_chunk;
 
     let local_idx_a = local_bid * (WORKGROUP_SIZE * 2u) + thid;
@@ -96,8 +96,7 @@ fn resolve_block_offsets(
     let chunk_idx = wg_id.y;
     let local_bid = wg_id.x;
 
-    let real_slot = active_slot_map[chunk_idx];
-    let cell_offset = real_slot * uniforms.total_cells;
+    let cell_offset = chunk_idx * uniforms.total_cells; // per-dispatch scratch
     let block_offset = chunk_idx * uniforms.blocks_per_chunk;
 
     let block_modifier = block_sums[block_offset + local_bid];

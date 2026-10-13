@@ -186,6 +186,11 @@ pub fn prepare_voxel_arena(
                 VoxelChunkArena::new(&render_device, &layouts, size - 1, size)
             })
         else {
+            arena_set.deferred.insert(x.main_entity);
+            let lod_idx = VoxelChunkArenaSet::lod_index(lod);
+            if arena_set.arenas[lod_idx].iter().any(VoxelChunkArena::dirty_full) {
+                continue; // out of scratch for this frame: just wait
+            }
             if !*out_of_room {
                 warn!(
                     "[prepare_voxel_arena] no room for LOD {:?} chunk {:?}; it keeps its current mesh until space frees up",
@@ -193,7 +198,6 @@ pub fn prepare_voxel_arena(
                 );
             }
             any_out_of_room = true;
-            arena_set.deferred.insert(x.main_entity);
             continue;
         };
         let arena = arena_set.arena_mut(lod, arena_idx);
@@ -242,7 +246,7 @@ pub fn prepare_voxel_arena(
             bytemuck::bytes_of(&args),
         );
 
-        arena.dirty_slots.push(slot);
+        arena.mark_dirty(slot);
         commands.entity(extracted_entity).despawn();
     }
     *out_of_room = any_out_of_room;
@@ -274,6 +278,9 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
             continue;
         };
         let arena = arena_set.arena_mut(extracted_material.lod, arena_idx);
+        if !arena.can_mark_dirty(slot) {
+            continue; // no scratch left this frame; retried next frame
+        }
 
         debug_assert_eq!(
             extracted_material.size, arena.texture_size,
@@ -286,7 +293,7 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
             material_offset_bytes,
             &extracted_material.padded_data,
         );
-        arena.dirty_slots.push(slot); // pass3 bakes materials into vertices
+        arena.mark_dirty(slot); // pass3 bakes materials into vertices
 
         commands.entity(extracted_entity).despawn();
     }

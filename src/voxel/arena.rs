@@ -21,15 +21,20 @@ use crate::{
 // Average fraction of cells per chunk provisioned for vertex/index output.
 // Each chunk gets an exact-size range from a shared heap (see `RangeHeap`),
 // so this only has to cover the arena-wide average. Sandbox terrain
-// measured 1.2-3.4%. A full heap never drops terrain: uploads wait and the
+// peaked at ~1.3% average in sandbox runs. A full heap never drops terrain: uploads wait and the
 // chunk keeps its current mesh.
-const ACTIVE_FRACTION_ESTIMATE: f32 = 0.06;
+const ACTIVE_FRACTION_ESTIMATE: f32 = 0.03;
+
+/// Cells of per-dispatch scratch (flags + compacted offsets, 8 bytes/cell)
+/// per arena: ~64 MB, i.e. ~29 High chunks, ~223 Medium, every Low chunk.
+/// Uploads past it in one frame wait for the next (keeping their mesh).
+const SCRATCH_CELLS: u32 = 8 * 1024 * 1024;
 
 /// Indices emitted per active cell, worst case (3 quads x 6).
 pub const INDICES_PER_CELL: u32 = 18;
 
-/// Largest chunk count that keeps every per-chunk-strided buffer (vertex
-/// buffers dominate, at 32 bytes/cell) under the device's actual
+/// Largest chunk count that keeps every per-slot buffer (the SDF dominates)
+/// under the device's actual
 /// max_storage_buffer_binding_size, with a 10% safety margin.
 fn max_chunks(
     render_device: &RenderDevice,
@@ -41,18 +46,12 @@ fn max_chunks(
 
     let sdf_bytes = sdf_elems_per_chunk as u64 * 4;
     let material_bytes = sdf_elems_per_chunk as u64;
-    let flags_bytes = total_cells as u64 * 4;
-    let offsets_bytes = total_cells as u64 * 4;
-    let scattered_bytes = budget_cells_per_chunk as u64 * 32;
     let vertex_bytes = budget_cells_per_chunk as u64 * 32;
     let index_bytes = budget_cells_per_chunk as u64 * INDICES_PER_CELL as u64 * 4;
 
     let worst_bytes_per_chunk = [
         sdf_bytes,
         material_bytes,
-        flags_bytes,
-        offsets_bytes,
-        scattered_bytes,
         vertex_bytes,
         index_bytes,
     ]
@@ -139,6 +138,8 @@ fn reserve_for(count: u32) -> u32 {
 #[derive(Resource)]
 pub struct VoxelChunkArena {
     pub max_chunks: u32,
+    /// Chunks one dispatch can mesh; sizes the per-dispatch scratch.
+    pub scratch_chunks: u32,
     pub cell_count: u32,   // chunk_voxels + 1, fixed for this LOD bucket
     pub texture_size: u32, // padded SDF size, fixed for this LOD bucket
     pub total_cells: u32,  // cell_count^3
@@ -152,7 +153,6 @@ pub struct VoxelChunkArena {
     pub chunk_has_mask_buffer: Buffer,
     pub flags_buffer: Buffer,
     pub compacted_offsets_buffer: Buffer,
-    pub scattered_vertex_buffer: Buffer,
     pub final_vertex_buffer: Buffer,
     pub index_buffer: Buffer,
     pub indirect_args_buffer: Buffer, // indexed by slot
@@ -249,25 +249,22 @@ impl VoxelChunkArena {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
 
+        // Per-dispatch scratch, indexed by position in the dispatch, not slot:
+        // only chunks re-meshed this frame need flags and offsets.
+        let scratch_chunks = (SCRATCH_CELLS / total_cells).clamp(1, max as u32);
+        let scratch = scratch_chunks as u64;
         let flags_buffer = render_device.storage(
             "arena_flags_buffer",
-            total_cells as u64 * 4 * max,
+            total_cells as u64 * 4 * scratch,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
         let compacted_offsets_buffer = render_device.storage(
             "arena_compacted_offsets_buffer",
-            total_cells as u64 * 4 * max,
+            total_cells as u64 * 4 * scratch,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
-        // Not read by any shader seen so far, but still bound at pass1
-        // binding 3; remove it together with that layout entry if dropping it.
-        let scattered_vertex_buffer = render_device.storage(
-            "arena_scattered_vertex_buffer",
-            budget_cells_per_chunk as u64 * 32 * max,
-            BufferUsages::STORAGE,
-        );
         let final_vertex_buffer = render_device.storage(
             "arena_final_vertex_buffer",
             budget_cells_per_chunk as u64 * 32 * max,
@@ -302,7 +299,7 @@ impl VoxelChunkArena {
         let blocks_per_chunk = total_cells.div_ceil(workgroup_capacity);
         let block_sums_buffer = render_device.storage(
             "arena_block_sums_buffer",
-            (blocks_per_chunk as u64 * max) * 4,
+            (blocks_per_chunk as u64 * scratch) * 4,
             BufferUsages::STORAGE,
         );
 
@@ -389,7 +386,6 @@ impl VoxelChunkArena {
                 (0, &sdf_buffer),
                 (1, &flags_buffer),
                 (2, &compacted_offsets_buffer),
-                (3, &scattered_vertex_buffer),
                 (4, &final_vertex_buffer),
                 (5, &indirect_args_buffer),
                 (6, &batch_uniform_buffer),
@@ -452,6 +448,7 @@ impl VoxelChunkArena {
 
         Self {
             max_chunks: max as u32,
+            scratch_chunks,
             cell_count,
             texture_size,
             total_cells,
@@ -460,7 +457,6 @@ impl VoxelChunkArena {
             sdf_buffer,
             flags_buffer,
             compacted_offsets_buffer,
-            scattered_vertex_buffer,
             final_vertex_buffer,
             index_buffer,
             indirect_args_buffer,
@@ -541,6 +537,9 @@ impl VoxelChunkArena {
     /// heap; nothing is changed, so the chunk keeps whatever mesh it has.
     pub fn place(&mut self, main_entity: MainEntity, count: u32) -> Option<u32> {
         let existing = self.slot_of_main_entity.get(&main_entity).copied();
+        if !existing.is_some_and(|s| self.can_mark_dirty(s)) && self.dirty_full() {
+            return None; // no scratch left to mesh it this frame
+        }
         if let Some(slot) = existing {
             let (base, cap) = self.slot_range[slot as usize];
             // Keep the range unless it is too small or far too big.
@@ -577,6 +576,24 @@ impl VoxelChunkArena {
             if let Some(pos) = self.chunk_pos_of_slot[slot as usize].take() {
                 self.slot_of_chunk_pos.remove(&pos);
             }
+        }
+    }
+
+    /// This frame's dispatch already fills the per-dispatch scratch.
+    pub fn dirty_full(&self) -> bool {
+        self.dirty_slots.len() >= self.scratch_chunks as usize
+    }
+
+    /// Whether `slot` can be re-meshed this frame (already queued, or room left).
+    pub fn can_mark_dirty(&self, slot: u32) -> bool {
+        self.dirty_slots.contains(&slot) || !self.dirty_full()
+    }
+
+    /// Queues `slot` for this frame's re-mesh. Callers check `can_mark_dirty`
+    /// first: an upload that can't be meshed this frame must wait instead.
+    pub fn mark_dirty(&mut self, slot: u32) {
+        if !self.dirty_slots.contains(&slot) {
+            self.dirty_slots.push(slot);
         }
     }
 
@@ -707,6 +724,13 @@ impl VoxelChunkArenaSet {
     ) -> Option<ArenaSlot> {
         let lod_idx = Self::lod_index(lod);
         let current = self.find_slot(lod, main_entity).map(|s| s.arena_idx);
+        // Out of scratch is a "this frame" limit, not a lack of room: wait
+        // rather than moving the chunk or growing a new arena over it.
+        if let Some(found) = self.find_slot(lod, main_entity) {
+            if !self.arenas[lod_idx][found.arena_idx].can_mark_dirty(found.slot) {
+                return None;
+            }
+        }
 
         let order = current
             .into_iter()
@@ -717,6 +741,9 @@ impl VoxelChunkArenaSet {
                 placed = Some(ArenaSlot { arena_idx, slot });
                 break;
             }
+        }
+        if placed.is_none() && self.arenas[lod_idx].iter().any(VoxelChunkArena::dirty_full) {
+            return None;
         }
         if placed.is_none() && self.arenas[lod_idx].len() < self.config.max_arenas[lod_idx] {
             for (i, a) in self.arenas[lod_idx].iter().enumerate() {

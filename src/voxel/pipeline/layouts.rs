@@ -60,7 +60,6 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: now array<f32>, not a texture
         storage_buffer_entry(1, ShaderStages::COMPUTE, false),
         storage_buffer_entry(2, ShaderStages::COMPUTE, false),
-        storage_buffer_entry(3, ShaderStages::COMPUTE, false),
         storage_buffer_entry(4, ShaderStages::COMPUTE | ShaderStages::VERTEX, false),
         storage_buffer_entry(5, ShaderStages::COMPUTE, false),
         uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(16)),
