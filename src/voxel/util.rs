@@ -52,16 +52,6 @@ pub fn make_batch_uniform_buffer(
     })
 }
 
-fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
-    let mut packed = vec![0u32; bits.len().div_ceil(32)];
-    for (i, b) in bits.enumerate() {
-        if b {
-            packed[i / 32] |= 1 << (i % 32);
-        }
-    }
-    packed
-}
-
 pub fn dispatch(
     encoder: &mut CommandEncoder,
     label: &'static str,

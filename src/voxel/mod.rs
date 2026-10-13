@@ -1,5 +1,4 @@
 mod arena;
-pub mod buffers;
 pub mod cursor;
 pub mod pipeline;
 pub mod query;

@@ -8,7 +8,7 @@ use bevy::{
 use super::generator::ChunkGeneratorRegistry;
 use crate::chunk::{Chunk, ChunkPosition};
 use crate::persistence::{
-    ChunkPersistenceRegistry, ChunkSaveData, ChunkSaveState, FieldSavePayload, SaveCache,
+    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, SaveCache,
     build_if_dirty, commit_save, read_save,
 };
 use crate::{LOD, MaxEditLod, TargetLOD};

@@ -45,13 +45,6 @@ pub struct Pass3Uniforms {
     pub _pad1: u32, // pad struct to 32 bytes (multiple of 16)
 }
 
-pub struct CollisionMeshData {
-    pub chunk_pos: IVec3, // or whatever crate::chunk::ChunkPosition wraps
-    pub generation: u64,
-    pub vertices: Vec<[f32; 3]>,
-    pub indices: Vec<u32>,
-}
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct RayQuery {

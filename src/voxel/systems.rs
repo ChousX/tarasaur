@@ -1,7 +1,7 @@
 use super::util::dispatch;
 use std::{
     marker::PhantomData,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::Ordering,
 };
 
 use bevy::{
@@ -166,7 +166,7 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
     mut commands: Commands,
 ) {
     for (extracted_entity, extracted_material) in extracted_chunks.iter() {
-        let Some(ArenaSlot { arena_idx, slot }) =
+        let Some(ArenaSlot { arena_idx, .. }) =
             arena_set.find_slot(extracted_material.lod, extracted_material.main_entity)
         else {
             warn!(
@@ -211,7 +211,7 @@ pub fn prepare_visibility_for_arena(
     mut commands: Commands,
 ) {
     for (extracted_entity, extracted_mask) in extracted_chunks.iter() {
-        let Some(ArenaSlot { arena_idx, slot }) =
+        let Some(ArenaSlot { arena_idx, .. }) =
             arena_set.find_slot(extracted_mask.lod, extracted_mask.main_entity)
         else {
             if !extracted_mask.padded_data.is_empty() {
@@ -467,10 +467,6 @@ pub fn voxel_raster_pass(
         }],
     );
     let material_bind_group = &voxel_material.0;
-    let multi = ctx
-        .render_device()
-        .features()
-        .contains(WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT);
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),

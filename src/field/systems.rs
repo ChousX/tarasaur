@@ -200,16 +200,6 @@ pub fn resolve_sdf_reinit_tasks(
             .remove::<DirtyField<SDF, f32>>();
     }
 }
-pub fn _reinit_dirty_sdf(
-    mut commands: Commands,
-    mut query: Query<(Entity, &mut SDF), With<DirtyField<SDF, f32>>>,
-) {
-    for (entity, mut sdf) in query.iter_mut() {
-        sdf.reinit();
-        commands.entity(entity).remove::<DirtyField<SDF, f32>>();
-        info!("[reinit_dirty_sdf] reinitializing entity {:?}", entity);
-    }
-}
 
 pub fn detect_topology_desync(
     query: Query<

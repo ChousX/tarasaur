@@ -1,6 +1,6 @@
 use super::Field;
 use crate::{
-    ApronSample, ExtractGate, FieldFromRaw, FieldLOD, FieldNew, LOD, Versionable, VoxelDataSlice,
+    ApronSample, ExtractGate, FieldFromRaw, FieldLOD, LOD, Versionable, VoxelDataSlice,
     flatten_with_size,
 };
 use bevy::prelude::*;

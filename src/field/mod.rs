@@ -47,11 +47,6 @@ pub trait Field<T: Copy + Default>: Component {
     fn set(&mut self, x: u32, y: u32, z: u32, value: T);
 }
 
-pub trait FieldGen<T: Copy + Default>: Field<T> {
-    /// `chunk_pos` is in chunk-grid coordinates; `local` is 0..size() per axis.
-    fn build(&mut self, chunk_pos: IVec3, local: UVec3) -> T;
-}
-
 #[inline]
 pub fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> u32 {
     // Index = z * (width * height) + y * width + x
