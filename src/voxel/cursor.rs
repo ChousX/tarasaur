@@ -1,4 +1,8 @@
-use bevy::{ecs::message::MessageWriter, prelude::*, window::PrimaryWindow};
+use bevy::{
+    ecs::message::MessageWriter,
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
+};
 
 use crate::{
     chunk::update_cursor_focus,
@@ -16,21 +20,33 @@ const BRUSH_RADIUS: f32 = 2.0;
 /// Which backend answers "what terrain is under the cursor?".
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorQueryMode {
-    /// CPU ray first; fall back to the GPU result if the CPU finds nothing.
+    /// Picks the backend for you. For a single cursor ray that is the CPU:
+    /// it answers the same frame, sees every LOD, and the main world always
+    /// holds the SDF, so the GPU can't hit anything the CPU misses. Falling
+    /// back to the GPU would only add a 2-3 frame old hit (a ghost hit right
+    /// after the cursor leaves the terrain).
     #[default]
     Auto,
-    /// GPU readback only (2-3 frames late, arena-0 chunks only).
+    /// GPU readback only (2-3 frames late, `CollisionLOD` arena only).
     Gpu,
     /// CPU SDF raycast only. No GPU query is submitted.
     Cpu,
 }
 
 impl CursorQueryMode {
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
             Self::Auto => Self::Cpu,
             Self::Cpu => Self::Gpu,
             Self::Gpu => Self::Auto,
+        }
+    }
+
+    /// The backend this mode actually runs.
+    const fn backend(self) -> HitSource {
+        match self {
+            Self::Auto | Self::Cpu => HitSource::Cpu,
+            Self::Gpu => HitSource::Gpu,
         }
     }
 }
@@ -54,6 +70,19 @@ pub struct CursorSurfaceHit {
 #[derive(Resource, Default)]
 pub struct CursorHit(pub Option<CursorSurfaceHit>);
 
+/// Toggles the built-in mouse brush (`cursor_brush`). Turn it off when the
+/// app does its own editing from `CursorHit`.
+#[derive(Resource)]
+pub struct CursorBrush {
+    pub enabled: bool,
+}
+
+impl Default for CursorBrush {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 pub fn cycle_cursor_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<CursorQueryMode>) {
     if keys.just_pressed(KeyCode::F8) {
         *mode = mode.next();
@@ -63,7 +92,7 @@ pub fn cycle_cursor_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<Curso
 
 pub fn resolve_cursor_hit(
     mode: Res<CursorQueryMode>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     terrain: TerrainRay,
     gpu: Res<VoxelQueryResults>,
@@ -73,7 +102,14 @@ pub fn resolve_cursor_hit(
     let ray = windows
         .single()
         .ok()
-        .and_then(|w| w.cursor_position())
+        .and_then(|(w, opts)| {
+            // With a grabbed/locked cursor (mouse-look), aim from the screen centre.
+            if opts.grab_mode == CursorGrabMode::None {
+                w.cursor_position()
+            } else {
+                Some(w.size() / 2.0)
+            }
+        })
         .and_then(|cursor| {
             let (cam, cam_t) = cameras.iter().find(|(cam, _)| cam.is_active)?;
             cam.viewport_to_world(cam_t, cursor).ok()
@@ -85,42 +121,34 @@ pub fn resolve_cursor_hit(
     };
     let dir: Vec3 = *ray.direction;
 
-    // Submit the GPU query only when it can be used.
-    if *mode != CursorQueryMode::Cpu {
-        pending.0.push(RayQuery {
-            origin: ray.origin.into(),
-            max_distance: MAX_RAY_DISTANCE,
-            direction: dir.into(),
-            user_id: 0,
-        });
-    }
-
-    let cpu_hit = (*mode != CursorQueryMode::Gpu)
-        .then(|| terrain.cast(ray.origin, dir, MAX_RAY_DISTANCE))
-        .flatten()
-        .map(|h| CursorSurfaceHit {
-            pos: h.pos,
-            normal: h.normal,
-            distance: h.distance,
-            source: HitSource::Cpu,
-        });
-
-    let gpu_hit = || {
-        gpu.0
-            .first()
-            .filter(|h| h.did_hit != 0)
-            .map(|h| CursorSurfaceHit {
-                pos: Vec3::from(h.hit_pos_world),
-                normal: Vec3::from(h.hit_normal),
-                distance: h.hit_distance,
-                source: HitSource::Gpu,
-            })
-    };
-
-    out.0 = match *mode {
-        CursorQueryMode::Cpu => cpu_hit,
-        CursorQueryMode::Gpu => gpu_hit(),
-        CursorQueryMode::Auto => cpu_hit.or_else(gpu_hit),
+    out.0 = match mode.backend() {
+        HitSource::Cpu => {
+            terrain
+                .cast(ray.origin, dir, MAX_RAY_DISTANCE)
+                .map(|h| CursorSurfaceHit {
+                    pos: h.pos,
+                    normal: h.normal,
+                    distance: h.distance,
+                    source: HitSource::Cpu,
+                })
+        }
+        HitSource::Gpu => {
+            pending.0.push(RayQuery {
+                origin: ray.origin.into(),
+                max_distance: MAX_RAY_DISTANCE,
+                direction: dir.into(),
+                user_id: 0,
+            });
+            gpu.0
+                .first()
+                .filter(|h| h.did_hit != 0)
+                .map(|h| CursorSurfaceHit {
+                    pos: Vec3::from(h.hit_pos_world),
+                    normal: Vec3::from(h.hit_normal),
+                    distance: h.hit_distance,
+                    source: HitSource::Gpu,
+                })
+        }
     };
 }
 
@@ -163,6 +191,7 @@ impl Plugin for CursorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CursorQueryMode>()
             .init_resource::<CursorHit>()
+            .init_resource::<CursorBrush>()
             .add_systems(
                 Update,
                 (
@@ -170,7 +199,9 @@ impl Plugin for CursorPlugin {
                     resolve_cursor_hit
                         .after(cycle_cursor_mode)
                         .before(update_cursor_focus),
-                    cursor_brush.after(resolve_cursor_hit),
+                    cursor_brush
+                        .after(resolve_cursor_hit)
+                        .run_if(|b: Res<CursorBrush>| b.enabled),
                 ),
             );
     }

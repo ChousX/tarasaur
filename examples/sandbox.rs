@@ -9,7 +9,6 @@ use bevy::{
         RenderPlugin,
         settings::{RenderCreation, WgpuFeatures, WgpuLimits, WgpuSettings},
     },
-    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use common::{
     FlyCam, TerrainMaterial, determine_material, fly_cam_system, setup_terrain_palette,
@@ -20,6 +19,7 @@ use tarasaur::{
     chunk::{CHUNK_SIZE, ChunkLoader},
     editor::WorldEditor,
     field::{MaterialFieldPlugin, generator::ChunkGeneratorRegistry},
+    voxel::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
 };
 
 fn main() {
@@ -56,8 +56,12 @@ fn main() {
     }
 
     app.init_resource::<Brush>()
+        .insert_resource(CursorBrush { enabled: false })
         .add_systems(Startup, (spawn_player, setup_terrain_palette))
-        .add_systems(Update, (fly_cam_system, terrain_edit))
+        .add_systems(
+            Update,
+            (fly_cam_system, terrain_edit.after(resolve_cursor_hit)),
+        )
         .run();
 }
 
@@ -156,8 +160,8 @@ fn spawn_player(mut commands: Commands) {
             lod_bands: vec![
                 (LOD::High, 3),
                 (LOD::Medium, 2),
-                //(LOD::Low, 4),
-                //(LOD::Lowest, 2),
+                (LOD::Low, 4),
+                (LOD::Lowest, 2),
             ],
             hysteresis: 1,
         },
@@ -191,35 +195,11 @@ impl Default for Brush {
     }
 }
 
-/// Marches the ray until it dips below the heightfield, then bisects to
-/// refine the hit point.
-fn pick_terrain(ray: Ray3d, max_dist: f32) -> Option<Vec3> {
-    const STEP: f32 = 0.25;
-    let at = |t: f32| ray.origin + *ray.direction * t;
-    let below = |p: Vec3| p.y < terrain_height(p.x, p.z);
-
-    if below(ray.origin) {
-        return None;
-    }
-    let mut t = 0.0;
-    while t < max_dist {
-        let next = t + STEP;
-        if below(at(next)) {
-            let (mut lo, mut hi) = (t, next);
-            for _ in 0..8 {
-                let mid = 0.5 * (lo + hi);
-                if below(at(mid)) { hi = mid } else { lo = mid }
-            }
-            return Some(at(hi));
-        }
-        t = next;
-    }
-    None
-}
-
+/// Brush on top of the library's resolved `CursorHit` (backend picked by
+/// `CursorQueryMode`, F8 cycles). The built-in CSG brush is disabled in
+/// `main` so a click only edits once.
 fn terrain_edit(
-    windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform), With<FlyCam>>,
+    hit: Res<CursorHit>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<MouseWheel>,
     time: Res<Time>,
@@ -231,21 +211,7 @@ fn terrain_edit(
         brush.radius = (brush.radius + ev.y * 0.5).clamp(1.0, 20.0);
     }
 
-    let (Ok((window, cursor)), Ok((camera, cam_tf))) = (windows.single(), cameras.single()) else {
-        return;
-    };
-
-    // With a grabbed/locked cursor (mouse-look), aim from the screen centre.
-    let screen_pos = if cursor.grab_mode == CursorGrabMode::None {
-        window.cursor_position().unwrap_or(window.size() / 2.0)
-    } else {
-        window.size() / 2.0
-    };
-
-    let Ok(ray) = camera.viewport_to_world(cam_tf, screen_pos) else {
-        return;
-    };
-    let Some(hit) = pick_terrain(ray, 200.0) else {
+    let Some(hit) = hit.0.map(|h| h.pos) else {
         return;
     };
 

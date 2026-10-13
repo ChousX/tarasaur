@@ -102,8 +102,7 @@ impl SDF {
             self.data = vec![f32::MAX; volume].into_boxed_slice();
         }
         if let Some(neg) = uniform_sign_volume(&self.data) {
-            let size = self.lod.size() as f32;
-            self.data.fill(if neg { -size } else { size });
+            fill_uniform(&mut self.data, self.lod.size(), neg);
             self.recount();
             return; // no seeds/scratch allocation
         }
@@ -270,7 +269,7 @@ pub fn jump_flood_distance_field(
     size: u32,
 ) {
     if let Some(neg) = uniform_sign_volume(data) {
-        data.fill(if neg { -(size as f32) } else { size as f32 });
+        fill_uniform(data, size, neg);
         return;
     }
     #[inline]
@@ -440,12 +439,30 @@ pub fn uniform_sign_volume(data: &[f32]) -> Option<bool> {
     data.iter().all(|v| (*v <= 0.0) == first).then_some(first)
 }
 
+/// A uniform volume has no surface inside it, but one may sit just past any
+/// face. Each voxel gets its distance (in voxels) to the nearest voxel of a
+/// neighbouring chunk. A flat +/-size made such chunks uneditable: an
+/// accumulate brush had to push a voxel through a whole chunk's worth of
+/// distance before its sign flipped, and every reinit in between reset it.
+pub fn fill_uniform(data: &mut [f32], size: u32, neg: bool) {
+    let sign = if neg { -1.0 } else { 1.0 };
+    let edge = |c: u32| (c + 1).min(size - c);
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let d = edge(x).min(edge(y)).min(edge(z));
+                data[((z * size + y) * size + x) as usize] = sign * d as f32;
+            }
+        }
+    }
+}
+
 /// Signs in `data` -> signed distances (in voxels of this LOD). Uniform
-/// volumes have no surface, so the answer is just +/-size everywhere and no
-/// buffers are allocated. Use this instead of calling the JFA directly.
+/// volumes have no surface, so they get `fill_uniform` and no buffers are
+/// allocated. Use this instead of calling the JFA directly.
 pub fn compute_sdf_distances(data: &mut [f32], size: u32) {
     if let Some(neg) = uniform_sign_volume(data) {
-        data.fill(if neg { -(size as f32) } else { size as f32 });
+        fill_uniform(data, size, neg);
         return;
     }
     let volume = data.len();

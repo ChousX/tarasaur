@@ -1,23 +1,21 @@
-// Spawns the same radius-7.0 SDF sphere as sphere_test.rs, then unprojects
-// the mouse cursor into a world-space ray every frame and feeds it through
-// the GPU-native collision query pipeline. A small red gizmo sphere tracks
-// wherever the (1-frame-delayed) result says the ray hit the terrain.
+// Spawns the same radius-7.0 SDF sphere as sphere_test.rs and pins the
+// cursor to the GPU-native collision query pipeline (CursorQueryMode::Gpu).
+// A small red gizmo sphere tracks wherever the (2-3 frame delayed) result
+// says the cursor ray hit the terrain.
 
 use bevy::prelude::*;
 use bevy::render::settings::{RenderCreation, WgpuLimits, WgpuSettings};
 use bevy::render::{RenderApp, RenderPlugin};
-use bevy::window::PrimaryWindow;
 use tarasaur::{DirtyField, VisibilityField};
 use tarasaur::{
     Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
-    voxel::query::{CollisionLOD, PendingVoxelQueries, VoxelQueryResults},
-    voxel::types::RayQuery,
+    voxel::cursor::{CursorBrush, CursorHit, CursorQueryMode, resolve_cursor_hit},
+    voxel::query::CollisionLOD,
 };
 
 const SPHERE_CENTER: Vec3 = Vec3::ZERO;
 const SPHERE_RADIUS: f32 = 7.0;
-const QUERY_MAX_DISTANCE: f32 = 200.0;
 
 fn main() {
     App::new()
@@ -37,14 +35,16 @@ fn main() {
         )
         .add_plugins(TarasaurPlugin)
         .add_plugins(CursorCollisionSetupPlugin) // pins CollisionLOD to Medium
+        // Test the GPU path only; the built-in brush would carve the test sphere.
+        .insert_resource(CursorQueryMode::Gpu)
+        .insert_resource(CursorBrush { enabled: false })
         .add_systems(Startup, (spawn_camera_and_light, spawn_sphere_chunks))
         .add_systems(
             Update,
             (
-                orbit_camera,
+                orbit_camera.before(resolve_cursor_hit),
                 mark_chunks_visible,
-                submit_cursor_ray,
-                draw_hit_marker,
+                draw_hit_marker.after(resolve_cursor_hit),
             ),
         )
         .run();
@@ -176,56 +176,18 @@ impl Plugin for CursorCollisionSetupPlugin {
     }
 }
 
-/// Unprojects the cursor into a world-space ray each frame and pushes it
-/// onto PendingVoxelQueries. PendingVoxelQueries is cleared automatically
-/// in the First schedule by the plugin's own clear_pending_voxel_queries
-/// system, so this just appends — no manual lifetime management needed.
-fn submit_cursor_ray(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut pending: ResMut<PendingVoxelQueries>,
-) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor_pos) = window.cursor_position() else {
-        return; // cursor outside the window
-    };
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-
-    // ASSUMPTION: viewport_to_world returns Result<Ray3d, _> (current Bevy
-    // camera API). If your fork's signature differs, this is the line to
-    // adjust — everything downstream just needs `origin`/`direction`.
-    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else {
-        return;
-    };
-
-    pending.0.push(RayQuery {
-        origin: ray.origin.into(),
-        max_distance: QUERY_MAX_DISTANCE,
-        direction: ray.direction.as_vec3().into(),
-        user_id: 0,
-    });
-}
-
-/// Draws a small red sphere at the latest hit position, one frame behind
-/// the cursor by design (see FrameParity in voxel/query.rs). Draws
+/// Draws a small red sphere at the resolved `CursorHit`. The mode is pinned
+/// to `Gpu`, so this lags the cursor by the 2-3 frame readback. Draws
 /// nothing when the most recent query missed.
-fn draw_hit_marker(results: Res<VoxelQueryResults>, mut gizmos: Gizmos) {
-    let Some(hit) = results.0.first() else {
-        return;
-    };
-    if hit.did_hit == 0 {
-        return;
-    }
+fn draw_hit_marker(hit: Res<CursorHit>, mut gizmos: Gizmos) {
+    let Some(hit) = hit.0 else { return };
 
-    let pos = Vec3::from(hit.hit_pos_world);
-    let normal = Vec3::from(hit.hit_normal);
-
-    gizmos.sphere(pos, 0.15, Color::srgb(1.0, 0.05, 0.05));
+    gizmos.sphere(hit.pos, 0.15, Color::srgb(1.0, 0.05, 0.05));
     // Short normal tick, mostly to sanity-check compute_normal() isn't
     // returning garbage — safe to delete once you trust the pipeline.
-    gizmos.line(pos, pos + normal * 0.6, Color::srgb(1.0, 0.6, 0.0));
+    gizmos.line(
+        hit.pos,
+        hit.pos + hit.normal * 0.6,
+        Color::srgb(1.0, 0.6, 0.0),
+    );
 }

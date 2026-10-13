@@ -3,7 +3,6 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{RenderCreation, WgpuLimits, WgpuSettings};
-use bevy::window::PrimaryWindow;
 
 use tarasaur::loading::ChunkDataTask;
 use tarasaur::{Chunk, SDF};
@@ -11,6 +10,7 @@ use tarasaur::{
     LOD, TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ShowChunkBounds},
     field::generator::ChunkGeneratorRegistry,
+    voxel::cursor::{CursorHit, resolve_cursor_hit},
 };
 
 fn main() {
@@ -47,7 +47,13 @@ fn main() {
 
     app.insert_resource(ShowChunkBounds) // color-codes each chunk's LOD in gizmos — remove once you trust the streaming
         .add_systems(Startup, spawn_player_and_cursor_marker)
-        .add_systems(Update, (fly_cam_system, update_cursor_marker).chain())
+        .add_systems(
+            Update,
+            (
+                fly_cam_system.before(resolve_cursor_hit),
+                update_cursor_marker.after(resolve_cursor_hit),
+            ),
+        )
         .run();
 }
 
@@ -218,40 +224,16 @@ fn fly_cam_system(
     }
 }
 
-/// Moves the cursor's ChunkLoader marker to wherever the mouse ray crosses
-/// a fixed y=0 plane. This is a deliberate simplification — a real "focus
-/// the actual terrain under the cursor" would use the GPU collision query
-/// pipeline (see cursor_collision_test.rs's submit_cursor_ray/
-/// VoxelQueryResults), which tests against the real generated SDF instead
-/// of a flat plane. Good enough here since we only need an approximate
-/// world position to bias LOD toward, not a precise hit point.
+/// Moves the cursor's ChunkLoader marker to the terrain under the mouse,
+/// using the library's resolved `CursorHit` (F8 cycles the backend). On a
+/// miss the marker stays where it last hit.
 fn update_cursor_marker(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<FlyCam>>,
+    hit: Res<CursorHit>,
     mut marker_q: Query<&mut Transform, (With<CursorFocus>, Without<FlyCam>)>,
 ) {
-    let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok((camera, camera_transform)) = camera_q.single() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else {
-        return;
-    };
-
-    if ray.direction.y.abs() < 1e-4 {
-        return; // looking parallel to the plane — no sane intersection
-    }
-    let t = (0.0 - ray.origin.y) / ray.direction.y;
-    if t < 0.0 {
-        return; // plane is behind the camera
-    }
-    let hit = ray.origin + ray.direction * t;
-
+    let Some(hit) = hit.0 else { return };
     for mut transform in marker_q.iter_mut() {
-        transform.translation = hit;
+        transform.translation = hit.pos;
     }
 }
 

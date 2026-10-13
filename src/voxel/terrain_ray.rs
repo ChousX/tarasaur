@@ -81,7 +81,7 @@ impl TerrainRay<'_, '_> {
 
     /// First outside -> inside crossing along the ray. Detects the sign
     /// change itself, so it doesn't depend on distance values being accurate
-    /// (uniform chunks store +-size).
+    /// (uniform chunks only store distance to their own faces).
     pub fn cast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<TerrainHit> {
         let dir = dir.normalize_or_zero();
         if dir == Vec3::ZERO {
