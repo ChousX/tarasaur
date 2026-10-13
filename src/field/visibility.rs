@@ -56,7 +56,7 @@ impl Default for VisibilityField {
 
 impl Field<bool> for VisibilityField {
     fn size(&self) -> UVec3 {
-        UVec3::splat(self.lod as u32)
+        UVec3::splat(self.lod.size())
     }
 
     fn get(&self, x: u32, y: u32, z: u32) -> bool {
@@ -119,9 +119,6 @@ impl ApronSample for VisibilityField {
 impl Versionable for VisibilityField {
     fn version(&self) -> u64 {
         self.version
-    }
-    fn incorment_version(&mut self) {
-        self.version += 1;
     }
 }
 

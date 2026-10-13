@@ -54,10 +54,8 @@ pub fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> u32 {
 }
 
 pub trait Versionable: Component {
-    /// Gets the value at the given grid coordinates.
+    /// Bumped on every change; drives re-extraction and unsaved-edit detection.
     fn version(&self) -> u64;
-    /// Sets the value at the given grid coordinates.
-    fn incorment_version(&mut self);
     /// Version of only the voxels that `NEIGHBORS_MASK[neighbor]`'s chunk reads
     /// into its apron (the low slab(s) facing it), at equal LOD. Lets an edit
     /// that misses a face skip re-meshing the chunk across it. Default: any change.
@@ -77,12 +75,10 @@ pub trait VoxelDataSlice {
     fn gpu_bytes(vol: &[Self::Elem]) -> Vec<u8> {
         bytemuck::cast_slice(vol).to_vec()
     }
-    #[inline]
     /// Converts a value sampled from a grid `ratio`x finer (or, if <1,
     /// coarser) than the destination. Only distances care: SDF values are
     /// in voxels of their own LOD, so they divide by `ratio`. Categorical
     /// data is unchanged. Used by downsampling AND by the neighbour apron.
-
     fn rescale(v: Self::Elem, _ratio: f32) -> Self::Elem {
         v
     }
@@ -97,11 +93,8 @@ pub trait ApronSample: VoxelDataSlice {
 }
 
 /// Optional opt-out checked by `extract_voxel_chunks<T>` before doing the
-/// expensive padding/apron work for a chunk. Default: always do it.
-/// SDFField/MaterialField<M> use the default via a trivial empty impl —
-/// same pattern as AccumulateExt/BlendExt, explicit per-type impls rather
-/// than a blanket, since a blanket would make it impossible for
-/// VisibilityField to actually override this under Rust's coherence rules.
+/// padding/apron work for a chunk. Default: always extract. Implemented per
+/// type (not blanket) so `VisibilityField` can override it.
 pub trait ExtractGate {
     fn should_extract(&self) -> bool {
         true
@@ -112,10 +105,8 @@ pub trait FieldLOD {
     fn lod(&self) -> LOD;
 }
 
-/// Reconstructs a field at a given LOD with default/empty contents —
-/// the same shape every field type's `new(lod)` already provides. Exists
-/// so the LOD-sync system (see field/lod_sync.rs) can reset any field
-/// type generically without knowing its concrete type.
+/// Reconstructs a field at a given LOD with default contents, so generic
+/// code (spawn observers, edits, save install) can create any field type.
 pub trait FieldNew {
     fn new_for_lod(lod: LOD) -> Self;
 }

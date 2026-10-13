@@ -50,7 +50,7 @@ pub fn compaction_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(1, ShaderStages::COMPUTE, false),
         storage_buffer_entry(2, ShaderStages::COMPUTE, false),
         storage_buffer_entry(3, ShaderStages::COMPUTE, false),
-        storage_buffer_entry(5, ShaderStages::COMPUTE, true),  // active_slot_map
+        storage_buffer_entry(5, ShaderStages::COMPUTE, true), // active_slot_map
     ]
 }
 

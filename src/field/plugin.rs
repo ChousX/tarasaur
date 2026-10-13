@@ -56,7 +56,7 @@ impl<M: VoxelMaterial> Default for MaterialFieldPlugin<M> {
 impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
         app.add_field::<MaterialField<M>, M>();
-        app.add_observer(material_build_on_chunk_spawn::<M>);
+        app.add_observer(build_field_on_chunk_spawn::<MaterialField<M>>);
         app.register_saveable_field::<MaterialField<M>>();
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -96,8 +96,8 @@ impl Plugin for FieldsPlugin {
         app.add_field::<SDF, f32>()
             .add_field::<VisibilityField, bool>();
 
-        app.add_observer(sdf_build_on_chunk_spawn)
-            .add_observer(visibility_build_on_chunk_spawn);
+        app.add_observer(build_field_on_chunk_spawn::<SDF>)
+            .add_observer(build_field_on_chunk_spawn::<VisibilityField>);
 
         app.add_message::<SdfSphereStamp>()
             .add_systems(Update, process_sdf_sphere_stamps.in_set(FieldSet::Edit));
@@ -137,46 +137,17 @@ impl AppFieldExt for App {
     }
 }
 
-fn sdf_build_on_chunk_spawn(
+/// Gives a newly spawned chunk a default `F` at its LOD, unless it already has one.
+fn build_field_on_chunk_spawn<F: Component + FieldNew>(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
     lod_q: Query<&LOD>,
-    chunk_q: Query<(), With<SDF>>,
+    has_field: Query<(), With<F>>,
 ) {
-    let NewChunkSpawned { entity, .. } = trigger.event();
-    if chunk_q.get(*entity).is_ok() {
+    let entity = trigger.event().entity;
+    if has_field.contains(entity) {
         return;
     }
-    let lod = lod_q.get(*entity).copied().unwrap_or_default();
-    commands.entity(*entity).insert(SDF::new(lod));
-}
-
-fn visibility_build_on_chunk_spawn(
-    trigger: On<NewChunkSpawned>,
-    mut commands: Commands,
-    lod_q: Query<&LOD>,
-    chunk_q: Query<(), With<VisibilityField>>,
-) {
-    let NewChunkSpawned { entity, .. } = trigger.event();
-    if chunk_q.get(*entity).is_ok() {
-        return;
-    }
-    let lod = lod_q.get(*entity).copied().unwrap_or_default();
-    commands.entity(*entity).insert(VisibilityField::new(lod));
-}
-
-fn material_build_on_chunk_spawn<M: VoxelMaterial>(
-    trigger: On<NewChunkSpawned>,
-    mut commands: Commands,
-    lod_q: Query<&LOD>,
-    chunk_q: Query<(), With<MaterialField<M>>>,
-) {
-    let NewChunkSpawned { entity, .. } = trigger.event();
-    if chunk_q.get(*entity).is_ok() {
-        return;
-    }
-    let lod = lod_q.get(*entity).copied().unwrap_or_default();
-    commands
-        .entity(*entity)
-        .insert(MaterialField::<M>::new(lod));
+    let lod = lod_q.get(entity).copied().unwrap_or_default();
+    commands.entity(entity).insert(F::new_for_lod(lod));
 }

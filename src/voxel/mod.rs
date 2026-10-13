@@ -23,10 +23,7 @@ use crate::{
     voxel::{
         arena::VoxelChunkArenaSet,
         cursor::CursorPlugin,
-        pipeline::{
-            VoxelDummyMaterial, VoxelMaterialBindGroup, VoxelRasterPipeline,
-            update_voxel_material_bind_group,
-        },
+        pipeline::{VoxelMaterialBindGroup, VoxelRasterPipeline, update_voxel_material_bind_group},
         query::{
             CollisionLOD, ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries,
             VoxelQueryBuffers, VoxelQueryResultChannel, VoxelQueryResultReceiver,
@@ -36,9 +33,9 @@ use crate::{
         },
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         systems::{
-            dispatch_voxel_compute_passes_batched, extract_visibility_removed,
-            GuardTelemetry, RemeshBudget, map_guard_readbacks, prepare_visibility_for_arena, prepare_voxel_arena,
-            release_despawned_chunks, voxel_raster_pass,
+            GuardTelemetry, RemeshBudget, dispatch_voxel_compute_passes_batched,
+            extract_visibility_removed, map_guard_readbacks, prepare_visibility_for_arena,
+            prepare_voxel_arena, release_despawned_chunks, voxel_raster_pass,
         },
     },
 };
@@ -175,7 +172,6 @@ impl Plugin for VoxelRenderPlugin {
 
         render_app
             .init_resource::<VoxelRasterPipeline>()
-            .init_resource::<VoxelDummyMaterial>()
             .init_resource::<VoxelMaterialBindGroup>()
             .init_resource::<VoxelPipelineLayouts>()
             .init_resource::<VoxelComputePipeline>()

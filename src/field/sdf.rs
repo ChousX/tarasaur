@@ -59,16 +59,23 @@ impl Default for SDF {
 
 impl SDF {
     pub fn new(lod: LOD) -> Self {
-        Self {
+        Self::with_data(lod, vec![f32::MAX; lod.volume()].into_boxed_slice())
+    }
+
+    fn with_data(lod: LOD, data: Box<[f32]>) -> Self {
+        let mut sdf = Self {
             lod,
-            data: vec![f32::MAX; lod.volume()].into_boxed_slice(),
+            data,
             seeds: Box::default(),
             scratch: Vec::new(),
             inside_count: 0,
             version: 0,
             border_versions: [0; 7],
-        }
+        };
+        sdf.recount();
+        sdf
     }
+
     fn recount(&mut self) {
         self.inside_count = self.data.iter().filter(|v| **v <= 0.0).count() as u32;
     }
@@ -96,12 +103,6 @@ impl SDF {
     #[inline]
     pub fn data_slice(&self) -> &[f32] {
         &self.data
-    }
-
-    /// Exposes a read-only slice of the packed JFA seeds for GPU uploading
-    #[inline]
-    pub fn seeds_slice(&self) -> &[PackedCoord] {
-        &self.seeds
     }
 
     pub fn reinit(&mut self) {
@@ -196,34 +197,19 @@ const CARDINAL_NEIGHBORS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
-const JFA_NEIGHBOR_OFFSETS: [(i32, i32, i32); 26] = [
-    (-1, -1, -1),
-    (0, -1, -1),
-    (1, -1, -1),
-    (-1, 0, -1),
-    (0, 0, -1),
-    (1, 0, -1),
-    (-1, 1, -1),
-    (0, 1, -1),
-    (1, 1, -1),
-    (-1, -1, 0),
-    (0, -1, 0),
-    (1, -1, 0),
-    (-1, 0, 0),
-    (1, 0, 0),
-    (-1, 1, 0),
-    (0, 1, 0),
-    (1, 1, 0),
-    (-1, -1, 1),
-    (0, -1, 1),
-    (1, -1, 1),
-    (-1, 0, 1),
-    (0, 0, 1),
-    (1, 0, 1),
-    (-1, 1, 1),
-    (0, 1, 1),
-    (1, 1, 1),
-];
+/// The 26 neighbours of a voxel, x fastest, then y, then z.
+const JFA_NEIGHBOR_OFFSETS: [(i32, i32, i32); 26] = {
+    let mut out = [(0, 0, 0); 26];
+    let (mut i, mut n) = (0, 0);
+    while i < 27 {
+        if i != 13 {
+            out[n] = (i % 3 - 1, i / 3 % 3 - 1, i / 9 - 1);
+            n += 1;
+        }
+        i += 1;
+    }
+    out
+};
 
 impl Field<f32> for SDF {
     fn size(&self) -> UVec3 {
@@ -259,13 +245,10 @@ impl Versionable for SDF {
     }
 
     fn border_version(&self, neighbor: usize) -> u64 {
-        self.border_versions.get(neighbor).copied().unwrap_or(self.version)
-    }
-
-    #[inline]
-    fn incorment_version(&mut self) {
-        self.version += 1;
-        self.touch_all_borders();
+        self.border_versions
+            .get(neighbor)
+            .copied()
+            .unwrap_or(self.version)
     }
 }
 
@@ -299,16 +282,7 @@ impl FieldFromRaw for SDF {
         for v in &mut data {
             *v = v.clamp(-SDF_BAND, SDF_BAND);
         }
-        let inside_count = data.iter().filter(|v| **v <= 0.0).count() as u32;
-        Self {
-            lod,
-            data: data.into_boxed_slice(),
-            seeds: Box::default(),
-            scratch: Vec::new(),
-            inside_count,
-            version: 0,
-            border_versions: [0; 7],
-        }
+        Self::with_data(lod, data.into_boxed_slice())
     }
 }
 

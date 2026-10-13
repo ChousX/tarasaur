@@ -198,7 +198,10 @@ pub fn prepare_voxel_arena(
         else {
             arena_set.deferred.insert(x.main_entity);
             let lod_idx = VoxelChunkArenaSet::lod_index(lod);
-            if arena_set.arenas[lod_idx].iter().any(VoxelChunkArena::dirty_full) {
+            if arena_set.arenas[lod_idx]
+                .iter()
+                .any(VoxelChunkArena::dirty_full)
+            {
                 continue; // out of scratch for this frame: just wait
             }
             if !*out_of_room {
@@ -262,6 +265,48 @@ pub fn prepare_voxel_arena(
     *out_of_room = any_out_of_room;
 }
 
+/// Pending uploads for a channel that rides along with a chunk's SDF
+/// (material, visibility), paired with the slot `prepare_voxel_arena` gave
+/// it. Ones whose SDF is waiting stay queued; ones whose chunk meshes to
+/// nothing or has no slot are despawned.
+fn side_channel_uploads<T: Send + Sync + 'static>(
+    arena_set: &VoxelChunkArenaSet,
+    extracted: &Query<(Entity, &ExtractedChunkField<T>)>,
+    commands: &mut Commands,
+) -> Vec<(Entity, ArenaSlot)> {
+    let mut out = Vec::new();
+    for (_, e) in newest_pending(arena_set, extracted, commands) {
+        let Ok((_, x)) = extracted.get(e) else {
+            continue;
+        };
+        if arena_set.deferred.contains(&x.main_entity) {
+            continue; // waits with its SDF
+        }
+        if arena_set.empty.contains(&x.main_entity) {
+            commands.entity(e).despawn(); // no geometry to texture or mask
+            continue;
+        }
+        let Some(slot) = arena_set.find_slot(x.lod, x.main_entity) else {
+            if !x.padded_data.is_empty() {
+                warn!(
+                    "[{}] no slot yet for chunk {:?}, dropping this frame's upload",
+                    std::any::type_name::<T>(),
+                    x.chunk_pos
+                );
+            }
+            commands.entity(e).despawn();
+            continue;
+        };
+        debug_assert_eq!(
+            x.size,
+            arena_set.arenas[VoxelChunkArenaSet::lod_index(x.lod)][slot.arena_idx].texture_size,
+            "mixed LOD in one arena — bucket by LOD"
+        );
+        out.push((e, slot));
+    }
+    out
+}
+
 /// Sibling to `prepare_voxel_arena`: uploads material ids into the slot it
 /// placed. Must run after it, so `deferred` and new slots are current.
 pub fn prepare_material_for_arena<M: VoxelMaterial>(
@@ -270,46 +315,20 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
     extracted_chunks: Query<(Entity, &ExtractedChunkField<MaterialField<M>>)>,
     mut commands: Commands,
 ) {
-    for (_, extracted_entity) in newest_pending(&arena_set, &extracted_chunks, &mut commands) {
-        let Ok((_, extracted_material)) = extracted_chunks.get(extracted_entity) else {
+    for (e, ArenaSlot { arena_idx, slot }) in
+        side_channel_uploads(&arena_set, &extracted_chunks, &mut commands)
+    {
+        let Ok((_, x)) = extracted_chunks.get(e) else {
             continue;
         };
-        if arena_set.deferred.contains(&extracted_material.main_entity) {
-            continue; // waits with its SDF
-        }
-        if arena_set.empty.contains(&extracted_material.main_entity) {
-            commands.entity(extracted_entity).despawn(); // nothing to texture
-            continue;
-        }
-        let Some(ArenaSlot { arena_idx, slot }) =
-            arena_set.find_slot(extracted_material.lod, extracted_material.main_entity)
-        else {
-            warn!(
-                "[prepare_material_for_arena] no slot yet for chunk {:?}, dropping this frame's material upload",
-                extracted_material.chunk_pos
-            );
-            commands.entity(extracted_entity).despawn();
-            continue;
-        };
-        let arena = arena_set.arena_mut(extracted_material.lod, arena_idx);
+        let arena = arena_set.arena_mut(x.lod, arena_idx);
         if !arena.can_mark_dirty(slot) {
             continue; // no scratch left this frame; retried next frame
         }
-
-        debug_assert_eq!(
-            extracted_material.size, arena.texture_size,
-            "mixed LOD in one arena — bucket by LOD"
-        );
-
-        let material_offset_bytes = slot as u64 * arena.sdf_elems_per_chunk as u64;
-        render_queue.write_buffer(
-            &arena.material_buffer,
-            material_offset_bytes,
-            &extracted_material.padded_data,
-        );
+        let offset = slot as u64 * arena.sdf_elems_per_chunk as u64;
+        render_queue.write_buffer(&arena.material_buffer, offset, &x.padded_data);
         arena.mark_dirty(slot); // pass3 bakes materials into vertices
-
-        commands.entity(extracted_entity).despawn();
+        commands.entity(e).despawn();
     }
 }
 
@@ -319,61 +338,30 @@ pub fn prepare_visibility_for_arena(
     extracted_chunks: Query<(Entity, &ExtractedChunkField<VisibilityField>)>,
     mut commands: Commands,
 ) {
-    for (_, extracted_entity) in newest_pending(&arena_set, &extracted_chunks, &mut commands) {
-        let Ok((_, extracted_mask)) = extracted_chunks.get(extracted_entity) else {
+    for (e, ArenaSlot { arena_idx, slot }) in
+        side_channel_uploads(&arena_set, &extracted_chunks, &mut commands)
+    {
+        let Ok((_, x)) = extracted_chunks.get(e) else {
             continue;
         };
-        if arena_set.deferred.contains(&extracted_mask.main_entity) {
-            continue; // waits with its SDF
+        let arena = arena_set.arena_mut(x.lod, arena_idx);
+        // Empty = the chunk went uniform: clear the flag so the raster stops
+        // consulting the now-stale mask.
+        let has_mask = !x.padded_data.is_empty();
+        if has_mask {
+            // One byte per voxel -> 1 bit. Each slot gets its own word-aligned
+            // region, like sdf/material_buffer, so adjacent slots' writes can't
+            // clobber each other's boundary words.
+            let words_per_chunk = (arena.sdf_elems_per_chunk as u64).div_ceil(32);
+            let packed = pack_bits(x.padded_data.iter().map(|&b| b != 0));
+            render_queue.write_buffer(
+                &arena.visibility_mask_buffer,
+                slot as u64 * words_per_chunk * 4,
+                bytemuck::cast_slice(&packed),
+            );
         }
-        if arena_set.empty.contains(&extracted_mask.main_entity) {
-            commands.entity(extracted_entity).despawn(); // nothing to mask
-            continue;
-        }
-        let Some(ArenaSlot { arena_idx, slot }) =
-            arena_set.find_slot(extracted_mask.lod, extracted_mask.main_entity)
-        else {
-            if !extracted_mask.padded_data.is_empty() {
-                warn!(
-                    "[prepare_visibility_for_arena] no slot yet for chunk {:?}, dropping this frame's mask",
-                    extracted_mask.chunk_pos
-                );
-            }
-            commands.entity(extracted_entity).despawn();
-            continue;
-        };
-        let arena = arena_set.arena_mut(extracted_mask.lod, arena_idx);
-
-        if extracted_mask.padded_data.is_empty() {
-            // Chunk transitioned to uniform — clear the flag; any previous
-            // mask data is now stale and the raster stops consulting it.
-            arena.set_slot_has_mask(slot, false);
-            commands.entity(extracted_entity).despawn();
-            continue;
-        }
-
-        debug_assert_eq!(
-            extracted_mask.size, arena.texture_size,
-            "mixed LOD in one arena — bucket by LOD"
-        );
-
-        // padded_data is one byte (0/1) per voxel from VisibilityField's
-        // byte-mirror ApronSample path — pack to 1 bit/voxel before
-        // upload. Each slot gets a word-aligned region (mask_words_per_chunk
-        // words), matching sdf_buffer/material_buffer's fixed-stride-per-slot
-        // layout — never a flat global bit-packing, which would let
-        // adjacent slots' writes clobber each other's boundary words.
-        let mask_words_per_chunk = (arena.sdf_elems_per_chunk as usize).div_ceil(32);
-        let packed = pack_bits(extracted_mask.padded_data.iter().map(|&b| b != 0));
-        let byte_offset = slot as u64 * mask_words_per_chunk as u64 * 4;
-        render_queue.write_buffer(
-            &arena.visibility_mask_buffer,
-            byte_offset,
-            bytemuck::cast_slice(&packed),
-        );
-
-        arena.set_slot_has_mask(slot, true);
-        commands.entity(extracted_entity).despawn();
+        arena.set_slot_has_mask(slot, has_mask);
+        commands.entity(e).despawn();
     }
     for arena in arena_set.iter_mut() {
         let packed = pack_bits(arena.mask_slots.iter().copied());
@@ -399,27 +387,21 @@ pub fn dispatch_voxel_compute_passes_batched(
         return;
     }
 
-    let (
+    let ids = [
+        ("pass1", pipeline.pass1_pipeline_id),
+        ("scan", pipeline.stream_compaction_pipeline_id),
+        ("scan_block_sums", pipeline.scan_block_sums_pipeline_id),
+        ("resolve", pipeline.stream_compaction_resolve_pipeline_id),
+        ("pass3", pipeline.pass3_pipeline_id),
+    ];
+    let [
         Some(pass1_pipeline),
         Some(stream_compaction_pipeline),
         Some(scan_block_sums_pipeline),
         Some(stream_compaction_resolve_pipeline),
         Some(pass3_pipeline),
-    ) = (
-        pipeline_cache.get_compute_pipeline(pipeline.pass1_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.scan_block_sums_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.stream_compaction_resolve_pipeline_id),
-        pipeline_cache.get_compute_pipeline(pipeline.pass3_pipeline_id),
-    )
+    ] = ids.map(|(_, id)| pipeline_cache.get_compute_pipeline(id))
     else {
-        let ids = [
-            ("pass1", pipeline.pass1_pipeline_id),
-            ("scan", pipeline.stream_compaction_pipeline_id),
-            ("scan_block_sums", pipeline.scan_block_sums_pipeline_id),
-            ("resolve", pipeline.stream_compaction_resolve_pipeline_id),
-            ("pass3", pipeline.pass3_pipeline_id),
-        ];
         for (name, id) in ids {
             if pipeline_cache.get_compute_pipeline(id).is_none() {
                 warn!(
@@ -724,6 +706,11 @@ pub fn extract_voxel_chunks<T>(
 
 pub(crate) const PADDING: u32 = 2;
 
+/// Fills the `+x/+y/+z` apron of a padded volume from the 7 neighbours in
+/// `NEIGHBORS_MASK`, resampling across LODs. A missing neighbour (or one
+/// mid-LOD-change, whose data doesn't match its LOD) falls back to this
+/// chunk's own edge voxels. Every region writes only apron voxels and reads
+/// only interior ones, so the regions are independent.
 pub fn fill_apron<T>(
     vol: &mut [T::Elem],
     chunk_pos: IVec3,
@@ -732,261 +719,60 @@ pub fn fill_apron<T>(
 ) where
     T: Component + ApronSample,
 {
-    let Some(current_entity) = chunk_manager.get_chunk(&chunk_pos) else {
+    let field_at = |pos: IVec3| {
+        let (_, _, field, lod) = query.get(chunk_manager.get_chunk(&pos)?).ok()?;
+        Some((field, *lod))
+    };
+    let Some((_, lod)) = field_at(chunk_pos) else {
         return;
     };
-    let Ok((_, _, _, current_lod)) = query.get(current_entity) else {
-        return;
-    };
+    let n = lod.size();
+    let p = n + PADDING;
+    let idx = |c: UVec3| ((c.z * p + c.y) * p + c.x) as usize;
 
-    let chunk_size = current_lod.size();
-    let padded_size = chunk_size + PADDING;
-
-    let idx =
-        |x: u32, y: u32, z: u32| -> usize { ((z * padded_size + y) * padded_size + x) as usize };
-
-    // Borrowed and resolved once per neighbour. This used to clone the whole
-    // neighbour field on every one of the 26 fill_region calls (~26 MB of
-    // memcpy per High chunk), inside ExtractSchedule where it stalls both worlds.
-    let neighbors = NEIGHBORS_MASK.map(|offset| {
-        let n_entity = chunk_manager.get_chunk(&(chunk_pos + offset))?;
-        let (_, _, n_field, n_lod) = query.get(n_entity).ok()?;
-        let n_size = n_lod.size();
-        // A size mismatch means a neighbour mid-LOD-change: treat it as
-        // missing and let fill_region fall back to this chunk's edge data.
-        (n_field.data_slice().len() == n_lod.volume()).then(|| (n_field.data_slice(), n_size))
-    });
-    let neighbor_info = |offset: IVec3| {
-        NEIGHBORS_MASK
-            .iter()
-            .position(|o| *o == offset)
-            .and_then(|i| neighbors[i])
-    };
-
-    // --- Faces: +x, +y, +z ---
-    for d in 0..PADDING {
-        let x_target = chunk_size + d;
-        let mut coords = Vec::new();
-        for z in 0..chunk_size {
-            for y in 0..chunk_size {
-                coords.push((x_target, y, z));
-            }
-        }
-        fill_region::<T>(
-            vol,
-            chunk_size,
-            IVec3::new(1, 0, 0),
-            &coords,
-            |_, cy, cz| idx(chunk_size - 1, cy, cz),
-            &neighbor_info,
-            &idx,
-        );
-    }
-
-    for d in 0..PADDING {
-        let y_target = chunk_size + d;
-        let mut coords = Vec::new();
-        for z in 0..chunk_size {
-            for x in 0..chunk_size {
-                coords.push((x, y_target, z));
-            }
-        }
-        fill_region::<T>(
-            vol,
-            chunk_size,
-            IVec3::new(0, 1, 0),
-            &coords,
-            |cx, _, cz| idx(cx, chunk_size - 1, cz),
-            &neighbor_info,
-            &idx,
-        );
-    }
-
-    for d in 0..PADDING {
-        let z_target = chunk_size + d;
-        let mut coords = Vec::new();
-        for y in 0..chunk_size {
-            for x in 0..chunk_size {
-                coords.push((x, y, z_target));
-            }
-        }
-        fill_region::<T>(
-            vol,
-            chunk_size,
-            IVec3::new(0, 0, 1),
-            &coords,
-            |cx, cy, _| idx(cx, cy, chunk_size - 1),
-            &neighbor_info,
-            &idx,
-        );
-    }
-
-    // --- Edges ---
-    for dx in 0..PADDING {
-        for dy in 0..PADDING {
-            let mut coords = Vec::new();
-            for z in 0..chunk_size {
-                coords.push((chunk_size + dx, chunk_size + dy, z));
-            }
-            fill_region::<T>(
-                vol,
-                chunk_size,
-                IVec3::new(1, 1, 0),
-                &coords,
-                |_, _, cz| idx(chunk_size - 1, chunk_size - 1, cz),
-                &neighbor_info,
-                &idx,
-            );
-        }
-    }
-
-    for dx in 0..PADDING {
-        for dz in 0..PADDING {
-            let mut coords = Vec::new();
-            for y in 0..chunk_size {
-                coords.push((chunk_size + dx, y, chunk_size + dz));
-            }
-            fill_region::<T>(
-                vol,
-                chunk_size,
-                IVec3::new(1, 0, 1),
-                &coords,
-                |_, cy, _| idx(chunk_size - 1, cy, chunk_size - 1),
-                &neighbor_info,
-                &idx,
-            );
-        }
-    }
-
-    for dy in 0..PADDING {
-        for dz in 0..PADDING {
-            let mut coords = Vec::new();
-            for x in 0..chunk_size {
-                coords.push((x, chunk_size + dy, chunk_size + dz));
-            }
-            fill_region::<T>(
-                vol,
-                chunk_size,
-                IVec3::new(0, 1, 1),
-                &coords,
-                |cx, _, _| idx(cx, chunk_size - 1, chunk_size - 1),
-                &neighbor_info,
-                &idx,
-            );
-        }
-    }
-
-    // --- Corner ---
-    for dx in 0..PADDING {
-        for dy in 0..PADDING {
-            for dz in 0..PADDING {
-                let coords = vec![(chunk_size + dx, chunk_size + dy, chunk_size + dz)];
-                fill_region::<T>(
-                    vol,
-                    chunk_size,
-                    IVec3::new(1, 1, 1),
-                    &coords,
-                    |_, _, _| idx(chunk_size - 1, chunk_size - 1, chunk_size - 1),
-                    &neighbor_info,
-                    &idx,
-                );
+    for offset in NEIGHBORS_MASK {
+        let o = offset.as_uvec3();
+        // Borrowed, not cloned: this runs in ExtractSchedule, which stalls both worlds.
+        let neighbor = field_at(chunk_pos + offset)
+            .filter(|(f, l)| f.data_slice().len() == l.volume())
+            .map(|(f, l)| (f.data_slice(), l.size()));
+        // Axes with o = 1 cover the apron (n..n+PADDING), the rest 0..n.
+        let (lo, hi) = (o * n, UVec3::splat(n) + o * PADDING);
+        for z in lo.z..hi.z {
+            for y in lo.y..hi.y {
+                for x in lo.x..hi.x {
+                    let c = UVec3::new(x, y, z);
+                    vol[idx(c)] = match neighbor {
+                        Some((data, n_size)) => {
+                            let ratio = n_size as f32 / n as f32;
+                            let l = (c - o * n).as_vec3() * ratio;
+                            T::rescale(T::sample_apron(data, n_size, l.x, l.y, l.z), ratio)
+                        }
+                        None => vol[idx(c.min(UVec3::splat(n - 1)))],
+                    };
+                }
             }
         }
     }
 }
 
-fn fill_region<'a, T: ApronSample>(
-    vol: &mut [T::Elem],
-    chunk_size: u32,
-    offset: IVec3,
-    iter_ranges: &[(u32, u32, u32)],
-    fallback_idx: impl Fn(u32, u32, u32) -> usize,
-    neighbor_info: &impl Fn(IVec3) -> Option<(&'a [T::Elem], u32)>,
-    idx: &impl Fn(u32, u32, u32) -> usize,
-) {
-    if let Some((nx_data, n_size)) = neighbor_info(offset) {
-        let scale_ratio = n_size as f32 / chunk_size as f32;
-
-        for &(cx, cy, cz) in iter_ranges {
-            let local_x = if cx >= chunk_size {
-                (cx - chunk_size) as f32
-            } else {
-                cx as f32
-            };
-            let local_y = if cy >= chunk_size {
-                (cy - chunk_size) as f32
-            } else {
-                cy as f32
-            };
-            let local_z = if cz >= chunk_size {
-                (cz - chunk_size) as f32
-            } else {
-                cz as f32
-            };
-
-            let nx_coord = local_x * scale_ratio;
-            let ny_coord = local_y * scale_ratio;
-            let nz_coord = local_z * scale_ratio;
-            let val = T::rescale(
-                T::sample_apron(nx_data, n_size, nx_coord, ny_coord, nz_coord),
-                scale_ratio,
-            );
-            vol[idx(cx, cy, cz)] = val;
-        }
-    } else {
-        for &(cx, cy, cz) in iter_ranges {
-            let src = fallback_idx(cx, cy, cz);
-            let val = vol[src];
-            let dst = idx(cx, cy, cz);
-            vol[dst] = val;
-        }
-    }
-}
-
-/// Trilinear neighbor sampling — meaningful for continuous data like SDF
-/// distances. Used by `SDFField`'s `ApronSample` impl. Not exported for
-/// general use: categorical fields (e.g. material ids) must not blend
-/// samples this way — see `MaterialField`'s nearest-neighbor `ApronSample`
-/// impl instead.
+/// Trilinear neighbor sampling, for continuous data like SDF distances.
+/// Categorical fields (material ids, visibility) must never blend; they use
+/// `nearest_neighbor_sample` instead.
 pub fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
-    let max_coord = (size - 1) as f32;
-    let x = x.clamp(0.0, max_coord);
-    let y = y.clamp(0.0, max_coord);
-    let z = z.clamp(0.0, max_coord);
-
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let z0 = z.floor() as usize;
-    let x1 = (x0 + 1).min(size as usize - 1);
-    let y1 = (y0 + 1).min(size as usize - 1);
-    let z1 = (z0 + 1).min(size as usize - 1);
-
-    let tx = x - x0 as f32;
-    let ty = y - y0 as f32;
-    let tz = z - z0 as f32;
-
+    let p = Vec3::new(x, y, z).clamp(Vec3::ZERO, Vec3::splat((size - 1) as f32));
+    let p0 = p.floor().as_uvec3();
+    let p1 = (p0 + 1).min(UVec3::splat(size - 1));
+    let t = p - p0.as_vec3();
     let s = size as usize;
-    let sample = |ix: usize, iy: usize, iz: usize| -> f32 { data[(iz * s + iy) * s + ix] };
-
-    // Trilinear interpolation over the 8 surrounding neighbor voxels.
-    let c000 = sample(x0, y0, z0);
-    let c100 = sample(x1, y0, z0);
-    let c010 = sample(x0, y1, z0);
-    let c110 = sample(x1, y1, z0);
-    let c001 = sample(x0, y0, z1);
-    let c101 = sample(x1, y0, z1);
-    let c011 = sample(x0, y1, z1);
-    let c111 = sample(x1, y1, z1);
-
-    let c00 = c000 * (1.0 - tx) + c100 * tx;
-    let c10 = c010 * (1.0 - tx) + c110 * tx;
-    let c01 = c001 * (1.0 - tx) + c101 * tx;
-    let c11 = c011 * (1.0 - tx) + c111 * tx;
-
-    let c0 = c00 * (1.0 - ty) + c10 * ty;
-    let c1 = c01 * (1.0 - ty) + c11 * ty;
-
-    c0 * (1.0 - tz) + c1 * tz
+    let at = |x: u32, y: u32, z: u32| data[(z as usize * s + y as usize) * s + x as usize];
+    let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
+    let plane = |z: u32| {
+        let y0 = lerp(at(p0.x, p0.y, z), at(p1.x, p0.y, z), t.x);
+        let y1 = lerp(at(p0.x, p1.y, z), at(p1.x, p1.y, z), t.x);
+        lerp(y0, y1, t.y)
+    };
+    lerp(plane(p0.z), plane(p1.z), t.z)
 }
 
 fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
@@ -1080,7 +866,12 @@ pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelC
         for (arena_idx, arena) in arenas.iter().enumerate() {
             let state = arena.guard_state.clone();
             if state
-                .compare_exchange(GUARD_COPIED, GUARD_MAPPED, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(
+                    GUARD_COPIED,
+                    GUARD_MAPPED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_err()
             {
                 continue;

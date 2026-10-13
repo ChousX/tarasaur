@@ -54,16 +54,6 @@ impl LOD {
         }
     }
     #[inline]
-    pub fn from_rank(rank: u32) -> Option<Self> {
-        match rank {
-            0 => Some(LOD::Lowest),
-            1 => Some(LOD::Low),
-            2 => Some(LOD::Medium),
-            3 => Some(LOD::High),
-            _ => None,
-        }
-    }
-    #[inline]
     pub fn volume(self) -> usize {
         let s = self.size() as usize;
         s * s * s
@@ -71,8 +61,5 @@ impl LOD {
     #[inline]
     pub fn voxel_size(self) -> f32 {
         CHUNK_SIZE / self.size() as f32
-    }
-    pub const fn get_number_of_lods() -> usize {
-        Self::COUNT
     }
 }

@@ -18,12 +18,10 @@ use crate::{
     voxel::{
         arena::VoxelChunkArenaSet,
         pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
-        types::{HitResult, RayQuery},
-        util::next_pow2,
+        types::{CreateStorage, HitResult, RayQuery, entries},
     },
 };
 
-pub const MAX_QUERIES_PER_FRAME: u32 = 64;
 pub const INITIAL_QUERY_CAPACITY: u32 = 64;
 /// Safety ceiling, not a target — growth stops here regardless of how
 /// many queries are requested in a single frame, so a runaway caller
@@ -84,7 +82,7 @@ pub struct PendingVoxelQueries(pub Vec<RayQuery>);
 pub struct VoxelQueryResults(pub Vec<HitResult>);
 
 /// Render-world mirror of `PendingVoxelQueries`, capped to
-/// `MAX_QUERIES_PER_FRAME`.
+/// `MAX_QUERY_CAPACITY`.
 #[derive(Resource, Default)]
 pub struct ExtractedVoxelQueries(pub Vec<RayQuery>);
 
@@ -103,8 +101,8 @@ pub struct VoxelQueryResultReceiver {
 /// Static buffers + double-buffered bind groups for the cursor/raycast
 /// query pass. Buffers themselves don't depend on any arena and are built
 /// eagerly in `VoxelRenderPlugin::finish()`; the bind groups DO reference
-/// the collision arena's `sdf_buffer`/`chunk_meta_buffer`/
-/// `chunk_lookup_buffer`, which don't exist yet at `finish()` time (arenas
+/// each LOD's first arena (`sdf_buffer`/`chunk_meta_buffer`), which
+/// don't exist yet at `finish()` time (arenas
 /// are created lazily on first chunk extraction) — so bind group creation
 /// is deferred to `prepare_voxel_queries`, the first frame the collision
 /// arena shows up, and cached forever after since arena buffers never
@@ -117,8 +115,6 @@ pub struct VoxelQueryBuffers {
     pub readback_buffers: [Buffer; QUERY_BUFFER_SLOTS],
     pub query_uniform_buffer: Buffer,
     pub slot_state: [Arc<AtomicU8>; QUERY_BUFFER_SLOTS],
-    pub capacity: u32,
-    pub pending_capacity: Option<u32>,
     pub active_count: u32,
     pub merged_lookup_buffer: Buffer,
     pub merged_lookup_capacity: u32,
@@ -127,66 +123,14 @@ pub struct VoxelQueryBuffers {
     pub bound_lod_presence: [bool; LOD::COUNT],
 }
 
-fn make_hit_buffers(render_device: &RenderDevice, capacity: u32) -> [Buffer; QUERY_BUFFER_SLOTS] {
-    let size = std::mem::size_of::<HitResult>() as u64 * capacity as u64;
-    std::array::from_fn(|i| {
-        render_device.create_buffer(&BufferDescriptor {
-            label: Some(match i {
-                0 => "voxel_hit_buffer_a",
-                1 => "voxel_hit_buffer_b",
-                _ => "voxel_hit_buffer_c",
-            }),
-            size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        })
-    })
-}
-
-fn make_readback_buffers(
+fn slot_buffers(
     render_device: &RenderDevice,
+    labels: [&'static str; QUERY_BUFFER_SLOTS],
     capacity: u32,
+    usage: BufferUsages,
 ) -> [Buffer; QUERY_BUFFER_SLOTS] {
     let size = std::mem::size_of::<HitResult>() as u64 * capacity as u64;
-    std::array::from_fn(|i| {
-        render_device.create_buffer(&BufferDescriptor {
-            label: Some(match i {
-                0 => "voxel_hit_readback_a",
-                1 => "voxel_hit_readback_b",
-                _ => "voxel_hit_readback_c",
-            }),
-            size,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        })
-    })
-}
-
-impl VoxelQueryBuffers {
-    fn all_slots_free(&self) -> bool {
-        self.slot_state
-            .iter()
-            .all(|s| s.load(Ordering::Acquire) == SLOT_FREE)
-    }
-
-    /// Reallocates query/hit/readback buffers to `new_capacity` and drops
-    /// the cached bind groups so `prepare_voxel_queries` rebuilds them
-    /// against the new buffers next call. Caller must have already
-    /// confirmed `all_slots_free()` — growing while a slot is
-    /// Copied/Mapped would free a buffer a pending GPU copy or
-    /// `map_async` callback still references.
-    fn grow(&mut self, render_device: &RenderDevice, new_capacity: u32) {
-        self.query_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("voxel_query_buffer"),
-            size: std::mem::size_of::<RayQuery>() as u64 * new_capacity as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.hit_buffers = make_hit_buffers(render_device, new_capacity);
-        self.readback_buffers = make_readback_buffers(render_device, new_capacity);
-        self.bind_groups = [None, None, None];
-        self.capacity = new_capacity;
-    }
+    labels.map(|label| render_device.storage(label, size, usage))
 }
 
 impl FromWorld for VoxelQueryBuffers {
@@ -200,8 +144,26 @@ impl FromWorld for VoxelQueryBuffers {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let hit_buffers = make_hit_buffers(render_device, capacity);
-        let readback_buffers = make_readback_buffers(render_device, capacity);
+        let hit_buffers = slot_buffers(
+            render_device,
+            [
+                "voxel_hit_buffer_a",
+                "voxel_hit_buffer_b",
+                "voxel_hit_buffer_c",
+            ],
+            capacity,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        let readback_buffers = slot_buffers(
+            render_device,
+            [
+                "voxel_hit_readback_a",
+                "voxel_hit_readback_b",
+                "voxel_hit_readback_c",
+            ],
+            capacity,
+            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        );
 
         let query_uniform_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("voxel_query_uniform_buffer"),
@@ -239,8 +201,6 @@ impl FromWorld for VoxelQueryBuffers {
             readback_buffers,
             query_uniform_buffer,
             slot_state: std::array::from_fn(|_| Arc::new(AtomicU8::new(SLOT_FREE))),
-            capacity,
-            pending_capacity: None,
             active_count: 0,
             merged_lookup_buffer,
             merged_lookup_capacity: initial_lookup_capacity,
@@ -300,7 +260,6 @@ pub fn prepare_voxel_queries(
     layouts: Res<VoxelPipelineLayouts>,
     mut query_buffers: ResMut<VoxelQueryBuffers>,
 ) {
-    // 1. Update active_count from extracted queries
     let this_frame_count = extracted.0.len() as u32;
     query_buffers.active_count = this_frame_count;
 
@@ -308,16 +267,17 @@ pub fn prepare_voxel_queries(
         return;
     }
 
-    // 2. Upload extracted query structs to GPU query_buffer
     render_queue.write_buffer(
         &query_buffers.query_buffer,
         0,
         bytemuck::cast_slice(&extracted.0),
     );
-    // Grow-only merged lookup, sized from every live arena's max_chunks —
-    // mirrors each arena's own lookup_capacity policy (fixed once known,
-    // never shrinks) rather than reacting to frame-to-frame occupancy.
-    let needed = next_pow2(arena_set.total_max_chunks().saturating_mul(2)).max(4);
+    // Grow-only merged lookup, sized from every live arena's max_chunks.
+    let needed = arena_set
+        .total_max_chunks()
+        .saturating_mul(2)
+        .next_power_of_two()
+        .max(4);
     if needed > query_buffers.merged_lookup_capacity {
         let empty: Vec<[u32; 4]> = vec![[u32::MAX; 4]; needed as usize];
         query_buffers.merged_lookup_buffer =
@@ -335,9 +295,6 @@ pub fn prepare_voxel_queries(
         query_buffers.merged_lookup_capacity,
     );
 
-    // ...unchanged: requested/capacity growth logic for query_buffer, then
-    // write extracted.0 into query_buffers.query_buffer as before...
-
     let mut lod_voxel_size = [0.0f32; 4];
     let mut lod_texture_size = [0u32; 4];
     let mut lod_surface_epsilon = [0.0f32; 4];
@@ -354,7 +311,7 @@ pub fn prepare_voxel_queries(
     }
 
     let uniforms = QueryUniforms {
-        query_count: query_buffers.active_count, // set as before from this_frame_count
+        query_count: this_frame_count,
         chunk_size: CHUNK_SIZE,
         lookup_capacity: query_buffers.merged_lookup_capacity,
         max_dda_steps: 64,
@@ -377,50 +334,29 @@ pub fn prepare_voxel_queries(
     if query_buffers.bind_groups[0].is_none()
         || query_buffers.bound_lod_presence != current_presence
     {
-        for p in 0..QUERY_BUFFER_SLOTS {
-            let mut entries = vec![
-                BindGroupEntry {
-                    binding: 0,
-                    resource: query_buffers.query_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: query_buffers.hit_buffers[p].as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: query_buffers.query_uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: query_buffers.merged_lookup_buffer.as_entire_binding(),
-                },
+        let qb = &*query_buffers;
+        let bind_groups = std::array::from_fn(|p| {
+            let mut bufs = vec![
+                (0, &qb.query_buffer),
+                (1, &qb.hit_buffers[p]),
+                (2, &qb.query_uniform_buffer),
+                (3, &qb.merged_lookup_buffer),
             ];
-            for r in 0..LOD::COUNT as u32 {
-                let arena = LOD::from_rank(r).and_then(|lod| arena_set.first_arena(lod));
-                let (sdf, meta) = match arena {
+            for (r, arenas) in arena_set.arenas.iter().enumerate() {
+                let (sdf, meta) = match arenas.first() {
                     Some(a) => (&a.sdf_buffer, &a.chunk_meta_buffer),
-                    None => (
-                        &query_buffers.dummy_sdf_buffer,
-                        &query_buffers.dummy_meta_buffer,
-                    ),
+                    None => (&qb.dummy_sdf_buffer, &qb.dummy_meta_buffer),
                 };
-                let base = 4 + r * 2;
-                entries.push(BindGroupEntry {
-                    binding: base,
-                    resource: sdf.as_entire_binding(),
-                });
-                entries.push(BindGroupEntry {
-                    binding: base + 1,
-                    resource: meta.as_entire_binding(),
-                });
+                let base = 4 + r as u32 * 2;
+                bufs.extend([(base, sdf), (base + 1, meta)]);
             }
-            query_buffers.bind_groups[p] = Some(render_device.create_bind_group(
+            Some(render_device.create_bind_group(
                 Some("voxel_query_bind_group"),
                 &layouts.query_layout,
-                &entries,
-            ));
-        }
+                &entries(&bufs),
+            ))
+        });
+        query_buffers.bind_groups = bind_groups;
         query_buffers.bound_lod_presence = current_presence;
     }
 }
@@ -436,7 +372,7 @@ pub fn dispatch_voxel_query_pass(
     query_buffers: Res<VoxelQueryBuffers>,
     mut next_slot: ResMut<NextQuerySlot>,
 ) {
-    let count = query_buffers.active_count; // was: extracted.0.len() as u32
+    let count = query_buffers.active_count;
     if count == 0 {
         return;
     }
@@ -465,14 +401,14 @@ pub fn dispatch_voxel_query_pass(
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        pass.dispatch_workgroups(count, 1, 1); // was: extracted.0.len() as u32
+        pass.dispatch_workgroups(count, 1, 1);
     }
     encoder.copy_buffer_to_buffer(
         &query_buffers.hit_buffers[slot],
         0,
         &query_buffers.readback_buffers[slot],
         0,
-        query_buffers.hit_buffers[slot].size(), // was: readback_buffers[slot].size() — same value, but now correctly tracks capacity, not a stale MAX_QUERIES_PER_FRAME assumption
+        query_buffers.hit_buffers[slot].size(),
     );
     render_queue.submit(std::iter::once(encoder.finish()));
 

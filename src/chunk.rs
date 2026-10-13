@@ -71,6 +71,12 @@ impl ChunkManager {
     pub fn is_loaded(&self, position: &IVec3) -> bool {
         self.arena.contains_key(position)
     }
+    fn add_chunk(&mut self, position: IVec3, id: Entity) {
+        self.arena.insert(position, id);
+    }
+    fn remove_chunk(&mut self, position: &IVec3) {
+        self.arena.remove(position);
+    }
 }
 
 #[inline]
@@ -78,13 +84,13 @@ pub fn world_pos_to_chunk_pos(world_position: &Vec3) -> IVec3 {
     (world_position / CHUNK_SIZE).floor().as_ivec3()
 }
 
-impl ChunkManager {
-    fn add_chunk(&mut self, position: IVec3, id: Entity) {
-        self.arena.insert(position, id);
-    }
-    fn remove_chunk(&mut self, position: &IVec3) {
-        self.arena.remove(position);
-    }
+/// Every chunk position overlapping the world-space box `center +/- half_extent`.
+pub fn overlapping_chunks(center: Vec3, half_extent: Vec3) -> impl Iterator<Item = IVec3> {
+    let min = world_pos_to_chunk_pos(&(center - half_extent));
+    let max = world_pos_to_chunk_pos(&(center + half_extent));
+    (min.x..=max.x).flat_map(move |x| {
+        (min.y..=max.y).flat_map(move |y| (min.z..=max.z).map(move |z| IVec3::new(x, y, z)))
+    })
 }
 
 /// No `LOD` here on purpose: `LOD` + fields are inserted together by the

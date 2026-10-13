@@ -1,5 +1,6 @@
 use crate::{
     ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
+    flatten_with_size,
     ops::{AccumulateExt, BlendExt},
     voxel::systems::nearest_neighbor_sample,
 };
@@ -11,9 +12,8 @@ use std::marker::PhantomData;
 #[derive(Component, Clone)]
 pub struct MaterialField<M: VoxelMaterial> {
     lod: LOD,
-    data: Box<[u8]>, // storage stays raw u8 — same GPU-ready layout as before
-    version: u64,    // needed later for extraction dirty-checking; added now
-    // while we'rMaterialFielde already rewriting this struct
+    data: Box<[u8]>, // raw material ids, GPU-ready
+    version: u64,
     _marker: PhantomData<M>,
 }
 
@@ -25,30 +25,21 @@ impl<M: VoxelMaterial> Default for MaterialField<M> {
 
 impl<M: VoxelMaterial> MaterialField<M> {
     pub fn new(lod: LOD) -> Self {
-        let volume = lod.volume();
-        Self {
-            lod,
-            data: vec![M::default().to_id(); volume].into_boxed_slice(),
-            version: 0,
-            _marker: PhantomData,
-        }
+        Self::from_raw(lod, vec![M::default().to_id(); lod.volume()])
     }
 }
 
 impl<M: VoxelMaterial> Field<M> for MaterialField<M> {
     fn size(&self) -> UVec3 {
-        UVec3::splat(self.lod as u32)
+        UVec3::splat(self.lod.size())
     }
 
     fn get(&self, x: u32, y: u32, z: u32) -> M {
-        let size = self.lod.size();
-        let idx = (z * size * size + y * size + x) as usize;
-        M::from_id(self.data[idx])
+        M::from_id(self.data[flatten_with_size(x, y, z, self.size()) as usize])
     }
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: M) {
-        let size = self.lod.size();
-        let idx = (z * size * size + y * size + x) as usize;
+        let idx = flatten_with_size(x, y, z, self.size()) as usize;
         let id = value.to_id();
         if self.data[idx] != id {
             self.data[idx] = id;
@@ -89,7 +80,7 @@ impl<M: VoxelMaterial> FieldFromRaw for MaterialField<M> {
         Self {
             lod,
             data: data.into_boxed_slice(),
-            _marker: default(),
+            _marker: PhantomData,
             version: 0,
         }
     }
@@ -106,9 +97,6 @@ impl<M: VoxelMaterial> ApronSample for MaterialField<M> {
 impl<M: VoxelMaterial> Versionable for MaterialField<M> {
     fn version(&self) -> u64 {
         self.version
-    }
-    fn incorment_version(&mut self) {
-        self.version += 1;
     }
 }
 impl<M: VoxelMaterial> FieldLOD for MaterialField<M> {

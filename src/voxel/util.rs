@@ -1,19 +1,7 @@
-use bevy::render::render_resource::*;
 use bevy::{
     prelude::*,
-    render::{
-        render_resource::{Buffer, BufferInitDescriptor, BufferUsages},
-        renderer::RenderDevice,
-    },
+    render::{render_resource::*, renderer::RenderDevice},
 };
-// voxel/util.rs
-pub fn next_pow2(x: u32) -> u32 {
-    if x <= 1 {
-        1
-    } else {
-        1u32 << (32 - (x - 1).leading_zeros())
-    }
-}
 
 /// Must match `hash_chunk` in cursor_query.wgsl exactly.
 pub fn hash_chunk_pos(pos: IVec3) -> u32 {

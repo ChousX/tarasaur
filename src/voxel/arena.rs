@@ -14,7 +14,7 @@ use crate::{
     LOD,
     voxel::{
         types::{CreateStorage, DrawIndexedIndirectArgs, entries},
-        util::{hash_chunk_pos, make_batch_uniform_buffer, next_pow2},
+        util::{hash_chunk_pos, make_batch_uniform_buffer},
     },
 };
 
@@ -49,15 +49,10 @@ fn max_chunks(
     let vertex_bytes = budget_cells_per_chunk as u64 * 32;
     let index_bytes = budget_cells_per_chunk as u64 * INDICES_PER_CELL as u64 * 4;
 
-    let worst_bytes_per_chunk = [
-        sdf_bytes,
-        material_bytes,
-        vertex_bytes,
-        index_bytes,
-    ]
-    .into_iter()
-    .max()
-    .unwrap();
+    let worst_bytes_per_chunk = [sdf_bytes, material_bytes, vertex_bytes, index_bytes]
+        .into_iter()
+        .max()
+        .unwrap();
 
     let capped = (limit / worst_bytes_per_chunk).max(1) as u32;
     info!(
@@ -179,9 +174,9 @@ pub struct VoxelChunkArena {
     pub slot_range: Vec<(u32, u32)>,
     heap: RangeHeap,
 
-    pub slot_vertex_base_buffer: Buffer,  // [slot] -> vertex base, CPU-written
+    pub slot_vertex_base_buffer: Buffer, // [slot] -> vertex base, CPU-written
     pub slot_vertex_count_buffer: Buffer, // [slot] -> exact active cell count, CPU-written
-    pub active_slot_map_buffer: Buffer,   // [dispatch idx] -> slot, CPU-written per dispatch
+    pub active_slot_map_buffer: Buffer,  // [dispatch idx] -> slot, CPU-written per dispatch
 
     // pass3 records [trips, slot, gpu_count, cpu_count] when its range guard
     // fires; read back by `map_guard_readbacks` when `GuardTelemetry` is on.
@@ -189,13 +184,10 @@ pub struct VoxelChunkArena {
     pub guard_readback_buffer: Buffer,
     pub guard_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 
-    // --- GPU-resident chunk_pos -> slot lookup, for the collision query
-    // pass's DDA (see voxel/query.rs). Rebuilt CPU-side every frame from
-    // slot_of_chunk_pos and re-uploaded — cheap at these table sizes.
+    /// chunk_pos <-> slot, for the collision query's merged lookup table
+    /// (see `VoxelChunkArenaSet::rebuild_merged_lookup`).
     pub slot_of_chunk_pos: HashMap<IVec3, u32>,
     pub chunk_pos_of_slot: Vec<Option<IVec3>>, // len == max_chunks, O(1) release
-    pub chunk_lookup_buffer: Buffer,
-    pub lookup_capacity: u32,
 }
 
 impl VoxelChunkArena {
@@ -218,7 +210,6 @@ impl VoxelChunkArena {
             budget_cells_per_chunk,
         ) as u64;
 
-        let lookup_capacity = next_pow2((max as u32).saturating_mul(2)).max(4);
         let sdf_buffer = render_device.storage(
             "arena_sdf_buffer",
             sdf_elems_per_chunk as u64 * 2 * max,
@@ -441,13 +432,6 @@ impl VoxelChunkArena {
             ]),
         );
 
-        let empty_lookup: Vec<[u32; 4]> = vec![[u32::MAX; 4]; lookup_capacity as usize];
-        let chunk_lookup_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("arena_chunk_lookup_buffer"),
-            contents: bytemuck::cast_slice(&empty_lookup),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        });
-
         Self {
             max_chunks: max as u32,
             scratch_chunks,
@@ -490,8 +474,6 @@ impl VoxelChunkArena {
             raster_chunk_bind_group,
             slot_of_chunk_pos: HashMap::new(),
             chunk_pos_of_slot: vec![None; max as usize],
-            chunk_lookup_buffer,
-            lookup_capacity,
         }
     }
 
@@ -516,22 +498,6 @@ impl VoxelChunkArena {
         }
         self.slot_of_chunk_pos.insert(chunk_pos, slot);
         self.chunk_pos_of_slot[slot as usize] = Some(chunk_pos);
-    }
-
-    /// Rebuilds and re-uploads the GPU-resident open-addressing
-    /// `chunk_pos -> slot` table from `slot_of_chunk_pos`.
-    pub fn rebuild_chunk_lookup(&self, render_queue: &bevy::render::renderer::RenderQueue) {
-        const EMPTY: u32 = u32::MAX;
-        let cap = self.lookup_capacity as usize;
-        let mut table = vec![[EMPTY; 4]; cap];
-        for (&pos, &slot) in self.slot_of_chunk_pos.iter() {
-            let mut idx = (hash_chunk_pos(pos) as usize) % cap;
-            while table[idx][3] != EMPTY {
-                idx = (idx + 1) % cap;
-            }
-            table[idx] = [pos.x as u32, pos.y as u32, pos.z as u32, slot];
-        }
-        render_queue.write_buffer(&self.chunk_lookup_buffer, 0, bytemuck::cast_slice(&table));
     }
 
     /// Gives this chunk a slot (reusing its current one) and a vertex range
@@ -599,9 +565,6 @@ impl VoxelChunkArena {
         }
     }
 
-    pub fn active_chunk_count(&self) -> u32 {
-        self.active_slots.len() as u32
-    }
     pub fn existing_slot(&self, main_entity: MainEntity) -> Option<u32> {
         self.slot_of_main_entity.get(&main_entity).copied()
     }
@@ -645,7 +608,7 @@ pub struct GpuChunkLookupEntry {
 
 #[derive(Resource, Default)]
 pub struct VoxelChunkArenaSet {
-    pub arenas: [Vec<VoxelChunkArena>; LOD::get_number_of_lods()],
+    pub arenas: [Vec<VoxelChunkArena>; LOD::COUNT],
     pub config: ArenaConfig,
     /// Chunks that should be resident, written each frame by
     /// `release_despawned_chunks`. Pending uploads for anything else are dropped.
@@ -659,18 +622,6 @@ pub struct VoxelChunkArenaSet {
 }
 
 impl VoxelChunkArenaSet {
-    pub fn with_config(config: ArenaConfig) -> Self {
-        Self {
-            config,
-            ..Default::default()
-        }
-    }
-
-    /// The query-visible arena for `lod` (the first one), if it exists.
-    pub fn first_arena(&self, lod: LOD) -> Option<&VoxelChunkArena> {
-        self.arenas[Self::lod_index(lod)].first()
-    }
-
     /// (lod_rank, arena) for every LOD's query-visible arena.
     pub fn query_arenas(&self) -> impl Iterator<Item = (usize, &VoxelChunkArena)> {
         self.arenas
@@ -802,15 +753,6 @@ impl VoxelChunkArenaSet {
         self.iter().map(|a| a.max_chunks).sum()
     }
 
-    /// Max entries `rebuild_merged_lookup` can emit (only query-visible arenas).
-    pub fn query_visible_max_chunks(&self) -> u32 {
-        self.arenas
-            .iter()
-            .flat_map(|v| v.iter().take(QUERY_ARENAS_PER_LOD))
-            .map(|a| a.max_chunks)
-            .sum()
-    }
-
     pub fn rebuild_merged_lookup(
         &self,
         render_queue: &RenderQueue,
@@ -868,9 +810,6 @@ impl VoxelChunkArenaSet {
         render_queue.write_buffer(buffer, 0, bytemuck::cast_slice(&table));
     }
 }
-
-unsafe impl Send for VoxelChunkArena {}
-unsafe impl Sync for VoxelChunkArena {}
 
 #[cfg(test)]
 mod tests {

@@ -18,14 +18,8 @@ impl ForceResident {
 
     /// Lease every chunk overlapping the sphere (world space).
     pub fn touch_sphere(&mut self, center: Vec3, radius: f32) {
-        let min = crate::chunk::world_pos_to_chunk_pos(&(center - Vec3::splat(radius)));
-        let max = crate::chunk::world_pos_to_chunk_pos(&(center + Vec3::splat(radius)));
-        for z in min.z..=max.z {
-            for y in min.y..=max.y {
-                for x in min.x..=max.x {
-                    self.touch(IVec3::new(x, y, z));
-                }
-            }
+        for pos in crate::chunk::overlapping_chunks(center, Vec3::splat(radius)) {
+            self.touch(pos);
         }
     }
 

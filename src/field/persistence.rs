@@ -220,10 +220,10 @@ impl RegisterSaveableFieldExt for App {
 /// flight, and has unsaved changes.
 pub fn build_if_dirty(world: &World, e: Entity) -> Option<(ChunkSaveData, u64)> {
     let lod = *world.get::<LOD>(e)?;
-    if lod != world.resource::<MaxEditLod>().0 || world.get::<ChunkDataTask>(e).is_some() {
-        return None;
-    }
-    if is_settling(world, e) {
+    if lod != world.resource::<MaxEditLod>().0
+        || world.get::<ChunkDataTask>(e).is_some()
+        || is_settling(world, e)
+    {
         return None;
     }
     let pos = world.get::<ChunkPosition>(e)?.0;
@@ -271,6 +271,14 @@ pub fn flush_and_despawn(world: &mut World, e: Entity) {
     }
 }
 
+/// Saves `e` if it has unsaved changes and records the new save point.
+fn save_if_dirty(world: &World, cache: &SaveCache, commands: &mut Commands, e: Entity) {
+    if let Some((data, fp)) = build_if_dirty(world, e) {
+        commit_save(cache, data);
+        commands.entity(e).insert(ChunkSaveState(fp));
+    }
+}
+
 #[derive(Resource)]
 pub struct AutosaveIntervalSecs(pub f32);
 impl Default for AutosaveIntervalSecs {
@@ -294,10 +302,7 @@ pub fn autosave_dirty_chunks(
     }
     *acc = 0.0;
     for e in &chunks {
-        if let Some((data, fp)) = build_if_dirty(world, e) {
-            commit_save(&cache, data);
-            commands.entity(e).insert(ChunkSaveState(fp));
-        }
+        save_if_dirty(world, &cache, &mut commands, e);
     }
 }
 
@@ -317,10 +322,7 @@ pub fn generic_save_chunk_system(
             warn!("Cannot save chunk at {:?}: not loaded", pos);
             continue;
         };
-        if let Some((data, fp)) = build_if_dirty(world, e) {
-            commit_save(&cache, data);
-            commands.entity(e).insert(ChunkSaveState(fp));
-        }
+        save_if_dirty(world, &cache, &mut commands, e);
     }
 }
 
