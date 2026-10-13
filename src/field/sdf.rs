@@ -263,6 +263,13 @@ impl VoxelDataSlice for SDF {
         let packed: Vec<i16> = vol.iter().map(|&v| quantize_sdf(v)).collect();
         bytemuck::cast_slice(&packed).to_vec()
     }
+
+    /// Distances are in voxels of their own LOD: a grid `ratio`x finer has
+    /// voxels `ratio`x smaller, so the same distance is `ratio`x fewer of ours.
+    #[inline]
+    fn rescale(v: f32, ratio: f32) -> f32 {
+        v / ratio
+    }
 }
 
 /// Quantizes an SDF value to snorm16 over +/-`SDF_BAND`, as the GPU copy
@@ -522,6 +529,22 @@ pub fn compute_sdf_distances(data: &mut [f32], size: u32) {
 mod band_tests {
     use super::{SDF, SDF_BAND};
     use crate::{FieldFromRaw, LOD, field::Field};
+
+    #[test]
+    fn downsample_converts_to_coarse_voxels() {
+        use crate::persistence::downsample_bytes;
+        // A plane at world x = 5: distance in voxels of each LOD.
+        let plane = |lod: LOD| -> Vec<f32> {
+            let n = lod.size() as usize;
+            (0..lod.volume())
+                .map(|i| (i % n) as f32 - 5.0 / lod.voxel_size())
+                .collect()
+        };
+        let bytes = bytemuck::cast_slice(&plane(LOD::Medium)).to_vec();
+        let down: Vec<f32> =
+            bytemuck::pod_collect_to_vec(&downsample_bytes::<SDF>(&bytes, LOD::Medium, LOD::Low));
+        assert_eq!(down, plane(LOD::Low));
+    }
 
     #[test]
     fn values_stay_in_the_narrow_band() {
