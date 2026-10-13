@@ -31,6 +31,12 @@ impl PackedCoord {
     }
 }
 
+/// SDF values are clamped to +/- this many voxels (a narrow-band SDF). Only
+/// the sign and values near zero shape the mesh; beyond that, large values
+/// just make sculpting slow. Unclamped, rock deep under the generated
+/// surface held ~-100 and a brush needed seconds to flip a voxel there.
+pub const SDF_BAND: f32 = 8.0;
+
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Component, Clone)]
 pub struct SDF {
@@ -191,6 +197,7 @@ impl Field<f32> for SDF {
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: f32) {
         let i = self.flatten(x, y, z);
+        let value = value.clamp(-SDF_BAND, SDF_BAND);
         let old = self.data[i];
         if old != value {
             match (old <= 0.0, value <= 0.0) {
@@ -225,8 +232,11 @@ impl VoxelDataSlice for SDF {
 }
 
 impl FieldFromRaw for SDF {
-    fn from_raw(lod: LOD, data: Vec<f32>) -> Self {
+    fn from_raw(lod: LOD, mut data: Vec<f32>) -> Self {
         debug_assert_eq!(data.len(), lod.volume());
+        for v in &mut data {
+            *v = v.clamp(-SDF_BAND, SDF_BAND);
+        }
         let inside_count = data.iter().filter(|v| **v <= 0.0).count() as u32;
         Self {
             lod,
@@ -424,7 +434,7 @@ pub fn jump_flood_distance_field(
                         best.sqrt()
                     }
                 };
-                let mag = mag.max(1e-4);
+                let mag = mag.clamp(1e-4, SDF_BAND);
                 out[idx] = if inside { -mag } else { mag };
             }
         }
@@ -451,7 +461,7 @@ pub fn fill_uniform(data: &mut [f32], size: u32, neg: bool) {
         for y in 0..size {
             for x in 0..size {
                 let d = edge(x).min(edge(y)).min(edge(z));
-                data[((z * size + y) * size + x) as usize] = sign * d as f32;
+                data[((z * size + y) * size + x) as usize] = sign * (d as f32).min(SDF_BAND);
             }
         }
     }
@@ -469,4 +479,20 @@ pub fn compute_sdf_distances(data: &mut [f32], size: u32) {
     let mut seeds = vec![PackedCoord::EMPTY; volume];
     let mut scratch = vec![PackedCoord::EMPTY; volume];
     jump_flood_distance_field(data, &mut seeds, &mut scratch, size);
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::{SDF, SDF_BAND};
+    use crate::{FieldFromRaw, LOD, field::Field};
+
+    #[test]
+    fn values_stay_in_the_narrow_band() {
+        let n = LOD::Lowest.volume();
+        let mut sdf = SDF::from_raw(LOD::Lowest, vec![-150.0; n]);
+        assert_eq!(sdf.get(1, 1, 1), -SDF_BAND);
+        sdf.set(1, 1, 1, 400.0);
+        assert_eq!(sdf.get(1, 1, 1), SDF_BAND);
+        assert_eq!(sdf.uniform_sign(), None); // sign still tracked
+    }
 }
