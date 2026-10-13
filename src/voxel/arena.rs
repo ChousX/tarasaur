@@ -651,6 +651,9 @@ pub struct VoxelChunkArenaSet {
     /// Chunks whose SDF upload is waiting this frame (budget or no room).
     /// Their material/visibility uploads wait too, so the three stay in step.
     pub deferred: HashSet<MainEntity>,
+    /// Live chunks whose latest SDF meshes to nothing (exact CPU count of 0).
+    /// They hold no slot; their material/visibility uploads are dropped.
+    pub empty: HashSet<MainEntity>,
 }
 
 impl VoxelChunkArenaSet {
@@ -748,7 +751,7 @@ impl VoxelChunkArenaSet {
         if placed.is_none() && self.arenas[lod_idx].len() < self.config.max_arenas[lod_idx] {
             for (i, a) in self.arenas[lod_idx].iter().enumerate() {
                 info!(
-                    "[VoxelChunkArenaSet] LOD {:?} arena {} full for a {}-cell chunk: slots {}/{}, free vertex cells {} (largest run {})",
+                    "[VoxelChunkArenaSet] LOD {:?} arena {} full for a {}-cell chunk: slots {}/{}, free vertex cells {} (largest run {}); {} empty chunks hold no slot",
                     lod,
                     i,
                     count,
@@ -756,6 +759,7 @@ impl VoxelChunkArenaSet {
                     a.max_chunks,
                     a.heap.free.values().sum::<u32>(),
                     a.heap.free.values().max().copied().unwrap_or(0),
+                    self.empty.len(),
                 );
             }
             let mut arena = make_arena();

@@ -175,6 +175,15 @@ pub fn prepare_voxel_arena(
     let mut any_out_of_room = false;
     for ((extracted_entity, x), (_, count)) in batch.into_iter().zip(counts) {
         let (lod, size) = (x.lod, x.size);
+        if count == 0 {
+            // No geometry: holding a slot (1.15 MB of SDF at High) would draw
+            // nothing. Any old slot drew nothing for this data either.
+            arena_set.release(x.main_entity);
+            arena_set.empty.insert(x.main_entity);
+            commands.entity(extracted_entity).despawn();
+            continue;
+        }
+        arena_set.empty.remove(&x.main_entity);
         let Some(ArenaSlot { arena_idx, slot }) =
             arena_set.place(lod, x.main_entity, count, || {
                 info!(
@@ -267,6 +276,10 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
         if arena_set.deferred.contains(&extracted_material.main_entity) {
             continue; // waits with its SDF
         }
+        if arena_set.empty.contains(&extracted_material.main_entity) {
+            commands.entity(extracted_entity).despawn(); // nothing to texture
+            continue;
+        }
         let Some(ArenaSlot { arena_idx, slot }) =
             arena_set.find_slot(extracted_material.lod, extracted_material.main_entity)
         else {
@@ -311,6 +324,10 @@ pub fn prepare_visibility_for_arena(
         };
         if arena_set.deferred.contains(&extracted_mask.main_entity) {
             continue; // waits with its SDF
+        }
+        if arena_set.empty.contains(&extracted_mask.main_entity) {
+            commands.entity(extracted_entity).despawn(); // nothing to mask
+            continue;
         }
         let Some(ArenaSlot { arena_idx, slot }) =
             arena_set.find_slot(extracted_mask.lod, extracted_mask.main_entity)
@@ -1003,6 +1020,7 @@ pub fn release_despawned_chunks(
     for e in stale {
         arena_set.release(e);
     }
+    arena_set.empty.retain(|e| wanted.contains(e));
     arena_set.live = wanted;
 }
 
