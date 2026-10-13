@@ -144,7 +144,7 @@ pub struct NewChunkSpawned {
 }
 
 fn new_chunk_spawned(
-    trigger: On<Add, Chunk>,
+    trigger: On<Add<Chunk>>,
     chunk_q: Query<(&Transform, &ChunkPosition), With<Chunk>>,
     mut commands: Commands,
 ) {

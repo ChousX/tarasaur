@@ -1,5 +1,5 @@
 // Import Bevy's built-in view uniform layout to ensure absolute memory layout alignment
-#import bevy_render::view::View
+import bevy_render::view::View;
 
 @group(0) @binding(0) var<uniform> view: View;
 

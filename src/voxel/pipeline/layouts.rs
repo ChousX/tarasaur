@@ -74,7 +74,7 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
 /// is no longer sampled here. Pass3 only needs to know *which slot* each
 /// vertex belongs to (packed into the vertex itself, see pack_material_b in
 /// the shader); the actual visibility test now happens per-fragment in
-/// voxel_raster.wgsl against raster_chunk_visibility_entries() below.
+/// voxel_raster.wesl against raster_chunk_visibility_entries() below.
 pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: snorm16, 2 voxels per u32

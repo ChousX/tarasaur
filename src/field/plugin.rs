@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use bevy::ecs::component::Mutable;
-use bevy::math::primitives::{Cuboid, Sphere};
+use bevy::shape::{Cuboid, Sphere};
 use bevy::prelude::*;
 use bevy::render::{Render, RenderApp};
 

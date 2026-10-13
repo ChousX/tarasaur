@@ -83,6 +83,7 @@ impl FromWorld for VoxelComputePipeline {
                 shader,
                 entry_point: Some(Cow::Borrowed(entry_point)),
                 shader_defs: vec![],
+                constants: vec![],
                 immediate_size: 0,
                 zero_initialize_workgroup_memory: false,
             })
@@ -219,6 +220,7 @@ impl FromWorld for VoxelRasterPipeline {
                 shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
                 entry_point: Some("vs_main".into()),
                 shader_defs: vec![],
+                constants: vec![],
                 buffers: vec![VertexBufferLayout {
                     array_stride: 32,
                     step_mode: VertexStepMode::Vertex,
@@ -240,6 +242,7 @@ impl FromWorld for VoxelRasterPipeline {
                 shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
                 entry_point: Some("fs_main".into()),
                 shader_defs: vec![],
+                constants: vec![],
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba8UnormSrgb,
                     blend: Some(BlendState::REPLACE),

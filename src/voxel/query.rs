@@ -447,7 +447,11 @@ pub fn map_voxel_query_results(
                 return;
             }
             let out: Vec<HitResult> = {
-                let data = buf.slice(..).get_mapped_range();
+                let Ok(data) = buf.slice(..).get_mapped_range() else {
+                    buf.unmap();
+                    state.store(SLOT_FREE, Ordering::Release);
+                    return;
+                };
                 bytemuck::cast_slice(&data).to_vec()
             };
             buf.unmap();

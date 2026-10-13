@@ -1,6 +1,6 @@
 use super::{Field, *};
 
-use bevy::math::primitives::{Cuboid, Sphere};
+use bevy::shape::{Cuboid, Sphere};
 
 /// Trait to handle adding small amounts or deltas to generic field values safely.
 pub trait AccumulateExt {

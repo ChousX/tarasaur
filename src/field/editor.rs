@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use super::Field;
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::system::SystemParam;
-use bevy::math::primitives::{Cuboid, Primitive3d, Sphere};
+use bevy::shape::{Cuboid, Primitive3d, Sphere};
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug)]

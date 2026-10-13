@@ -88,8 +88,8 @@ impl Plugin for VoxelRenderPlugin {
         load_internal_asset!(
             app,
             VOXEL_RASTER_SHADER_HANDLE,
-            "shaders/voxel_raster.wgsl",
-            Shader::from_wgsl
+            "shaders/voxel_raster.wesl",
+            Shader::from_wesl
         );
 
         load_internal_asset!(

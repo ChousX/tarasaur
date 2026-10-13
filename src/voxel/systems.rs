@@ -10,7 +10,7 @@ use bevy::{
         render_resource::*,
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         sync_world::MainEntity,
-        view::{ViewDepthTexture, ViewTarget, ViewUniformOffset, ViewUniforms},
+        view::{ViewDepthStencilTexture, ViewTarget, ViewUniformOffset, ViewUniforms},
     },
     tasks::ComputeTaskPool,
 };
@@ -489,7 +489,7 @@ pub fn voxel_raster_pass(
     view: ViewQuery<(
         &ExtractedCamera,
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ViewUniformOffset,
     )>,
     view_uniforms: Res<ViewUniforms>,
@@ -881,7 +881,10 @@ pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelC
             buf.clone().slice(..).map_async(MapMode::Read, move |result| {
                 if result.is_ok() {
                     let v: [u32; 4] = {
-                        let data = buf.slice(..).get_mapped_range();
+                        let Ok(data) = buf.slice(..).get_mapped_range() else {
+                            buf.unmap();
+                            return;
+                        };
                         *bytemuck::from_bytes(&data[..16])
                     };
                     buf.unmap();
