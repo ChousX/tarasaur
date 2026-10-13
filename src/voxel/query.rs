@@ -22,11 +22,9 @@ use crate::{
     },
 };
 
-pub const INITIAL_QUERY_CAPACITY: u32 = 64;
-/// Safety ceiling, not a target — growth stops here regardless of how
-/// many queries are requested in a single frame, so a runaway caller
-/// can't force unbounded GPU buffer allocation.
-pub const MAX_QUERY_CAPACITY: u32 = 8192;
+/// Ray queries per frame. Sizes the fixed query/hit/readback buffers;
+/// extraction drops anything past it, since writing more would overflow them.
+pub const QUERY_CAPACITY: u32 = 64;
 pub const QUERY_BUFFER_SLOTS: usize = 3;
 
 const SLOT_FREE: u8 = 0;
@@ -82,7 +80,7 @@ pub struct PendingVoxelQueries(pub Vec<RayQuery>);
 pub struct VoxelQueryResults(pub Vec<HitResult>);
 
 /// Render-world mirror of `PendingVoxelQueries`, capped to
-/// `MAX_QUERY_CAPACITY`.
+/// `QUERY_CAPACITY`.
 #[derive(Resource, Default)]
 pub struct ExtractedVoxelQueries(pub Vec<RayQuery>);
 
@@ -136,7 +134,7 @@ fn slot_buffers(
 impl FromWorld for VoxelQueryBuffers {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
-        let capacity = INITIAL_QUERY_CAPACITY;
+        let capacity = QUERY_CAPACITY;
 
         let query_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("voxel_query_buffer"),
@@ -237,16 +235,16 @@ pub fn extract_voxel_queries(
     pending: Extract<Res<PendingVoxelQueries>>,
 ) {
     extracted.0.clear();
-    if pending.0.len() as u32 > MAX_QUERY_CAPACITY {
+    if pending.0.len() as u32 > QUERY_CAPACITY {
         warn!(
-            "[extract_voxel_queries] {} queries requested this frame, capping to MAX_QUERY_CAPACITY={}",
+            "[extract_voxel_queries] {} queries requested this frame, capping to QUERY_CAPACITY={}",
             pending.0.len(),
-            MAX_QUERY_CAPACITY
+            QUERY_CAPACITY
         );
     }
     extracted
         .0
-        .extend(pending.0.iter().copied().take(MAX_QUERY_CAPACITY as usize));
+        .extend(pending.0.iter().copied().take(QUERY_CAPACITY as usize));
 }
 
 /// Runs in `RenderSystems::Prepare`, after `prepare_visibility_for_arena`
