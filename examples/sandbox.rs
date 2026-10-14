@@ -1,3 +1,7 @@
+//! Main playground: streamed, textured heightfield terrain around a fly
+//! camera. Left mouse digs, Ctrl + left mouse builds, scroll resizes the
+//! brush; hold right mouse to look.
+
 mod common;
 
 use bevy::{input::mouse::MouseWheel, prelude::*};
@@ -25,7 +29,11 @@ fn main() {
         .add_systems(Startup, (spawn_player, setup_terrain_palette))
         .add_systems(
             Update,
-            (fly_cam_system, terrain_edit.after(resolve_cursor_hit)),
+            (
+                fly_cam_system,
+                resize_brush,
+                terrain_edit.after(resolve_cursor_hit).after(resize_brush),
+            ),
         )
         .run();
 }
@@ -89,22 +97,26 @@ impl Default for Brush {
     }
 }
 
-/// Brush on top of the library's resolved `CursorHit` (backend picked by
-/// `CursorQueryMode`, F8 cycles). The built-in CSG brush is disabled in
-/// `main` so a click only edits once.
-fn terrain_edit(
-    hit: Res<CursorHit>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    mut wheel: MessageReader<MouseWheel>,
-    time: Res<Time>,
-    mut brush: ResMut<Brush>,
-    mut sdf: WorldEditor<SDF, f32>,
-    mut gizmos: Gizmos,
-) {
+/// Scroll resizes the brush.
+fn resize_brush(mut wheel: MessageReader<MouseWheel>, mut brush: ResMut<Brush>) {
     for ev in wheel.read() {
         brush.radius = f32::mul_add(ev.y, 0.5, brush.radius).clamp(1.0, 20.0);
     }
+}
 
+/// Brush on top of the library's resolved `CursorHit` (backend picked by
+/// `CursorQueryMode`, F8 cycles). The built-in CSG brush is disabled in
+/// `main` so a click only edits once. Right mouse is the fly cam's look, so
+/// building is Ctrl + left mouse.
+fn terrain_edit(
+    hit: Res<CursorHit>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    brush: Res<Brush>,
+    mut sdf: WorldEditor<SDF, f32>,
+    mut gizmos: Gizmos,
+) {
     let Some(hit) = hit.0.map(|h| h.pos) else {
         return;
     };
@@ -117,9 +129,9 @@ fn terrain_edit(
 
     let amount = brush.strength * time.delta_secs();
     if buttons.pressed(MouseButton::Left) {
-        sdf.accumulate_sphere(hit, brush.radius, amount); // dig (raise SDF)
-    }
-    if buttons.pressed(MouseButton::Right) {
-        sdf.accumulate_sphere(hit, brush.radius, -amount); // build (lower SDF)
+        let build = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+        // Dig raises the SDF, build lowers it.
+        let delta = if build { -amount } else { amount };
+        sdf.accumulate_sphere(hit, brush.radius, delta);
     }
 }

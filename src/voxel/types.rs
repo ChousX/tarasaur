@@ -1,3 +1,5 @@
+//! GPU-shared structs (layouts must match the WGSL) and buffer helpers.
+
 use bevy::{
     prelude::*,
     render::{

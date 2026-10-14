@@ -1,3 +1,7 @@
+// Surface nets, second stage: for each active cell from pass1, places its
+// vertex, computes its normal and material blend, stitches LOD seams, and
+// emits quads into the slot's fixed vertex/index range.
+
 struct Vertex {
     position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
     normal: vec4<f32>,   // .xyz = normal, .w = bitcast-packed material_id_b (low byte) + real_slot (next 15 bits)

@@ -1,3 +1,10 @@
+//! Chunk saves: one postcard file per chunk under `./saves/chunks/`.
+//!
+//! Only max-LOD chunks with unsaved edits are written (autosave, manual
+//! `SaveChunkMessage`, or on despawn). Each saveable field registers a
+//! `FieldVTable`; saves go through `SaveCache` so loads never see a stale
+//! file. Lower LODs are exact stride-downsamples of the saved data.
+
 use std::{
     collections::HashMap,
     marker::PhantomData,

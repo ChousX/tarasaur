@@ -1,3 +1,11 @@
+//! GPU storage for resident chunks.
+//!
+//! An arena holds one LOD's chunks in fixed-size slots (padded SDF,
+//! materials, visibility, metadata, draw args) plus shared vertex/index
+//! buffers carved up by `RangeHeap`. Each arena is sized to the device's
+//! storage-binding limit; `VoxelChunkArenaSet` adds arenas per LOD up to
+//! `ArenaConfig` and moves chunks between them as their LOD changes.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bevy::{

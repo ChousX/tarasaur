@@ -1,3 +1,11 @@
+//! Per-chunk voxel grids ("fields") and the traits that make them generic.
+//!
+//! A field is a component holding `LOD::size()`^3 values. The traits below
+//! let the same code edit (`Field`), version (`Versionable`), upload
+//! (`VoxelDataSlice`, `ApronSample`, `ExtractGate`), save and rebuild
+//! (`FieldFromRaw`, `FieldNew`) any field type. `EditableChunks` is the
+//! gate every mutation goes through.
+
 use bevy::ecs::component::Mutable;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -22,6 +30,8 @@ pub use plugin::*;
 pub use sdf::SDF;
 pub use visibility::VisibilityField;
 
+/// Marks a chunk whose `F` was edited this cycle. For `SDF` it means the
+/// values are signs, not distances, until the async JFA reinit finishes.
 #[derive(Component, Clone, Copy)]
 pub struct DirtyField<F, V>(PhantomData<(F, V)>)
 where
@@ -117,6 +127,7 @@ pub trait ExtractGate {
     }
 }
 
+/// The LOD a field's data is stored at (may lag the chunk's `TargetLOD`).
 pub trait FieldLOD {
     fn lod(&self) -> LOD;
 }

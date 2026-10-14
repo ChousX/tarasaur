@@ -1,3 +1,6 @@
+//! Leases that keep fully hidden chunks on the GPU near the camera and
+//! edits, so rays can still hit (and edits can still reveal) them.
+
 use bevy::prelude::*;
 use std::collections::HashMap;
 

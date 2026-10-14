@@ -1,3 +1,6 @@
+//! The terrain point under the mouse (`CursorHit`) and a default CSG brush
+//! (left digs, right adds). F8 cycles the query backend.
+
 use bevy::{
     ecs::message::MessageWriter,
     prelude::*,

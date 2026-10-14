@@ -1,6 +1,8 @@
+//! World-space edit requests. Systems write these messages; the edit
+//! systems in `field::systems` resolve them against every chunk they touch.
+
 use std::marker::PhantomData;
 
-// fields/editor.rs
 use super::Field;
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::system::SystemParam;
@@ -17,6 +19,8 @@ pub enum EditMode<V> {
     Blend { rate: f32 },
 }
 
+/// Apply `mode` with `val` to field `F` inside `shape` at `center` (world
+/// space). Usually written through `WorldEditor`.
 #[derive(Message)]
 pub struct EditFieldMessage<
     F: Field<V>,
@@ -129,6 +133,8 @@ where
     }
 }
 
+/// Overwrites the SDF within `bound_radius` with the exact distance to a
+/// sphere of `sdf_radius`. Marks the chunk dirty (JFA reinit follows).
 #[derive(Message, Clone, Copy)]
 pub struct SdfSphereStamp {
     pub center: Vec3,
@@ -136,6 +142,8 @@ pub struct SdfSphereStamp {
     pub sdf_radius: f32,
 }
 
+/// Exact CSG union/subtraction of a sphere; idempotent, no reinit needed.
+/// What the built-in cursor brush sends.
 #[derive(Message, Clone, Copy)]
 pub struct SdfCsgSphere {
     pub center: Vec3,

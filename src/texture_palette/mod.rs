@@ -1,3 +1,6 @@
+//! Texture palettes: a texture array plus per-layer material properties.
+//! A voxel's material id is its layer. Set one with `ActivePalette`.
+
 pub mod asset;
 pub mod builder;
 pub mod plugin;

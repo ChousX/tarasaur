@@ -1,3 +1,10 @@
+//! GPU ray queries against the arenas (`cursor_query.wgsl`).
+//!
+//! Push `RayQuery`s into `PendingVoxelQueries`; results land in
+//! `VoxelQueryResults` 2-3 frames later via a triple-buffered readback and
+//! a channel back to the main world. For a same-frame answer use the CPU
+//! `TerrainRay` instead.
+
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},

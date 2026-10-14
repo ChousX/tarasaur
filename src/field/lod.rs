@@ -1,7 +1,11 @@
+//! Levels of detail. A chunk is always `CHUNK_SIZE` wide; LOD sets how
+//! many voxels span it.
+
 use crate::CHUNK_SIZE;
 use crate::num::{f32_from_u32, usize_from};
 use bevy::prelude::*;
 
+/// Voxels per chunk edge (the discriminant). Ordered coarse < fine.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(
     serde::Serialize,

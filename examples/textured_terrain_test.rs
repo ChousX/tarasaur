@@ -1,3 +1,6 @@
+//! A fixed grid of chunks with generated, palette-textured terrain at
+//! mixed LODs; logs material and LOD distribution.
+
 use bevy::{
     asset::RenderAssetUsages,
     input::mouse::MouseMotion,

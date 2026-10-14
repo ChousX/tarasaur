@@ -1,3 +1,7 @@
+//! Render-world systems: arena uploads, the surface-nets dispatch, the
+//! raster pass, and the CPU side of padded volumes (apron fill, seam LOD
+//! packing, active-cell counting).
+
 use super::util::dispatch;
 use std::{collections::HashMap, marker::PhantomData, sync::atomic::Ordering};
 
@@ -712,6 +716,8 @@ pub fn voxel_raster_pass(
 /// Byte stride of one slot's entry in `indirect_args_buffer`.
 const ARGS_STRIDE: u64 = u64_from_usize(std::mem::size_of::<DrawIndexedIndirectArgs>());
 
+/// The +x/+y/+z neighbours (faces, edges, corner) whose voxels fill a
+/// chunk's apron. Indexes `border_versions` and `lod_ranks` too.
 pub(crate) const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 0, 0),
     ivec3(0, 1, 0),

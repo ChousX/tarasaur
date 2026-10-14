@@ -1,4 +1,6 @@
-// examples/lod_streaming.rs
+//! Minimal streaming setup: a `ChunkLoader` on the camera and a generator
+//! registered in `ChunkGeneratorRegistry`.
+
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;

@@ -1,4 +1,10 @@
-// field/loading.rs
+//! Closes the gap between a chunk's `TargetLOD` and its installed `LOD`.
+//!
+//! `start_chunk_loads` (nearest and edit-pinned first, capped by
+//! `MaxInFlightLoads`) spawns a `ChunkDataTask` that reads a save or runs the
+//! generators. `resolve_chunk_data_tasks` builds the fields on the compute
+//! pool and `install_chunk` swaps them and the `LOD` in atomically.
+
 use crate::{DirtyField, SDF, VisibilityField, field::systems::SdfReinitTask};
 use bevy::{
     prelude::*,

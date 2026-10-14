@@ -1,3 +1,6 @@
+//! Registration: `FieldsPlugin` (SDF + visibility, always on) and
+//! `MaterialFieldPlugin<M>` (one material channel, opt-in).
+
 use std::marker::PhantomData;
 
 use bevy::ecs::component::Mutable;

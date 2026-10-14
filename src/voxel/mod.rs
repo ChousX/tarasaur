@@ -1,3 +1,20 @@
+//! GPU rendering and querying of chunk fields.
+//!
+//! Per frame, in the render world:
+//! - **Upload** (`prepare_voxel_arena` + material/visibility siblings): new
+//!   padded volumes go into a slot of a per-LOD arena, with a vertex
+//!   range sized from an exact CPU count of active cells.
+//! - **Dispatch**: surface nets in two compute passes over dirty slots only.
+//!   `surface_nets_pass1` finds active cells and assigns vertices;
+//!   `surface_nets_pass3` places vertices, blends materials, stitches LOD
+//!   seams and writes indices and draw args.
+//! - **Draw** ([`draw`]): CPU frustum culling per view, a compaction pass,
+//!   then one `multi_draw_indexed_indirect` per arena (`voxel_raster.wesl`:
+//!   triplanar albedo + ARM, per-pixel visibility discard, Bevy PBR
+//!   lighting), optionally after a depth-only prepass (`VoxelDepthPrepass`).
+//! - **Query** ([`query`]): optional GPU ray casts against the arenas, read
+//!   back a few frames later.
+
 mod arena;
 pub mod cursor;
 pub mod draw;
@@ -71,6 +88,7 @@ pub enum VoxelPrepareSet {
     Dispatch,
 }
 
+/// Extraction, arenas, meshing, drawing, ray queries and the cursor.
 pub struct VoxelRenderPlugin;
 
 /// Embeds the voxel shaders.

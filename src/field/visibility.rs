@@ -1,3 +1,6 @@
+//! Per-voxel visibility mask. Hidden voxels still mesh; the fragment shader
+//! discards them.
+
 use super::Field;
 use crate::{
     ApronSample, ExtractGate, FieldFromRaw, FieldLOD, LOD, Versionable, VoxelDataSlice,

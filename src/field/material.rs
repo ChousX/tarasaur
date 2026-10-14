@@ -1,3 +1,6 @@
+//! Per-voxel material ids for a user-defined `VoxelMaterial` enum. Blended
+//! between voxels at mesh and fragment time, never in the stored data.
+
 use crate::{
     ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
     flatten_with_size,
@@ -9,6 +12,7 @@ use super::{Field, LOD};
 use bevy::prelude::*;
 use std::marker::PhantomData;
 
+/// One `u8` material id per voxel; the id is the palette layer.
 #[derive(Component, Clone)]
 pub struct MaterialField<M: VoxelMaterial> {
     lod: LOD,

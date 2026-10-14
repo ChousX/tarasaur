@@ -1,3 +1,11 @@
+//! Edit application and SDF upkeep.
+//!
+//! Edit systems split each world-space edit across the chunks it overlaps
+//! and retry the ones not yet editable (`apply_edits`). Value edits leave the
+//! SDF as signs, so `spawn_sdf_reinit_tasks` / `resolve_sdf_reinit_tasks`
+//! rebuild real distances with an async jump flood; CSG edits write exact
+//! distances and skip that.
+
 use super::{
     EditableChunks, Field, FieldNew, SDF,
     editor::{EditFieldMessage, EditMode},
@@ -159,6 +167,9 @@ pub struct SdfReinitTask {
     started_version: u64,
 }
 
+/// Dirty SDF chunks with no reinit in flight.
+type NeedsReinit = (With<DirtyField<SDF, f32>>, Without<SdfReinitTask>);
+
 /// Spawns a background JFA task for every dirty SDF chunk that doesn't
 /// already have one in flight.
 ///
@@ -166,9 +177,6 @@ pub struct SdfReinitTask {
 /// what prevents re-spawning a second task each frame while the sphere
 /// is still resizing — `DirtyField` stays set (see resolve, below) but no
 /// new task starts until the current one resolves.
-/// Dirty SDF chunks with no reinit in flight.
-type NeedsReinit = (With<DirtyField<SDF, f32>>, Without<SdfReinitTask>);
-
 pub fn spawn_sdf_reinit_tasks(mut commands: Commands, query: Query<(Entity, &SDF), NeedsReinit>) {
     for (entity, sdf) in query.iter() {
         let (data, size, started_version) = sdf.reinit_input();

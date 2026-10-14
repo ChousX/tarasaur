@@ -1,3 +1,5 @@
+//! Bind group layout entries; binding numbers must match the shaders.
+
 use std::num::NonZeroU64;
 
 use bevy::render::render_resource::{

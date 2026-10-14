@@ -1,3 +1,13 @@
+//! The chunk grid and what decides which chunks exist.
+//!
+//! A chunk is an entity (`Chunk` + `ChunkPosition`) covering a
+//! `CHUNK_SIZE`^3 cube; `ChunkManager` maps grid positions to entities.
+//! Each frame `plan_chunk_ops` compares every `ChunkLoader`'s LOD bands with
+//! the live chunks: despawns happen at once, spawns and `TargetLOD` changes
+//! queue nearest-first and `apply_chunk_ops` drains them under a budget.
+//! The chunk under the cursor counts as near (`CursorFocusChunk`), and
+//! chunks being edited are held at max LOD (`EditPin`).
+
 use bevy::{
     camera::primitives::Aabb,
     ecs::{lifecycle::HookContext, world::DeferredWorld},
@@ -37,6 +47,7 @@ impl Plugin for ChunkPlugin {
     }
 }
 
+/// Chunk edge length in world units, at every LOD.
 pub const CHUNK_SIZE: f32 = 10.;
 /// Chunks within this Chebyshev radius of the cursor chunk are treated as
 /// being at (at most) that distance from every loader.
@@ -59,6 +70,7 @@ impl Default for MaxChunkOpsPerFrame {
     }
 }
 
+/// Grid position -> chunk entity. Kept in sync by `Chunk`'s hooks.
 #[derive(Resource, Clone, Default)]
 pub struct ChunkManager {
     arena: HashMap<IVec3, Entity>,
@@ -134,6 +146,7 @@ fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
     }
 }
 
+/// Grid coordinate; sets the `Transform` to the chunk's min corner.
 #[derive(Component, Default, Deref, DerefMut)]
 #[require(Transform)]
 #[component(immutable, on_add = on_add_chunk_pos)]
@@ -150,6 +163,7 @@ fn on_add_chunk_pos(mut world: DeferredWorld, HookContext { entity, .. }: HookCo
     }
 }
 
+/// Triggered when a `Chunk` is added; field observers attach defaults here.
 #[derive(Event)]
 pub struct NewChunkSpawned {
     pub entity: Entity,
@@ -176,6 +190,7 @@ fn new_chunk_spawned(
 // Loader
 // ============================================================================
 
+/// The chunk a loader is in; changing it triggers a replan.
 #[derive(Default, Deref, DerefMut, Component)]
 pub struct CurrentChunk(pub IVec3);
 

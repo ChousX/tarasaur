@@ -1,3 +1,9 @@
+//! The signed distance field that defines terrain shape, plus the CPU jump
+//! flood that turns sign volumes into distances.
+//!
+//! Values are in voxels of the chunk's own LOD, negative inside, clamped to
+//! `±SDF_BAND`. The GPU copy is snorm16 (`quantize_sdf`).
+
 use crate::num::{f32_from_i32, f32_from_u32, i16_from_f32};
 use crate::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice};
 
@@ -42,6 +48,8 @@ impl PackedCoord {
 /// surface held ~-100 and a brush needed seconds to flip a voxel there.
 pub const SDF_BAND: f32 = 8.0;
 
+/// A chunk's signed distances. Tracks its inside-voxel count (for O(1)
+/// `uniform_sign`) and per-neighbour border versions (to limit re-meshing).
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Component, Clone)]
 pub struct SDF {

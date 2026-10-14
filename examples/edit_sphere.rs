@@ -1,6 +1,8 @@
+//! A hand-spawned 3x3x3 chunk grid with an SDF sphere you can resize.
+
 use bevy::prelude::*;
 use tarasaur::{
-    Field, LOD, SDF, VisibilityField,
+    LOD, SDF,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     prelude::*,
 };
@@ -13,7 +15,6 @@ fn main() {
         .add_systems(
             Update,
             (
-                mark_chunks_visible,
                 spawn_initial_sphere_when_ready,
                 handle_sphere_editing,
                 rotate_camera,
@@ -39,32 +40,6 @@ fn spawn_chunk_grid(mut commands: Commands) {
             }
         }
     }
-}
-
-/// Same pattern as `cursor_collision_test.rs`'s `mark_chunks_visible` — sets
-/// every voxel in every chunk to visible once, directly via `Field::set`,
-/// bypassing `WorldEditor` entirely. `VisibilityField` defaults to all-hidden
-/// on spawn, so without this `extract_voxel_chunks` would skip every chunk
-/// forever regardless of what the SDF contains. SDF alone defines the
-/// actual surface shape from here on — visibility just needs to not be
-/// in the way.
-fn mark_chunks_visible(mut marked: Local<bool>, mut query: Query<&mut VisibilityField>) {
-    if *marked || query.iter().count() < 27 {
-        return;
-    }
-    *marked = true;
-
-    for mut vis in query.iter_mut() {
-        let size = LOD::Medium.size();
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    vis.set(x, y, z, true);
-                }
-            }
-        }
-    }
-    info!("[edit_sphere] marked all 27 chunks fully visible");
 }
 
 fn spawn_initial_sphere_when_ready(

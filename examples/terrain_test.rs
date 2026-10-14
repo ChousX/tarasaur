@@ -1,4 +1,5 @@
-// examples/terrain_test.rs
+//! A fixed, one-chunk-tall grid of generated terrain; checks the seam
+//! between chunks and carves a valley across it.
 
 use bevy::{
     input::mouse::MouseMotion,

@@ -1,3 +1,7 @@
+// GPU ray queries, one invocation per ray: DDA across chunks via a hashed
+// chunk lookup table, sphere tracing inside each resident chunk.
+// See voxel/query.rs.
+
 struct RayQuery {
     origin: vec3<f32>,
     max_distance: f32,

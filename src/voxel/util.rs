@@ -1,3 +1,5 @@
+//! Small GPU helpers shared by the arenas and the meshing dispatch.
+
 use bevy::{
     prelude::*,
     render::{

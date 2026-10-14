@@ -1,3 +1,5 @@
+//! Common imports: `use tarasaur::prelude::*;`.
+
 // Core Plugin & Main Exports
 pub use crate::plugin::TarasaurPlugin;
 

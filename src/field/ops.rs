@@ -1,3 +1,7 @@
+//! Brush math in grid space: per-value-type edit semantics
+//! (`AccumulateExt`, `BlendExt`) and sphere/box ops blanket-implemented for
+//! every `Field`.
+
 use super::{Field, IVec3, UVec3, Vec3};
 use crate::num::u8_from_f32;
 

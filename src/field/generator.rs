@@ -1,4 +1,6 @@
-// field/generator.rs
+//! Procedural terrain sources. Loads fall back to these when a chunk has no
+//! usable save.
+
 use std::sync::Arc;
 
 use bevy::prelude::*;

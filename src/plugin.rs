@@ -12,6 +12,9 @@ use crate::{
     voxel::VoxelRenderPlugin,
 };
 
+/// Everything the engine needs: chunks, loading, fields, persistence,
+/// rendering and palettes. Add `MaterialFieldPlugin<M>` for materials and
+/// register generators in `ChunkGeneratorRegistry` for terrain.
 pub struct TarasaurPlugin;
 
 impl Plugin for TarasaurPlugin {

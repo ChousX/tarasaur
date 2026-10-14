@@ -1,12 +1,11 @@
-// Spawns the same radius-7.0 SDF sphere as sphere_test.rs and pins the
-// cursor to the GPU-native collision query pipeline (CursorQueryMode::Gpu).
-// A small red gizmo sphere tracks wherever the (2-3 frame delayed) result
-// says the cursor ray hit the terrain.
+//! A radius-7 SDF sphere across 8 chunks, with the cursor pinned to the GPU
+//! ray-query pipeline (`CursorQueryMode::Gpu`). A small red gizmo sphere
+//! follows the (2-3 frame late) hit under the cursor.
 
 use bevy::prelude::*;
 use bevy::render::settings::{RenderCreation, WgpuLimits, WgpuSettings};
 use bevy::render::{RenderApp, RenderPlugin};
-use tarasaur::{DirtyField, VisibilityField};
+use tarasaur::DirtyField;
 use tarasaur::{
     Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
@@ -40,7 +39,6 @@ fn main() {
             Update,
             (
                 orbit_camera.before(resolve_cursor_hit),
-                mark_chunks_visible,
                 draw_hit_marker.after(resolve_cursor_hit),
             ),
         )
@@ -51,30 +49,6 @@ fn main() {
 struct OrbitCamera {
     radius: f32,
     speed: f32,
-}
-
-/// Auto-inserted `VisibilityField` defaults to fully-hidden (all-zero bits),
-/// which makes `extract_voxel_chunks` skip SDF extraction entirely for every
-/// chunk (`is_uniform()` == Some(false) short-circuits it). Waits for the
-/// FieldsPlugin-populated component to actually exist on all 8 chunks
-/// before writing into it — same pattern as `visibility_test.rs`.
-fn mark_chunks_visible(mut marked: Local<bool>, mut query: Query<&mut VisibilityField>) {
-    if *marked || query.iter().count() < 8 {
-        return;
-    }
-    *marked = true;
-
-    for mut vis in query.iter_mut() {
-        let size = LOD::Medium.size(); // must match the LOD used in spawn_sphere_chunks
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    vis.set(x, y, z, true);
-                }
-            }
-        }
-    }
-    info!("[cursor_collision_test] marked all 8 chunks fully visible");
 }
 
 fn spawn_camera_and_light(mut commands: Commands) {

@@ -1,3 +1,6 @@
+//! CPU ray casting and SDF sampling over the main world's chunks. Same
+//! frame, every LOD; used by the cursor and usable as terrain collision.
+
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
@@ -13,6 +16,7 @@ pub struct TerrainHit {
     pub distance: f32,
 }
 
+/// System param: `sample` the world SDF or `cast` a ray at the terrain.
 #[derive(SystemParam)]
 pub struct TerrainRay<'w, 's> {
     chunks: Res<'w, ChunkManager>,

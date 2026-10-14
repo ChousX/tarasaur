@@ -1,3 +1,6 @@
+//! Skips chunks that can't produce geometry: only chunks tagged
+//! `HasSurface` (a sign change in their padded volume) are extracted.
+
 use bevy::platform::collections::HashSet;
 
 use bevy::prelude::*;
