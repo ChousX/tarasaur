@@ -44,24 +44,13 @@ pub const fn uniform_buffer_entry(
     }
 }
 
-/// Binding layout shared by the stream-compaction entry points
-/// (`scan_workgroup`, `scan_block_sums`, `resolve_block_offsets`).
-pub fn compaction_entries() -> Vec<BindGroupLayoutEntry> {
-    vec![
-        uniform_buffer_entry(0, ShaderStages::COMPUTE, None),
-        storage_buffer_entry(1, ShaderStages::COMPUTE, false),
-        storage_buffer_entry(2, ShaderStages::COMPUTE, false),
-        storage_buffer_entry(3, ShaderStages::COMPUTE, false),
-        storage_buffer_entry(5, ShaderStages::COMPUTE, true), // active_slot_map
-    ]
-}
-
 /// Binding layout for `surface_nets_pass1`.
 pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // sdf_buffer: snorm16, 2 voxels per u32
-        storage_buffer_entry(1, ShaderStages::COMPUTE, false),
-        storage_buffer_entry(2, ShaderStages::COMPUTE, false),
+        storage_buffer_entry(1, ShaderStages::COMPUTE, false), // active_cells: [vertex] -> cell
+        storage_buffer_entry(2, ShaderStages::COMPUTE, false), // cell_vertex: [cell] -> vertex
+        storage_buffer_entry(3, ShaderStages::COMPUTE, false), // chunk_counts: per-chunk atomics
         storage_buffer_entry(4, ShaderStages::COMPUTE | ShaderStages::VERTEX, false),
         storage_buffer_entry(5, ShaderStages::COMPUTE, false),
         uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(16)),
@@ -93,9 +82,10 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
         // material_buffer: packed as array<u32>, 4 material-id bytes per
         // word — WGSL storage buffers have no array<u8>. Only pass3 reads
         // it (material tallying happens per-vertex, not per-cell), so no
-        // change needed to pass1_surface_entries() or compaction_entries().
+        // change needed to pass1_surface_entries().
         storage_buffer_entry(11, ShaderStages::COMPUTE, true),
         storage_buffer_entry(12, ShaderStages::COMPUTE, false), // guard_debug: range-guard telemetry
+        storage_buffer_entry(13, ShaderStages::COMPUTE, true),  // chunk_counts from pass1
     ]
 }
 

@@ -127,10 +127,9 @@ impl Phase {
 
 /// Diagnostics recorded every frame. Render spans only produce a value on
 /// frames they ran in, so a column is empty when nothing new arrived.
-const COLUMNS: [(&str, &str); 15] = [
+const COLUMNS: [(&str, &str); 14] = [
     ("gpu_mesh_ms", "render/voxel_mesh/elapsed_gpu"),
     ("gpu_pass1_ms", "render/voxel_mesh/pass1/elapsed_gpu"),
-    ("gpu_scan_ms", "render/voxel_mesh/scan/elapsed_gpu"),
     ("gpu_pass3_ms", "render/voxel_mesh/pass3/elapsed_gpu"),
     ("gpu_raster_ms", "render/voxel_raster/elapsed_gpu"),
     ("draws", "voxel/draws"),
@@ -516,7 +515,7 @@ fn summarize(phase: Phase, rows: &[&FrameRow], load_timed_out: bool) -> Vec<(Str
         out.push((format!("{name}_mean"), mean(&present(name))));
     }
     // Meshing runs only on some frames: report totals and the per-run cost.
-    for name in ["gpu_mesh_ms", "gpu_pass1_ms", "gpu_scan_ms", "gpu_pass3_ms"] {
+    for name in ["gpu_mesh_ms", "gpu_pass1_ms", "gpu_pass3_ms"] {
         let v = present(name);
         out.push((format!("{name}_total"), total(&v)));
         out.push((format!("{name}_per_dispatch"), mean(&v)));

@@ -27,8 +27,8 @@ use std::{borrow::Cow, collections::HashMap};
 use crate::{
     texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
     voxel::{
-        CURSOR_QUERY_SHADER_HANDLE, STREAM_COMPACTION_SHADER_HANDLE,
-        SURFACE_NETS_PASS1_SHADER_HANDLE, SURFACE_NETS_PASS3_SHADER_HANDLE,
+        CURSOR_QUERY_SHADER_HANDLE, SURFACE_NETS_PASS1_SHADER_HANDLE,
+        SURFACE_NETS_PASS3_SHADER_HANDLE,
     },
 };
 
@@ -36,7 +36,6 @@ use crate::{
 pub struct VoxelPipelineLayouts {
     pub pass1_surface_layout: BindGroupLayout,
     pub pass3_surface_layout: BindGroupLayout,
-    pub compaction_bind_group_layout: BindGroupLayout,
     pub raster_chunk_visibility_layout: BindGroupLayout,
     pub query_layout: BindGroupLayout,
 }
@@ -56,10 +55,6 @@ impl FromWorld for VoxelPipelineLayouts {
                 "voxel_surface_pass3_layout",
                 layouts::pass3_surface_entries(),
             ),
-            compaction_bind_group_layout: layout(
-                "voxel_compaction_layout",
-                layouts::compaction_entries(),
-            ),
             raster_chunk_visibility_layout: layout(
                 "voxel_raster_chunk_visibility_layout",
                 layouts::raster_chunk_visibility_entries(),
@@ -72,9 +67,6 @@ impl FromWorld for VoxelPipelineLayouts {
 #[derive(Resource)]
 pub struct VoxelComputePipeline {
     pub pass1_pipeline_id: CachedComputePipelineId,
-    pub stream_compaction_pipeline_id: CachedComputePipelineId,
-    pub scan_block_sums_pipeline_id: CachedComputePipelineId,
-    pub stream_compaction_resolve_pipeline_id: CachedComputePipelineId,
     pub pass3_pipeline_id: CachedComputePipelineId,
     pub query_pipeline_id: CachedComputePipelineId,
 }
@@ -101,18 +93,8 @@ impl FromWorld for VoxelComputePipeline {
                 zero_initialize_workgroup_memory: false,
             })
         };
-        let compaction = |label, entry_point| {
-            queue(
-                label,
-                "voxel_compaction_pipeline_layout",
-                layouts::compaction_entries(),
-                STREAM_COMPACTION_SHADER_HANDLE,
-                entry_point,
-            )
-        };
-
         Self {
-            // Edge classification & vertex generation.
+            // Active cells and their vertex slots.
             pass1_pipeline_id: queue(
                 "surface_nets_pass1_pipeline",
                 "voxel_pass1_pipeline_layout",
@@ -120,16 +102,7 @@ impl FromWorld for VoxelComputePipeline {
                 SURFACE_NETS_PASS1_SHADER_HANDLE,
                 "cs_main",
             ),
-            stream_compaction_pipeline_id: compaction(
-                "stream_compaction_scan_pipeline",
-                "scan_workgroup",
-            ),
-            scan_block_sums_pipeline_id: compaction("scan_block_sums", "scan_block_sums"),
-            stream_compaction_resolve_pipeline_id: compaction(
-                "stream_compaction_resolve_pipeline",
-                "resolve_block_offsets",
-            ),
-            // Index assembly & indirect arguments.
+            // Vertices, indices and indirect arguments, per active cell.
             pass3_pipeline_id: queue(
                 "surface_nets_pass3_pipeline",
                 "voxel_pass3_pipeline_layout",

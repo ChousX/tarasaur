@@ -88,15 +88,6 @@ pub struct ChunkMeta {
     pub active_list_pos: u32, // unused; kept so every shader's ChunkMeta stays 16 bytes
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct BatchCompactionUniforms {
-    chunk_size: u32,
-    total_cells: u32,
-    blocks_per_chunk: u32,
-    pad0: u32,
-}
-
 /// First-fit allocator over a range of vertex cells, with coalescing frees.
 /// Index ranges mirror it at `INDICES_PER_CELL` x the vertex offset.
 #[derive(Default)]
@@ -169,31 +160,31 @@ pub struct VoxelChunkArena {
     pub max_chunks: u32,
     /// Chunks one dispatch can mesh; sizes the per-dispatch scratch.
     pub scratch_chunks: u32,
-    pub cell_count: u32,   // chunk_voxels + 1, fixed for this LOD bucket
-    pub texture_size: u32, // padded SDF size, fixed for this LOD bucket
-    pub total_cells: u32,  // cell_count^3
-    pub blocks_per_chunk: u32,
-    pub sdf_elems_per_chunk: u32,    // texture_size^3
+    pub cell_count: u32,          // chunk_voxels + 1, fixed for this LOD bucket
+    pub texture_size: u32,        // padded SDF size, fixed for this LOD bucket
+    pub total_cells: u32,         // cell_count^3
+    pub sdf_elems_per_chunk: u32, // texture_size^3
     pub budget_cells_per_chunk: u32, // average vertex/index budget per chunk (ACTIVE_FRACTION_ESTIMATE * total_cells)
 
     pub sdf_buffer: Buffer,
     pub material_buffer: Buffer,
     pub visibility_mask_buffer: Buffer,
     pub chunk_has_mask_buffer: Buffer,
-    pub flags_buffer: Buffer,
-    pub compacted_offsets_buffer: Buffer,
+    /// Per-dispatch scratch from pass1: `[vertex] -> cell` per chunk.
+    pub active_cells_buffer: Buffer,
+    /// Per-dispatch scratch from pass1: `[cell] -> vertex` per chunk.
+    pub cell_vertex_buffer: Buffer,
+    /// Per-dispatch: active cells found per chunk; zeroed before pass1.
+    pub chunk_counts_buffer: Buffer,
     pub final_vertex_buffer: Buffer,
     pub index_buffer: Buffer,
     pub indirect_args_buffer: Buffer, // indexed by slot
-    pub block_sums_buffer: Buffer,
     pub chunk_meta_buffer: Buffer,
-    pub compaction_uniform_buffer: Buffer,
     pub batch_uniform_buffer: Buffer,
-    pub batch_uniform_buffer_pass3: Buffer, // pass3 uses workgroup_size(8,8,8), needs its own wg_per_chunk_z stride
+    pub batch_uniform_buffer_pass3: Buffer, // pass3's uniforms, also read by the raster pass
 
     pub pass1_bind_group: BindGroup,
     pub pass3_bind_group: BindGroup,
-    pub compaction_bind_group: BindGroup,
     pub raster_chunk_bind_group: BindGroup,
 
     pub mask_slots: Vec<bool>,
@@ -233,7 +224,6 @@ struct ArenaSizes {
     budget_cells_per_chunk: u32,
     max_chunks: u32,
     scratch_chunks: u32,
-    blocks_per_chunk: u32,
 }
 
 impl ArenaSizes {
@@ -257,7 +247,6 @@ impl ArenaSizes {
             .unwrap_or(1)
             .min(max_chunks)
             .max(1);
-        let workgroup_capacity = 512u32; // WORKGROUP_SIZE * 2
         Self {
             cell_count,
             texture_size,
@@ -266,7 +255,6 @@ impl ArenaSizes {
             budget_cells_per_chunk,
             max_chunks,
             scratch_chunks,
-            blocks_per_chunk: total_cells.div_ceil(workgroup_capacity),
         }
     }
 }
@@ -277,14 +265,13 @@ struct ArenaBuffers {
     material: Buffer,
     visibility_mask: Buffer,
     chunk_has_mask: Buffer,
-    flags: Buffer,
-    compacted_offsets: Buffer,
+    active_cells: Buffer,
+    cell_vertex: Buffer,
+    chunk_counts: Buffer,
     final_vertex: Buffer,
     index: Buffer,
     indirect_args: Buffer,
-    block_sums: Buffer,
     chunk_meta: Buffer,
-    compaction_uniform: Buffer,
     batch_uniform: Buffer,
     batch_uniform_pass3: Buffer,
     slot_vertex_base: Buffer,
@@ -335,15 +322,20 @@ impl ArenaBuffers {
                 has_mask_words.saturating_mul(4),
                 STORAGE_DST,
             ),
-            flags: dev.storage(
-                "arena_flags_buffer",
+            active_cells: dev.storage(
+                "arena_active_cells_buffer",
                 total_cells.saturating_mul(4).saturating_mul(scratch),
-                STORAGE_SRC,
+                BufferUsages::STORAGE,
             ),
-            compacted_offsets: dev.storage(
-                "arena_compacted_offsets_buffer",
+            cell_vertex: dev.storage(
+                "arena_cell_vertex_buffer",
                 total_cells.saturating_mul(4).saturating_mul(scratch),
-                STORAGE_SRC,
+                BufferUsages::STORAGE,
+            ),
+            chunk_counts: dev.storage(
+                "arena_chunk_counts_buffer",
+                scratch.saturating_mul(4),
+                STORAGE_DST,
             ),
             final_vertex: dev.storage(
                 "arena_final_vertex_buffer",
@@ -356,19 +348,11 @@ impl ArenaBuffers {
                 BufferUsages::STORAGE | BufferUsages::INDEX,
             ),
             indirect_args: indirect_args_buffer(dev, sizes.max_chunks),
-            block_sums: dev.storage(
-                "arena_block_sums_buffer",
-                u64::from(sizes.blocks_per_chunk)
-                    .saturating_mul(scratch)
-                    .saturating_mul(4),
-                BufferUsages::STORAGE,
-            ),
             chunk_meta: dev.storage(
                 "arena_chunk_meta_buffer",
                 per_chunk(meta_bytes),
                 STORAGE_DST,
             ),
-            compaction_uniform: compaction_uniform_buffer(dev, sizes),
             batch_uniform: batch_uniform_buffer(dev, sizes, "arena_batch_uniform_buffer", 4),
             batch_uniform_pass3: batch_uniform_buffer(
                 dev,
@@ -399,19 +383,6 @@ impl ArenaBuffers {
             ),
         }
     }
-}
-
-fn compaction_uniform_buffer(render_device: &RenderDevice, sizes: &ArenaSizes) -> Buffer {
-    render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("arena_compaction_uniform_buffer"),
-        contents: bytemuck::bytes_of(&BatchCompactionUniforms {
-            chunk_size: sizes.cell_count,
-            total_cells: sizes.total_cells,
-            blocks_per_chunk: sizes.blocks_per_chunk,
-            pad0: 0,
-        }),
-        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-    })
 }
 
 /// One draw per slot, all empty until the slot gets a vertex range.
@@ -455,19 +426,20 @@ fn batch_uniform_buffer(
     )
 }
 
-/// The arena's four bind groups, in field order.
+/// The arena's three bind groups, in field order.
 fn arena_bind_groups(
     render_device: &RenderDevice,
     layouts: &super::pipeline::VoxelPipelineLayouts,
     b: &ArenaBuffers,
-) -> [BindGroup; 4] {
+) -> [BindGroup; 3] {
     let pass1 = render_device.create_bind_group(
         Some("arena_pass1_bind_group"),
         &layouts.pass1_surface_layout,
         &entries(&[
             (0, &b.sdf),
-            (1, &b.flags),
-            (2, &b.compacted_offsets),
+            (1, &b.active_cells),
+            (2, &b.cell_vertex),
+            (3, &b.chunk_counts),
             (4, &b.final_vertex),
             (5, &b.indirect_args),
             (6, &b.batch_uniform),
@@ -482,8 +454,8 @@ fn arena_bind_groups(
         &layouts.pass3_surface_layout,
         &entries(&[
             (0, &b.sdf),
-            (1, &b.flags),
-            (2, &b.compacted_offsets),
+            (1, &b.active_cells),
+            (2, &b.cell_vertex),
             (3, &b.final_vertex),
             (4, &b.index),
             (5, &b.indirect_args),
@@ -494,17 +466,7 @@ fn arena_bind_groups(
             (10, &b.active_slot_map),
             (11, &b.material),
             (12, &b.guard_debug),
-        ]),
-    );
-    let compaction = render_device.create_bind_group(
-        Some("arena_compaction_bind_group"),
-        &layouts.compaction_bind_group_layout,
-        &entries(&[
-            (0, &b.compaction_uniform),
-            (1, &b.flags),
-            (2, &b.compacted_offsets),
-            (3, &b.block_sums),
-            (5, &b.active_slot_map), // compaction addresses cells by real slot
+            (13, &b.chunk_counts),
         ]),
     );
     let raster = render_device.create_bind_group(
@@ -518,7 +480,7 @@ fn arena_bind_groups(
             (4, &b.material),
         ]),
     );
-    [pass1, pass3, compaction, raster]
+    [pass1, pass3, raster]
 }
 
 impl VoxelChunkArena {
@@ -530,25 +492,20 @@ impl VoxelChunkArena {
     ) -> Self {
         let sizes = ArenaSizes::new(render_device, cell_count, texture_size);
         let buffers = ArenaBuffers::new(render_device, &sizes);
-        let [
-            pass1_bind_group,
-            pass3_bind_group,
-            compaction_bind_group,
-            raster_chunk_bind_group,
-        ] = arena_bind_groups(render_device, layouts, &buffers);
+        let [pass1_bind_group, pass3_bind_group, raster_chunk_bind_group] =
+            arena_bind_groups(render_device, layouts, &buffers);
         let ArenaBuffers {
             sdf,
             material,
             visibility_mask,
             chunk_has_mask,
-            flags,
-            compacted_offsets,
+            active_cells,
+            cell_vertex,
+            chunk_counts,
             final_vertex,
             index,
             indirect_args,
-            block_sums,
             chunk_meta,
-            compaction_uniform,
             batch_uniform,
             batch_uniform_pass3,
             slot_vertex_base,
@@ -568,19 +525,17 @@ impl VoxelChunkArena {
             sdf_elems_per_chunk: sizes.sdf_elems_per_chunk,
             budget_cells_per_chunk: sizes.budget_cells_per_chunk,
             sdf_buffer: sdf,
-            flags_buffer: flags,
-            compacted_offsets_buffer: compacted_offsets,
+            active_cells_buffer: active_cells,
+            cell_vertex_buffer: cell_vertex,
+            chunk_counts_buffer: chunk_counts,
             final_vertex_buffer: final_vertex,
             index_buffer: index,
             indirect_args_buffer: indirect_args,
-            block_sums_buffer: block_sums,
             chunk_meta_buffer: chunk_meta,
-            compaction_uniform_buffer: compaction_uniform,
             batch_uniform_buffer: batch_uniform,
             batch_uniform_buffer_pass3: batch_uniform_pass3,
             pass1_bind_group,
             pass3_bind_group,
-            compaction_bind_group,
             free_slots: (0..sizes.max_chunks).rev().collect(),
             slot_of_main_entity: HashMap::new(),
             active_slots: Vec::new(),
@@ -591,7 +546,6 @@ impl VoxelChunkArena {
                     .budget_cells_per_chunk
                     .saturating_mul(sizes.max_chunks),
             ),
-            blocks_per_chunk: sizes.blocks_per_chunk,
             slot_vertex_base_buffer: slot_vertex_base,
             slot_vertex_count_buffer: slot_vertex_count,
             active_slot_map_buffer: active_slot_map,

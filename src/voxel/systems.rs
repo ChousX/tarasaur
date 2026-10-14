@@ -453,18 +453,10 @@ pub fn dispatch_voxel_compute_passes_batched(
 
     let ids = [
         ("pass1", pipeline.pass1_pipeline_id),
-        ("scan", pipeline.stream_compaction_pipeline_id),
-        ("scan_block_sums", pipeline.scan_block_sums_pipeline_id),
-        ("resolve", pipeline.stream_compaction_resolve_pipeline_id),
         ("pass3", pipeline.pass3_pipeline_id),
     ];
-    let [
-        Some(pass1_pipeline),
-        Some(stream_compaction_pipeline),
-        Some(scan_block_sums_pipeline),
-        Some(stream_compaction_resolve_pipeline),
-        Some(pass3_pipeline),
-    ] = ids.map(|(_, id)| pipeline_cache.get_compute_pipeline(id))
+    let [Some(pass1_pipeline), Some(pass3_pipeline)] =
+        ids.map(|(_, id)| pipeline_cache.get_compute_pipeline(id))
     else {
         for (name, id) in ids {
             if pipeline_cache.get_compute_pipeline(id).is_none() {
@@ -505,13 +497,7 @@ pub fn dispatch_voxel_compute_passes_batched(
     encode_mesh_passes(
         &mut encoder,
         diagnostics.recorder.as_deref(),
-        [
-            pass1_pipeline,
-            stream_compaction_pipeline,
-            scan_block_sums_pipeline,
-            stream_compaction_resolve_pipeline,
-            pass3_pipeline,
-        ],
+        [pass1_pipeline, pass3_pipeline],
         &dirty,
     );
 
@@ -543,22 +529,27 @@ pub struct MeshDiagnostics<'w> {
     stats: Option<ResMut<'w, VoxelFrameStats>>,
 }
 
+/// Must match pass3's `@workgroup_size`.
+const PASS3_WORKGROUP: u32 = 64;
+
 /// Records the meshing passes for every dirty arena. `pipelines` is pass1,
-/// scan, `scan_block_sums`, resolve, pass3.
+/// pass3.
 ///
-/// Stage-major (every arena's pass1, then every arena's scan, ...) so each
+/// Stage-major (every arena's pass1, then every arena's pass3) so each
 /// stage is one timing span. Arenas share no buffers, so the order between
 /// them doesn't matter.
 fn encode_mesh_passes(
     encoder: &mut CommandEncoder,
     recorder: Option<&DiagnosticsRecorder>,
-    pipelines: [&ComputePipeline; 5],
+    pipelines: [&ComputePipeline; 2],
     dirty: &[&mut VoxelChunkArena],
 ) {
-    let [pass1, scan, scan_block_sums, resolve, pass3] = pipelines;
+    let [pass1, pass3] = pipelines;
     let mesh_span = recorder.time_span(encoder, "voxel_mesh");
     timed(recorder, encoder, "pass1", |enc| {
         for arena in dirty {
+            // pass1 counts each chunk's active cells into these.
+            enc.clear_buffer(&arena.chunk_counts_buffer, 0, None);
             let wg1 = arena.cell_count.div_ceil(4);
             dispatch(
                 enc,
@@ -569,44 +560,24 @@ fn encode_mesh_passes(
             );
         }
     });
-    // Scan/resolve: x = block within a chunk, y = chunk. Keeps x under
-    // the 65535-workgroup limit however many chunks are dispatched.
-    timed(recorder, encoder, "scan", |enc| {
-        for arena in dirty {
-            let n = dirty_count(arena);
-            let wg_scan = arena.blocks_per_chunk;
-            dispatch(
-                enc,
-                "stream_compaction_scan_batched",
-                scan,
-                &arena.compaction_bind_group,
-                (wg_scan, n, 1),
-            );
-            dispatch(
-                enc,
-                "stream_compaction_scan_block_sums_batched",
-                scan_block_sums,
-                &arena.compaction_bind_group,
-                (n, 1, 1),
-            );
-            dispatch(
-                enc,
-                "stream_compaction_resolve_batched",
-                resolve,
-                &arena.compaction_bind_group,
-                (wg_scan, n, 1),
-            );
-        }
-    });
+    // x = vertex (active cell) within a chunk, y = chunk. Every dirty
+    // chunk's vertex range holds at least its active cells, so the largest
+    // range bounds them all; threads past a chunk's count exit.
     timed(recorder, encoder, "pass3", |enc| {
         for arena in dirty {
-            let wg3 = arena.cell_count.div_ceil(8);
+            let most = arena
+                .dirty_slots
+                .iter()
+                .filter_map(|&s| arena.slot_range.get(usize_from(s)))
+                .map(|&(_, capacity)| capacity)
+                .max()
+                .unwrap_or(0);
             dispatch(
                 enc,
                 "surface_nets_pass3_batched",
                 pass3,
                 &arena.pass3_bind_group,
-                (wg3, wg3, wg3.saturating_mul(dirty_count(arena))),
+                (most.div_ceil(PASS3_WORKGROUP), dirty_count(arena), 1),
             );
         }
     });

@@ -24,8 +24,9 @@ struct ChunkMeta {
 }
 
 @group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;
-@group(0) @binding(1) var<storage, read> flags_buffer: array<u32>;
-@group(0) @binding(2) var<storage, read> compacted_offsets: array<u32>;
+// pass1's per-dispatch maps: [vertex] -> cell and [cell] -> vertex.
+@group(0) @binding(1) var<storage, read> active_cells: array<u32>;
+@group(0) @binding(2) var<storage, read> cell_vertex: array<u32>;
 @group(0) @binding(3) var<storage, read_write> vertex_buffer: array<Vertex>;
 @group(0) @binding(4) var<storage, read_write> final_index_buffer: array<u32>;
 @group(0) @binding(5) var<storage, read_write> indirect_args: array<IndirectDrawArgs>;
@@ -37,6 +38,7 @@ struct ChunkMeta {
 @group(0) @binding(9) var<storage, read> slot_vertex_count: array<u32>;
 // Range-guard telemetry: [trips, slot, gpu_count, cpu_count]; see map_guard_readbacks.
 @group(0) @binding(12) var<storage, read_write> guard_debug: array<atomic<u32>, 4>;
+@group(0) @binding(13) var<storage, read> chunk_counts: array<u32>; // [chunk] -> active cells, from pass1
 @group(0) @binding(10) var<storage, read> active_slot_map: array<u32>;
 @group(0) @binding(11) var<storage, read> material_buffer: array<u32>;
 
@@ -204,38 +206,25 @@ fn pack_material_b(id_b: u32, real_slot: u32) -> f32 {
     return bitcast<f32>(packed);
 }
 
-@compute @workgroup_size(8, 8, 8)
-fn cs_main(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
-    @builtin(workgroup_id) wg_id: vec3<u32>,
-    @builtin(local_invocation_id) local_id: vec3<u32>,
-) {
-    let chunk_idx = wg_id.z / uniforms.wg_per_chunk_z;
-    let local_wg_z = wg_id.z % uniforms.wg_per_chunk_z;
-    let id = vec3<u32>(global_id.x, global_id.y, local_wg_z * 8u + local_id.z);
-
-    if (id.x >= uniforms.cell_count || id.y >= uniforms.cell_count || id.z >= uniforms.cell_count) {
-        return;
-    }
+// One invocation per active cell (pass1's list), not per cell: only a few
+// percent of a chunk's cells carry surface. Dispatched as x = vertex within
+// the chunk, y = chunk; x is sized from the CPU's per-chunk count.
+@compute @workgroup_size(64, 1, 1)
+fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let vertex = global_id.x;
+    let chunk_idx = global_id.y;
 
     // chunk_idx = position in this dispatch. real_slot indexes every
-    // per-slot buffer (sdf, flags, offsets, materials, chunk_meta, ranges,
-    // indirect_args).
+    // per-slot buffer (sdf, materials, chunk_meta, ranges, indirect_args).
     let real_slot = active_slot_map[chunk_idx];
-    let cmeta = chunk_meta[real_slot];
-    let sdf_base = sdf_offset_for(real_slot);
-    let cell_base = cell_offset_for(chunk_idx); // flags/offsets are per-dispatch scratch
-    let cell_idx = get_cell_index(id, cell_base);
+    let cell_base = cell_offset_for(chunk_idx); // active_cells/cell_vertex are per-dispatch scratch
 
-    let vbase = slot_vertex_base[real_slot];
-    let idx_base = vbase * 18u;
     // The range was sized from a CPU count of the same test pass1 uses. If
     // they ever disagreed, writing on would spill into another chunk's
     // range, so emit nothing instead.
-    let last_cell = cell_base + uniforms.cell_count * uniforms.cell_count * uniforms.cell_count - 1u;
-    let gpu_count = compacted_offsets[last_cell] + flags_buffer[last_cell];
+    let gpu_count = chunk_counts[chunk_idx];
     if (gpu_count > slot_vertex_count[real_slot]) {
-        if (all(id == vec3<u32>(0u))) {
+        if (vertex == 0u) {
             atomicAdd(&guard_debug[0], 1u);
             atomicStore(&guard_debug[1], real_slot);
             atomicStore(&guard_debug[2], gpu_count);
@@ -243,10 +232,21 @@ fn cs_main(
         }
         return;
     }
+    if (vertex >= gpu_count) {
+        return;
+    }
 
-    // --- PART 1: VERTEX GENERATION FOR ACTIVE DUAL CELLS ---
-    if (flags_buffer[cell_idx] == 1u) {
-        let vert_idx = vbase + compacted_offsets[cell_idx];
+    let cell = active_cells[cell_base + vertex];
+    let cc = uniforms.cell_count;
+    let id = vec3<u32>(cell % cc, (cell / cc) % cc, cell / (cc * cc));
+    let cmeta = chunk_meta[real_slot];
+    let sdf_base = sdf_offset_for(real_slot);
+    let vbase = slot_vertex_base[real_slot];
+    let idx_base = vbase * 18u;
+
+    // --- PART 1: THIS CELL'S VERTEX ---
+    {
+        let vert_idx = vbase + vertex;
 
         let corners = array<vec3<u32>, 8>(
             vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
@@ -317,10 +317,10 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(0u, 1u, 1u), cell_base);
             let idx_3 = get_cell_index(id - vec3<u32>(0u, 0u, 1u), cell_base);
 
-            let v0 = vbase + compacted_offsets[idx_0];
-            let v1 = vbase + compacted_offsets[idx_1];
-            let v2 = vbase + compacted_offsets[idx_2];
-            let v3 = vbase + compacted_offsets[idx_3];
+            let v0 = vbase + cell_vertex[idx_0];
+            let v1 = vbase + cell_vertex[idx_1];
+            let v2 = vbase + cell_vertex[idx_2];
+            let v3 = vbase + cell_vertex[idx_3];
 
             let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
             if (curr_inside) {
@@ -351,10 +351,10 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 0u, 1u), cell_base);
             let idx_3 = get_cell_index(id - vec3<u32>(1u, 0u, 0u), cell_base);
 
-            let v0 = vbase + compacted_offsets[idx_0];
-            let v1 = vbase + compacted_offsets[idx_1];
-            let v2 = vbase + compacted_offsets[idx_2];
-            let v3 = vbase + compacted_offsets[idx_3];
+            let v0 = vbase + cell_vertex[idx_0];
+            let v1 = vbase + cell_vertex[idx_1];
+            let v2 = vbase + cell_vertex[idx_2];
+            let v3 = vbase + cell_vertex[idx_3];
 
             let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
             if (curr_inside) {
@@ -385,10 +385,10 @@ fn cs_main(
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 1u, 0u), cell_base);
             let idx_3 = get_cell_index(id - vec3<u32>(0u, 1u, 0u), cell_base);
 
-            let v0 = vbase + compacted_offsets[idx_0];
-            let v1 = vbase + compacted_offsets[idx_1];
-            let v2 = vbase + compacted_offsets[idx_2];
-            let v3 = vbase + compacted_offsets[idx_3];
+            let v0 = vbase + cell_vertex[idx_0];
+            let v1 = vbase + cell_vertex[idx_1];
+            let v2 = vbase + cell_vertex[idx_2];
+            let v3 = vbase + cell_vertex[idx_3];
 
             let base_idx = idx_base + atomicAdd(&indirect_args[real_slot].index_count, 6u);
             if (curr_inside) {

@@ -52,8 +52,6 @@ use crate::{
 
 pub const SURFACE_NETS_PASS1_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("9f3a1b2c-4d5e-6f70-8192-a3b4c5d6e7f8");
-pub const STREAM_COMPACTION_SHADER_HANDLE: Handle<Shader> =
-    uuid_handle!("1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809");
 pub const SURFACE_NETS_PASS3_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a");
 pub const VOXEL_RASTER_SHADER_HANDLE: Handle<Shader> =
@@ -87,12 +85,6 @@ fn load_shaders(app: &mut App) {
         app,
         SURFACE_NETS_PASS1_SHADER_HANDLE,
         "shaders/surface_nets_pass1.wgsl",
-        Shader::from_wgsl
-    );
-    load_internal_asset!(
-        app,
-        STREAM_COMPACTION_SHADER_HANDLE,
-        "shaders/stream_compaction.wgsl",
         Shader::from_wgsl
     );
     load_internal_asset!(
