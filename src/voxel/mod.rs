@@ -18,7 +18,7 @@ use bevy::{
     render::{Render, RenderApp, RenderSystems},
 };
 
-use extract::{extract_voxel_chunks, release_despawned_chunks};
+use extract::{LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks};
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
@@ -130,7 +130,11 @@ impl Plugin for VoxelRenderPlugin {
 
         app.init_resource::<ForceResident>()
             .add_systems(First, tick_force_resident)
-            .add_systems(Update, lease_chunks_near_camera);
+            .add_systems(Update, lease_chunks_near_camera)
+            .init_resource::<LiveOutbox>()
+            .add_systems(Last, track_live_chunks);
+        add_field_extraction::<SDF>(app);
+        add_field_extraction::<VisibilityField>(app);
 
         app.add_plugins(CursorPlugin);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -152,8 +156,6 @@ impl Plugin for VoxelRenderPlugin {
                     release_despawned_chunks,
                     (
                         extract_visibility_removed,
-                        extract_voxel_chunks::<SDF>,
-                        extract_voxel_chunks::<VisibilityField>,
                         extract_voxel_queries,
                     ),
                 )

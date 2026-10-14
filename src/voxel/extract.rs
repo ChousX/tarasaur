@@ -1,22 +1,24 @@
-//! Change-driven extraction of chunk fields into the render world.
+//! Change-driven hand-off of chunk fields to the render world.
 //!
-//! Only chunks whose inputs may have changed this frame are looked at: their
-//! own field, a neighbour their apron reads, or their residency (surface,
-//! visibility, lease). Scanning every loaded chunk each frame cost ~2 ms per
-//! field type at ~30k chunks, inside `ExtractSchedule`, which stalls both
-//! worlds.
+//! The main world, in `Last`, works out which chunks' inputs changed this
+//! frame (their own field, a neighbour their apron reads, or their residency:
+//! surface, visibility, lease) and builds those chunks' padded volumes in
+//! parallel. `ExtractSchedule`, which stalls both worlds, only forwards the
+//! results. Building the volumes inside extract, one chunk at a time, cost up
+//! to ~50 ms in a frame while flying.
 //!
 //! Debug builds re-check every chunk every [`AUDIT_INTERVAL`] frames and warn
 //! about (and repair) anything the change tracking missed.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use bevy::{
     diagnostic::FrameCount,
     ecs::{entity::EntityHashMap, system::SystemParam},
     platform::collections::HashSet,
     prelude::*,
-    render::{Extract, sync_world::MainEntity},
+    render::{Extract, ExtractSchedule, RenderApp, sync_world::MainEntity},
+    tasks::ComputeTaskPool,
 };
 
 use crate::{
@@ -34,9 +36,9 @@ use crate::{
 /// Frames between full consistency checks in debug builds.
 const AUDIT_INTERVAL: u32 = 120;
 
-/// What a chunk's extraction depends on: its LOD, its own version and each
-/// `NEIGHBORS_MASK` neighbour's (border) version with that neighbour's LOD
-/// folded in. Unchanged key = unchanged padded volume.
+/// What a chunk's padded volume depends on: its LOD, its own version and
+/// each `NEIGHBORS_MASK` neighbour's (border) version with that neighbour's
+/// LOD folded in. Unchanged key = unchanged padded volume.
 type ExtractKey = (LOD, [u64; 8]);
 
 type FieldQuery<'w, 's, T> =
@@ -48,17 +50,30 @@ fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
     dirty.extend(NEIGHBORS_MASK.iter().map(|off| pos.wrapping_sub(*off)));
 }
 
+/// Registers the hand-off of field `T`: the main-world padding system and
+/// the render-world extract system that forwards its output.
+pub fn add_field_extraction<T>(app: &mut App)
+where
+    T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
+{
+    app.init_resource::<PaddedOutbox<T>>()
+        .add_systems(Last, pad_dirty_chunks::<T>);
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Residency: which chunks are extracted at all
 // ---------------------------------------------------------------------------
 
-/// Which chunks `extract_voxel_chunks` skips: no surface, or fully hidden
-/// (unless forced resident).
+/// Which chunks are not extracted: no surface, or fully hidden (unless
+/// forced resident).
 #[derive(SystemParam)]
 pub struct ExtractFilter<'w, 's> {
-    surface: Extract<'w, 's, Query<'static, 'static, (), With<HasSurface>>>,
-    visibility: Extract<'w, 's, Query<'static, 'static, Option<&'static VisibilityField>>>,
-    forced: Extract<'w, 's, Res<'static, ForceResident>>,
+    surface: Query<'w, 's, (), With<HasSurface>>,
+    visibility: Query<'w, 's, Option<&'static VisibilityField>>,
+    forced: Res<'w, ForceResident>,
 }
 
 impl ExtractFilter<'_, '_> {
@@ -74,14 +89,12 @@ impl ExtractFilter<'_, '_> {
 /// Chunks whose [`ExtractFilter`] result may have flipped this frame.
 #[derive(SystemParam)]
 pub struct ResidencyChanges<'w, 's> {
-    positions: Extract<'w, 's, Query<'static, 'static, &'static ChunkPosition>>,
-    surface_added:
-        Extract<'w, 's, Query<'static, 'static, &'static ChunkPosition, Added<HasSurface>>>,
-    surface_removed: Extract<'w, 's, RemovedComponents<'static, 'static, HasSurface>>,
-    visibility_changed:
-        Extract<'w, 's, Query<'static, 'static, &'static ChunkPosition, Changed<VisibilityField>>>,
-    visibility_removed: Extract<'w, 's, RemovedComponents<'static, 'static, VisibilityField>>,
-    forced: Extract<'w, 's, Res<'static, ForceResident>>,
+    positions: Query<'w, 's, &'static ChunkPosition>,
+    surface_added: Query<'w, 's, &'static ChunkPosition, Added<HasSurface>>,
+    surface_removed: RemovedComponents<'w, 's, HasSurface>,
+    visibility_changed: Query<'w, 's, &'static ChunkPosition, Changed<VisibilityField>>,
+    visibility_removed: RemovedComponents<'w, 's, VisibilityField>,
+    forced: Res<'w, ForceResident>,
 }
 
 impl ResidencyChanges<'_, '_> {
@@ -105,20 +118,47 @@ impl ResidencyChanges<'_, '_> {
 }
 
 // ---------------------------------------------------------------------------
-// extract_voxel_chunks
+// Fields: main-world padding, render-world forwarding
 // ---------------------------------------------------------------------------
 
-/// Everything that can make chunks holding `T` need re-extraction.
+/// One chunk's padded volume, ready to upload.
+pub struct PaddedChunk {
+    pub entity: Entity,
+    pub pos: IVec3,
+    pub lod: LOD,
+    /// Shared with the render world rather than copied.
+    pub bytes: Arc<[u8]>,
+    /// Main-world frame it was built in.
+    pub seq: u32,
+}
+
+/// This frame's padded volumes of field `T`, for `extract_voxel_chunks`.
+#[derive(Resource)]
+pub struct PaddedOutbox<T> {
+    pub chunks: Vec<PaddedChunk>,
+    _type: PhantomData<T>,
+}
+
+impl<T> Default for PaddedOutbox<T> {
+    fn default() -> Self {
+        Self {
+            chunks: Vec::new(),
+            _type: PhantomData,
+        }
+    }
+}
+
+/// Everything that can make chunks holding `T` need a new padded volume.
 #[derive(SystemParam)]
 pub struct FieldChanges<'w, 's, T: Component> {
-    changed: Extract<'w, 's, Query<'static, 'static, (Entity, &'static ChunkPosition), Changed<T>>>,
-    removed: Extract<'w, 's, RemovedComponents<'static, 'static, T>>,
+    changed: Query<'w, 's, (Entity, &'static ChunkPosition), Changed<T>>,
+    removed: RemovedComponents<'w, 's, T>,
     residency: ResidencyChanges<'w, 's>,
 }
 
 #[derive(Default)]
 pub struct ExtractState {
-    /// Key of the last extraction of each chunk currently extracted.
+    /// Key of the last padded volume of each chunk currently extracted.
     last: EntityHashMap<ExtractKey>,
     /// Position of every chunk holding the field, so removing it can dirty
     /// the neighbours whose apron read it.
@@ -209,24 +249,29 @@ where
     T::gpu_bytes(&vol)
 }
 
-/// Re-extracts the chunks whose padded `T` volume may have changed.
-pub fn extract_voxel_chunks<T>(
-    mut commands: Commands,
-    chunk_manager: Extract<Res<ChunkManager>>,
-    query: Extract<FieldQuery<T>>,
+/// Builds new padded volumes, in parallel, for the chunks whose inputs
+/// changed this frame. Runs in `Last`, after every edit, load and surface
+/// flag of the frame.
+pub fn pad_dirty_chunks<T>(
+    chunk_manager: Res<ChunkManager>,
+    query: FieldQuery<T>,
     filter: ExtractFilter,
     mut changes: FieldChanges<T>,
     mut state: Local<ExtractState>,
-    frame: Extract<Res<FrameCount>>,
+    frame: Res<FrameCount>,
+    mut outbox: ResMut<PaddedOutbox<T>>,
 ) where
     T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
 {
+    outbox.chunks.clear();
     state.collect(&mut changes);
     if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
         audit_extraction(&mut state, &chunk_manager, &query, &filter);
     }
 
+    // Which chunks need a new volume: cheap, sequential.
     let ExtractState { last, dirty, .. } = &mut *state;
+    let mut jobs = Vec::new();
     for pos in dirty.iter() {
         let Some(entity) = chunk_manager.get_chunk(pos) else {
             continue;
@@ -243,7 +288,6 @@ pub fn extract_voxel_chunks<T>(
         if field.data_slice().len() != lod.volume() {
             continue; // can't happen (LOD and fields install together); defensive
         }
-
         // Keyed by entity, not position: a chunk that despawns and respawns at
         // the same spot comes back at version 0 with unchanged neighbours, so a
         // position key matched and the new entity never got an arena slot.
@@ -252,21 +296,50 @@ pub fn extract_voxel_chunks<T>(
             continue;
         }
         last.insert(entity, key);
+        jobs.push((entity, *pos, field, *lod));
+    }
 
+    // Building the volumes: the expensive part, one task per chunk.
+    let (manager, fields) = (&*chunk_manager, &query);
+    let mut built: Vec<(usize, Vec<u8>)> = ComputeTaskPool::get().scope(|s| {
+        for (i, &(_, pos, field, lod)) in jobs.iter().enumerate() {
+            s.spawn(async move { (i, padded_bytes(field, pos, lod, manager, fields)) });
+        }
+    });
+    built.sort_unstable_by_key(|b| b.0);
+    outbox.chunks.extend(
+        jobs.iter()
+            .zip(built)
+            .map(|(&(entity, pos, _, lod), (_, bytes))| PaddedChunk {
+                entity,
+                pos,
+                lod,
+                bytes: bytes.into(),
+                seq: frame.0,
+            }),
+    );
+}
+
+/// Forwards this frame's padded volumes of `T` to the render world.
+pub fn extract_voxel_chunks<T>(mut commands: Commands, outbox: Extract<Res<PaddedOutbox<T>>>)
+where
+    T: Send + Sync + 'static,
+{
+    for c in &outbox.chunks {
         commands.spawn(ExtractedChunkField::<T> {
-            main_entity: entity.into(),
-            chunk_pos: *pos,
-            padded_data: padded_bytes(field, *pos, *lod, &chunk_manager, &query),
-            size: lod.size().wrapping_add(PADDING),
-            lod: *lod,
-            seq: frame.0,
+            main_entity: c.entity.into(),
+            chunk_pos: c.pos,
+            padded_data: Arc::clone(&c.bytes),
+            size: c.lod.size().wrapping_add(PADDING),
+            lod: c.lod,
+            seq: c.seq,
             _type: PhantomData,
         });
     }
 }
 
-/// Debug check: every chunk whose extraction is out of date must be dirty.
-/// Anything missed is logged and made dirty, so it is also repaired.
+/// Debug check: every chunk whose padded volume is out of date must be
+/// dirty. Anything missed is logged and made dirty, so it is also repaired.
 fn audit_extraction<T>(
     state: &mut ExtractState,
     chunk_manager: &ChunkManager,
@@ -307,47 +380,40 @@ fn audit_extraction<T>(
 }
 
 // ---------------------------------------------------------------------------
-// release_despawned_chunks
+// Live set: which chunks hold an arena slot
 // ---------------------------------------------------------------------------
 
-type LiveChunkData = (
-    Entity,
-    &'static ChunkPosition,
-    Option<&'static VisibilityField>,
-);
-type LiveChunkFilter = (With<Chunk>, With<LOD>, With<HasSurface>);
+/// This frame's changes to the set of chunks that should hold an arena slot.
+#[derive(Resource, Default)]
+pub struct LiveOutbox {
+    /// Chunks that despawned.
+    pub despawned: Vec<Entity>,
+    /// Chunks whose residency was re-evaluated, and whether they're wanted.
+    pub changed: Vec<(Entity, bool)>,
+}
 
 /// What can change the set of chunks that should hold an arena slot.
 #[derive(SystemParam)]
 pub struct LiveChanges<'w, 's> {
     residency: ResidencyChanges<'w, 's>,
-    despawned: Extract<'w, 's, RemovedComponents<'static, 'static, Chunk>>,
-    lod_added: Extract<'w, 's, Query<'static, 'static, &'static ChunkPosition, Added<LOD>>>,
-    chunk_manager: Extract<'w, 's, Res<'static, ChunkManager>>,
-    live: Extract<'w, 's, Query<'static, 'static, LiveChunkData, LiveChunkFilter>>,
-    forced: Extract<'w, 's, Res<'static, ForceResident>>,
-    frame: Extract<'w, 's, Res<'static, FrameCount>>,
+    despawned: RemovedComponents<'w, 's, Chunk>,
+    lod_added: Query<'w, 's, &'static ChunkPosition, Added<LOD>>,
+    chunks: Query<'w, 's, (), (With<Chunk>, With<LOD>)>,
+    chunk_manager: Res<'w, ChunkManager>,
+    filter: ExtractFilter<'w, 's>,
 }
 
-impl LiveChanges<'_, '_> {
-    fn wanted(&self, entity: Entity) -> bool {
-        self.live.get(entity).is_ok_and(|(_, pos, v)| {
-            !v.is_some_and(VisibilityField::is_all_empty) || self.forced.contains(&pos.0)
-        })
-    }
-}
-
-/// Keeps `arena_set.live` current and releases the slots of chunks that
-/// despawned, lost their surface or became hidden.
-pub fn release_despawned_chunks(
+/// Records which chunks gained or lost their claim to an arena slot this
+/// frame, for `release_despawned_chunks`.
+pub fn track_live_chunks(
     mut changes: LiveChanges,
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    mut outbox: ResMut<LiveOutbox>,
     mut dirty: Local<HashSet<IVec3>>,
 ) {
+    outbox.despawned.clear();
+    outbox.changed.clear();
     let despawned: Vec<Entity> = changes.despawned.read().collect();
-    for e in despawned {
-        drop_chunk(&mut arena_set, e.into());
-    }
+    outbox.despawned.extend(despawned);
 
     dirty.clear();
     changes.residency.collect(&mut dirty);
@@ -356,15 +422,45 @@ pub fn release_despawned_chunks(
         let Some(e) = changes.chunk_manager.get_chunk(pos) else {
             continue;
         };
-        if changes.wanted(e) {
+        let wanted = changes.chunks.contains(e) && !changes.filter.skips(e, *pos);
+        outbox.changed.push((e, wanted));
+    }
+}
+
+type LiveChunkData = (
+    Entity,
+    &'static ChunkPosition,
+    Option<&'static VisibilityField>,
+);
+type LiveChunkFilter = (With<Chunk>, With<LOD>, With<HasSurface>);
+
+/// The full live set, for the debug audit only.
+#[derive(SystemParam)]
+pub struct LiveAudit<'w, 's> {
+    live: Extract<'w, 's, Query<'static, 'static, LiveChunkData, LiveChunkFilter>>,
+    forced: Extract<'w, 's, Res<'static, ForceResident>>,
+    frame: Extract<'w, 's, Res<'static, FrameCount>>,
+}
+
+/// Applies [`LiveOutbox`]: keeps `arena_set.live` current and releases the
+/// slots of chunks that despawned, lost their surface or became hidden.
+pub fn release_despawned_chunks(
+    outbox: Extract<Res<LiveOutbox>>,
+    audit: LiveAudit,
+    mut arena_set: ResMut<VoxelChunkArenaSet>,
+) {
+    for &e in &outbox.despawned {
+        drop_chunk(&mut arena_set, e.into());
+    }
+    for &(e, wanted) in &outbox.changed {
+        if wanted {
             arena_set.live.insert(e.into());
         } else {
             drop_chunk(&mut arena_set, e.into());
         }
     }
-
-    if cfg!(debug_assertions) && changes.frame.0.is_multiple_of(AUDIT_INTERVAL) {
-        audit_live(&changes, &mut arena_set);
+    if cfg!(debug_assertions) && audit.frame.0.is_multiple_of(AUDIT_INTERVAL) {
+        audit_live(&audit, &mut arena_set);
     }
 }
 
@@ -375,13 +471,14 @@ fn drop_chunk(arena_set: &mut VoxelChunkArenaSet, e: MainEntity) {
 }
 
 /// Debug check: `live` must match a full recount. Repairs and logs misses.
-fn audit_live(changes: &LiveChanges, arena_set: &mut VoxelChunkArenaSet) {
-    let wanted: std::collections::HashSet<MainEntity> = changes
+fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet) {
+    let wanted: std::collections::HashSet<MainEntity> = audit
         .live
         .iter()
-        .map(|(e, _, _)| e)
-        .filter(|&e| changes.wanted(e))
-        .map(MainEntity::from)
+        .filter(|(_, pos, v)| {
+            !v.is_some_and(VisibilityField::is_all_empty) || audit.forced.contains(&pos.0)
+        })
+        .map(|(e, _, _)| MainEntity::from(e))
         .collect();
     let held = arena_set
         .iter()

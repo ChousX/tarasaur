@@ -15,7 +15,7 @@ use crate::systems::{
     process_sdf_sphere_stamps, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
 use crate::voxel::{
-    extract::extract_voxel_chunks,
+    extract::add_field_extraction,
     systems::{prepare_material_for_arena, prepare_voxel_arena},
 };
 use crate::{FieldLOD, FieldNew, LOD};
@@ -61,12 +61,12 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
         app.add_field::<MaterialField<M>, M>();
         app.add_observer(build_field_on_chunk_spawn::<MaterialField<M>>);
         app.register_saveable_field::<MaterialField<M>>();
+        add_field_extraction::<MaterialField<M>>(app);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app
-            .add_systems(ExtractSchedule, extract_voxel_chunks::<MaterialField<M>>)
             .add_systems(
                 Render,
                 prepare_material_for_arena::<M>

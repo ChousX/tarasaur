@@ -40,7 +40,7 @@ use super::pipeline::VoxelComputePipeline;
 pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub main_entity: MainEntity,
     pub chunk_pos: IVec3,
-    pub padded_data: Vec<u8>,
+    pub padded_data: std::sync::Arc<[u8]>,
     pub size: u32,
     pub lod: LOD,
     /// Main-world frame it was extracted in. An upload can wait several
@@ -758,7 +758,7 @@ pub fn extract_visibility_removed(
         commands.spawn(ExtractedChunkField::<VisibilityField> {
             main_entity: entity.into(),
             chunk_pos: pos.0,
-            padded_data: Vec::new(),
+            padded_data: std::sync::Arc::from([]),
             size: lod.size().wrapping_add(PADDING),
             lod: *lod,
             seq: frame.0,
