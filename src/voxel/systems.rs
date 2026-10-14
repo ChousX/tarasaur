@@ -7,17 +7,18 @@ use crate::num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from};
 use bevy::{
     diagnostic::FrameCount,
     ecs::system::SystemParam,
+    pbr::{MeshViewBindGroup, ViewKeyCache},
     prelude::*,
     render::{
         Extract,
         diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
         render_resource::{
-            BindGroupEntry, CommandEncoder, CommandEncoderDescriptor, ComputePipeline, IndexFormat,
-            MapMode, PipelineCache, RenderPassDescriptor, StoreOp,
+            CommandEncoder, CommandEncoderDescriptor, ComputePipeline, IndexFormat, MapMode,
+            PipelineCache, RenderPassDescriptor, RenderPipeline, StoreOp,
         },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         sync_world::MainEntity,
-        view::{ViewDepthStencilTexture, ViewTarget, ViewUniformOffset, ViewUniforms},
+        view::{ExtractedView, ViewDepthStencilTexture, ViewTarget},
     },
     tasks::ComputeTaskPool,
 };
@@ -28,7 +29,10 @@ use crate::{
     voxel::{
         arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
         draw::{VoxelDrawPipeline, VoxelViewDraws, encode_draw_compaction},
-        pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
+        pipeline::{
+            VoxelDepthPrepass, VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterKey,
+            VoxelRasterPipeline, raster_keys,
+        },
         stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
     },
@@ -602,7 +606,8 @@ fn timed(
 /// Everything `voxel_raster_pass` draws with, besides the view.
 #[derive(SystemParam)]
 pub struct RasterResources<'w> {
-    view_uniforms: Res<'w, ViewUniforms>,
+    view_keys: Res<'w, ViewKeyCache>,
+    depth_prepass: Option<Res<'w, VoxelDepthPrepass>>,
     arena_set: Res<'w, VoxelChunkArenaSet>,
     pipeline_cache: Res<'w, PipelineCache>,
     raster_pipeline: Res<'w, VoxelRasterPipeline>,
@@ -611,48 +616,61 @@ pub struct RasterResources<'w> {
     draw_pipeline: Res<'w, VoxelDrawPipeline>,
 }
 
-/// Draws the chunks `prepare_voxel_view_draws` found visible in this view:
-/// one multi-draw per arena.
+impl RasterResources<'_> {
+    /// The compiled pipeline for `key`, warning (once) while it isn't.
+    fn pipeline(&self, key: VoxelRasterKey) -> Option<&RenderPipeline> {
+        let id = self.raster_pipeline.id(key)?;
+        let pipeline = self.pipeline_cache.get_render_pipeline(id);
+        if pipeline.is_none() {
+            warn_once!(
+                "raster pipeline: {:?}",
+                self.pipeline_cache.get_render_pipeline_state(id)
+            );
+        }
+        pipeline
+    }
+}
+
+/// Draws the chunks `prepare_voxel_view_draws` found visible in this view.
+///
+/// One multi-draw per arena, lit by Bevy's PBR with the view's own mesh view
+/// bind groups (lights, shadows, fog, light probes). With
+/// [`VoxelDepthPrepass`], every arena is first drawn depth-only, so the PBR
+/// pass shades each pixel once.
 pub fn voxel_raster_pass(
     view: ViewQuery<(
         &ViewTarget,
         &ViewDepthStencilTexture,
-        &ViewUniformOffset,
-        &Msaa,
+        &ExtractedView,
+        &MeshViewBindGroup,
     )>,
     res: RasterResources,
     mut ctx: RenderContext,
 ) {
     let draws = res.draws.get(view.entity());
-    let (target, depth_texture, view_offset, msaa) = view.into_inner();
+    let (target, depth_texture, extracted_view, mesh_view) = view.into_inner();
     if draws.iter().all(|d| d.count == 0) {
         return;
     }
-    let pipeline_id = res.raster_pipeline.id(msaa.samples());
-    let (Some(pipeline), Some(compaction)) = (
-        pipeline_id.and_then(|id| res.pipeline_cache.get_render_pipeline(id)),
+    let depth_prepass = res.depth_prepass.as_deref().copied().unwrap_or_default();
+    let Some((prepass_key, shade_key)) = raster_keys(
+        &res.view_keys,
+        extracted_view,
+        &res.voxel_material,
+        depth_prepass,
+    ) else {
+        return;
+    };
+    // A prepass that isn't compiled yet is skipped; shading alone is still
+    // correct, since its depth test works without the prepass.
+    let prepass = prepass_key.and_then(|key| res.pipeline(key));
+    let (Some(shade), Some(compaction)) = (
+        res.pipeline(shade_key),
         res.pipeline_cache
             .get_compute_pipeline(res.draw_pipeline.id),
     ) else {
-        if let Some(id) = pipeline_id {
-            warn_once!(
-                "raster pipeline: {:?}",
-                res.pipeline_cache.get_render_pipeline_state(id)
-            );
-        }
         return;
     };
-    let Some(binding) = res.view_uniforms.uniforms.binding() else {
-        return;
-    };
-    let view_bind_group = ctx.render_device().create_bind_group(
-        Some("voxel_view_bind_group"),
-        &res.raster_pipeline.view_layout,
-        &[BindGroupEntry {
-            binding: 0,
-            resource: binding,
-        }],
-    );
 
     encode_draw_compaction(ctx.command_encoder(), compaction, draws);
 
@@ -670,18 +688,22 @@ pub fn voxel_raster_pass(
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    render_pass.set_render_pipeline(pipeline);
-    render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
-    render_pass.set_bind_group(1, &res.voxel_material.0, &[]);
+    render_pass.set_bind_group(0, &mesh_view.main, &mesh_view.main_offsets);
+    render_pass.set_bind_group(1, &mesh_view.binding_array, &[]);
+    render_pass.set_bind_group(2, &res.voxel_material.bind_group, &[]);
 
-    for d in draws.iter().filter(|d| d.count > 0) {
-        let Some(arena) = res.arena_set.arenas.get(d.lod).and_then(|a| a.get(d.arena)) else {
-            continue;
-        };
-        render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
-        render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
-        render_pass.set_bind_group(2, &arena.raster_chunk_bind_group, &[]);
-        render_pass.multi_draw_indexed_indirect(&d.args, 0, d.count);
+    // Both pipelines share one layout, so the bind groups stay set.
+    for pipeline in prepass.into_iter().chain([shade]) {
+        render_pass.set_render_pipeline(pipeline);
+        for d in draws.iter().filter(|d| d.count > 0) {
+            let Some(arena) = res.arena_set.arenas.get(d.lod).and_then(|a| a.get(d.arena)) else {
+                continue;
+            };
+            render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
+            render_pass.set_bind_group(3, &arena.raster_chunk_bind_group, &[]);
+            render_pass.multi_draw_indexed_indirect(&d.args, 0, d.count);
+        }
     }
     drop(render_pass);
     span.end(ctx.command_encoder());

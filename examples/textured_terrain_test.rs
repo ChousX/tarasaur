@@ -9,18 +9,14 @@ use bevy::{
     },
 };
 use tarasaur::editor::WorldEditor;
-use tarasaur::num::{
-    f32_from_i32, f32_from_u32, i16_from_f32, i32_from_f32, u8_from_f32, usize_from,
-};
+use tarasaur::num::{f32_from_i32, f32_from_u32, i16_from_f32, i32_from_f32, usize_from};
 use tarasaur::{
     Field, LOD, MaterialField, SDF, TarasaurPlugin, VisibilityField, VoxelDataSlice, VoxelMaterial,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::MaterialFieldPlugin,
     ops::{AccumulateExt, BlendExt},
     texture_palette::{
-        asset::TexturePalette,
-        builder::PaletteBuilder,
-        plugin::{ActivePalette, PalettePlugin},
+        asset::TexturePalette, builder::PaletteBuilder, plugin::ActivePalette,
         properties::PaletteMaterial,
     },
 };
@@ -127,7 +123,6 @@ fn main() {
             ..default()
         }))
         .add_plugins(TarasaurPlugin)
-        .add_plugins(PalettePlugin::new())
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new())
         .init_resource::<TerrainReady>()
         .add_systems(
@@ -202,7 +197,6 @@ fn setup_terrain_palette(
         .saturating_mul(4)
         .saturating_mul(colors.len());
     let mut albedo_data = Vec::with_capacity(bytes);
-    let mut normal_data = Vec::with_capacity(bytes);
 
     for (seed, base_col) in (1u32..).zip(colors) {
         for y in 0..size {
@@ -214,9 +208,6 @@ fn setup_terrain_palette(
                     u8::try_from(v).unwrap_or(u8::MAX)
                 };
                 albedo_data.extend([tint(base_col[0]), tint(base_col[1]), tint(base_col[2]), 255]);
-
-                let n = u8_from_f32((noise - 0.5).mul_add(40.0, 128.0));
-                normal_data.extend([n, n, 255, 255]);
             }
         }
     }
@@ -235,19 +226,9 @@ fn setup_terrain_palette(
         RenderAssetUsages::default(),
     );
 
-    let normal_image = Image::new(
-        extent,
-        TextureDimension::D2,
-        normal_data,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::default(),
-    );
-
     let albedo_handle = images.add(albedo_image);
-    let normal_handle = images.add(normal_image);
 
     let palette = PaletteBuilder::new(albedo_handle)
-        .with_normal(normal_handle)
         .add_material(
             PaletteMaterial::new("grass")
                 .with_texture_scale(1.0)

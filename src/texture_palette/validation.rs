@@ -18,36 +18,21 @@ pub enum PaletteValidationError {
     #[error("Albedo texture has invalid format: expected sRGB format, got {found:?}")]
     InvalidAlbedoFormat { found: TextureFormat },
 
-    #[error("Normal texture has invalid format: expected linear format, got {found:?}")]
-    InvalidNormalFormat { found: TextureFormat },
-
     #[error("ARM texture has invalid format: expected linear format, got {found:?}")]
     InvalidArmFormat { found: TextureFormat },
 
-    #[error("Texture '{name}' is not a 2D array: dimension is {found:?}")]
-    NotTextureArray {
-        name: &'static str,
-        found: TextureDimension,
-    },
+    #[error("ARM texture must be a 2D array texture, got {found:?}")]
+    ArmNotArray { found: TextureDimension },
 
-    #[error(
-        "Texture layer count mismatch: albedo has {albedo} layers, {other_name} has {other} layers"
-    )]
-    LayerCountMismatch {
-        albedo: u32,
-        other_name: &'static str,
-        other: u32,
-    },
+    #[error("ARM texture has {arm} layers, albedo has {albedo}")]
+    ArmLayerCountMismatch { albedo: u32, arm: u32 },
 
-    #[error(
-        "Texture size mismatch: albedo is {albedo_width}x{albedo_height}, {other_name} is {other_width}x{other_height}"
-    )]
-    SizeMismatch {
+    #[error("ARM texture is {arm_width}x{arm_height}, albedo is {albedo_width}x{albedo_height}")]
+    ArmSizeMismatch {
         albedo_width: u32,
         albedo_height: u32,
-        other_name: &'static str,
-        other_width: u32,
-        other_height: u32,
+        arm_width: u32,
+        arm_height: u32,
     },
 
     #[error("Material count ({material_count}) exceeds texture layer count ({layer_count})")]
@@ -84,30 +69,6 @@ pub fn is_valid_srgb_format(format: TextureFormat) -> bool {
             | TextureFormat::Etc2Rgb8A1UnormSrgb
             | TextureFormat::Etc2Rgba8UnormSrgb
     ) || matches!(format, TextureFormat::Astc { channel, .. } if channel == bevy::render::render_resource::AstcChannel::UnormSrgb)
-}
-
-/// Check if a texture format is valid for linear data textures (normal, ARM).
-#[must_use]
-pub fn is_valid_linear_format(format: TextureFormat) -> bool {
-    matches!(
-        format,
-        // Uncompressed linear
-        TextureFormat::Rgba8Unorm
-            | TextureFormat::Bgra8Unorm
-            | TextureFormat::Rg8Unorm // 2-component normal maps
-            | TextureFormat::Rg16Unorm
-            // BC compressed linear (desktop)
-            | TextureFormat::Bc1RgbaUnorm
-            | TextureFormat::Bc3RgbaUnorm
-            | TextureFormat::Bc4RUnorm
-            | TextureFormat::Bc5RgUnorm // Normal maps
-            | TextureFormat::Bc7RgbaUnorm
-            // ETC2/EAC compressed linear (mobile/web)
-            | TextureFormat::Etc2Rgb8Unorm
-            | TextureFormat::Etc2Rgba8Unorm
-            | TextureFormat::EacR11Unorm
-            | TextureFormat::EacRg11Unorm // Normal maps
-    ) || matches!(format, TextureFormat::Astc { channel, .. } if channel == bevy::render::render_resource::AstcChannel::Unorm)
 }
 
 /// Validate an albedo texture.
@@ -153,61 +114,55 @@ pub fn validate_albedo(image: &Image) -> Result<(), PaletteValidationError> {
     Ok(())
 }
 
-/// Validate a linear texture (normal or ARM) against the albedo texture.
+/// Check if a texture format is valid for the linear ARM texture.
+#[must_use]
+pub fn is_valid_linear_format(format: TextureFormat) -> bool {
+    matches!(
+        format,
+        // Uncompressed linear
+        TextureFormat::Rgba8Unorm
+            | TextureFormat::Bgra8Unorm
+            // BC compressed linear (desktop)
+            | TextureFormat::Bc1RgbaUnorm
+            | TextureFormat::Bc3RgbaUnorm
+            | TextureFormat::Bc7RgbaUnorm
+            // ETC2 compressed linear (mobile/web)
+            | TextureFormat::Etc2Rgb8Unorm
+            | TextureFormat::Etc2Rgba8Unorm
+    ) || matches!(format, TextureFormat::Astc { channel, .. } if channel == bevy::render::render_resource::AstcChannel::Unorm)
+}
+
+/// Validate the ARM texture against the albedo texture.
 ///
 /// # Errors
 ///
-/// If the texture is not a linear 2D array matching the albedo's layer
+/// If the ARM texture is not a linear 2D array matching the albedo's layer
 /// count and size.
-pub fn validate_linear_texture(
-    image: &Image,
-    albedo: &Image,
-    name: &'static str,
-) -> Result<(), PaletteValidationError> {
-    // Check dimension
-    if image.texture_descriptor.dimension != TextureDimension::D2 {
-        return Err(PaletteValidationError::NotTextureArray {
-            name,
-            found: image.texture_descriptor.dimension,
+pub fn validate_arm(arm: &Image, albedo: &Image) -> Result<(), PaletteValidationError> {
+    let desc = &arm.texture_descriptor;
+    if desc.dimension != TextureDimension::D2 {
+        return Err(PaletteValidationError::ArmNotArray {
+            found: desc.dimension,
         });
     }
-
-    // Check format
-    if !is_valid_linear_format(image.texture_descriptor.format) {
-        if name == "normal" {
-            return Err(PaletteValidationError::InvalidNormalFormat {
-                found: image.texture_descriptor.format,
-            });
-        }
-        return Err(PaletteValidationError::InvalidArmFormat {
-            found: image.texture_descriptor.format,
+    if !is_valid_linear_format(desc.format) {
+        return Err(PaletteValidationError::InvalidArmFormat { found: desc.format });
+    }
+    let albedo_size = albedo.texture_descriptor.size;
+    if desc.size.depth_or_array_layers != albedo_size.depth_or_array_layers {
+        return Err(PaletteValidationError::ArmLayerCountMismatch {
+            albedo: albedo_size.depth_or_array_layers,
+            arm: desc.size.depth_or_array_layers,
         });
     }
-
-    // Check layer count matches albedo
-    let albedo_layers = albedo.texture_descriptor.size.depth_or_array_layers;
-    let layers = image.texture_descriptor.size.depth_or_array_layers;
-    if layers != albedo_layers {
-        return Err(PaletteValidationError::LayerCountMismatch {
-            albedo: albedo_layers,
-            other_name: name,
-            other: layers,
-        });
-    }
-
-    // Check size matches albedo
-    let albedo_size = &albedo.texture_descriptor.size;
-    let size = &image.texture_descriptor.size;
-    if size.width != albedo_size.width || size.height != albedo_size.height {
-        return Err(PaletteValidationError::SizeMismatch {
+    if desc.size.width != albedo_size.width || desc.size.height != albedo_size.height {
+        return Err(PaletteValidationError::ArmSizeMismatch {
             albedo_width: albedo_size.width,
             albedo_height: albedo_size.height,
-            other_name: name,
-            other_width: size.width,
-            other_height: size.height,
+            arm_width: desc.size.width,
+            arm_height: desc.size.height,
         });
     }
-
     Ok(())
 }
 
@@ -251,7 +206,7 @@ mod tests {
     #[test]
     fn test_linear_formats() {
         assert!(is_valid_linear_format(TextureFormat::Rgba8Unorm));
-        assert!(is_valid_linear_format(TextureFormat::Bc5RgUnorm));
+        assert!(is_valid_linear_format(TextureFormat::Bc7RgbaUnorm));
         assert!(!is_valid_linear_format(TextureFormat::Rgba8UnormSrgb)); // sRGB, not linear
     }
 }

@@ -165,11 +165,12 @@ pub fn setup_terrain_palette(
 ) {
     let size: u32 = 64;
 
-    let colors: [[u8; 3]; 4] = [
-        [34, 139, 34],   // Forest Green
-        [128, 128, 128], // Stone Gray
-        [112, 66, 20],   // Dirt Brown
-        [225, 198, 153], // Sand Beige
+    // Per layer: base color, and its ARM roughness (0-255).
+    let colors: [([u8; 3], u8); 4] = [
+        ([34, 139, 34], 215),   // Forest Green
+        ([128, 128, 128], 140), // Stone Gray, the smoothest
+        ([112, 66, 20], 225),   // Dirt Brown
+        ([225, 198, 153], 200), // Sand Beige
     ];
     let layers = u32::try_from(colors.len()).unwrap_or(u32::MAX);
 
@@ -179,9 +180,9 @@ pub fn setup_terrain_palette(
         .saturating_mul(4)
         .saturating_mul(colors.len());
     let mut albedo_data = Vec::with_capacity(bytes);
-    let mut normal_data = Vec::with_capacity(bytes);
+    let mut arm_data = Vec::with_capacity(bytes);
 
-    for (seed, base_col) in (1u32..).zip(colors) {
+    for (seed, (base_col, roughness)) in (1u32..).zip(colors) {
         for y in 0..size {
             for x in 0..size {
                 let noise = hash2(x.cast_signed(), y.cast_signed(), seed);
@@ -192,8 +193,10 @@ pub fn setup_terrain_palette(
                 };
                 albedo_data.extend([tint(base_col[0]), tint(base_col[1]), tint(base_col[2]), 255]);
 
-                let n = u8_from_f32((noise - 0.5).mul_add(40.0, 128.0));
-                normal_data.extend([n, n, 255, 255]);
+                // Darker texels read as crevices: occluded and rougher.
+                let ao = u8_from_f32(noise.mul_add(90.0, 165.0));
+                let rough = roughness.saturating_add(u8_from_f32((1.0 - noise) * 30.0));
+                arm_data.extend([ao, rough, 0, 255]);
             }
         }
     }
@@ -212,19 +215,19 @@ pub fn setup_terrain_palette(
         RenderAssetUsages::default(),
     );
 
-    let normal_image = Image::new(
+    let arm_image = Image::new(
         extent,
         TextureDimension::D2,
-        normal_data,
+        arm_data,
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::default(),
     );
 
     let albedo_handle = images.add(albedo_image);
-    let normal_handle = images.add(normal_image);
+    let arm_handle = images.add(arm_image);
 
     let palette = PaletteBuilder::new(albedo_handle)
-        .with_normal(normal_handle)
+        .with_arm(arm_handle)
         .add_material(
             PaletteMaterial::new("grass")
                 .with_texture_scale(1.0)

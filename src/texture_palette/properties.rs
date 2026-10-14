@@ -32,13 +32,13 @@ pub struct PaletteMaterial {
     /// Optional roughness override.
     ///
     /// If `Some`, this value overrides the roughness from the ARM texture.
-    /// If `None`, the ARM texture value is used.
+    /// If `None`, the ARM texture value is used, or 1.0 without one.
     pub roughness_override: Option<f32>,
 
     /// Optional metallic override.
     ///
     /// If `Some`, this value overrides the metallic from the ARM texture.
-    /// If `None`, the ARM texture value is used.
+    /// If `None`, the ARM texture value is used, or 0.0 without one.
     pub metallic_override: Option<f32>,
 }
 

@@ -9,10 +9,9 @@ use bevy::prelude::*;
 /// # Example
 ///
 /// ```ignore
-/// use bevy_painter::palette::{PaletteBuilder, PaletteMaterial};
+/// use tarasaur::texture_palette::{PaletteBuilder, PaletteMaterial};
 ///
 /// let palette = PaletteBuilder::new(asset_server.load("terrain/albedo.ktx2"))
-///     .with_normal(asset_server.load("terrain/normal.ktx2"))
 ///     .with_arm(asset_server.load("terrain/arm.ktx2"))
 ///     .add_material(PaletteMaterial::new("grass").with_texture_scale(1.0))
 ///     .add_material(PaletteMaterial::new("stone").with_texture_scale(0.5))
@@ -21,7 +20,6 @@ use bevy::prelude::*;
 /// ```
 pub struct PaletteBuilder {
     albedo: Handle<Image>,
-    normal: Option<Handle<Image>>,
     arm: Option<Handle<Image>>,
     materials: Vec<PaletteMaterial>,
     generate_mipmaps: bool,
@@ -34,25 +32,16 @@ impl PaletteBuilder {
     pub const fn new(albedo: Handle<Image>) -> Self {
         Self {
             albedo,
-            normal: None,
             arm: None,
             materials: Vec::new(),
             generate_mipmaps: false,
         }
     }
 
-    /// Set the normal map texture array.
-    ///
-    /// Optional. Enables triplanar normal mapping when provided.
-    #[must_use]
-    pub fn with_normal(mut self, normal: Handle<Image>) -> Self {
-        self.normal = Some(normal);
-        self
-    }
-
     /// Set the ARM (AO/Roughness/Metallic) texture array.
     ///
-    /// Optional. Channel layout: R = AO, G = Roughness, B = Metallic.
+    /// Optional. Channel layout: R = AO, G = perceptual roughness,
+    /// B = metallic. Must match the albedo's size and layer count.
     #[must_use]
     pub fn with_arm(mut self, arm: Handle<Image>) -> Self {
         self.arm = Some(arm);
@@ -95,7 +84,6 @@ impl PaletteBuilder {
     pub fn build(self) -> TexturePalette {
         TexturePalette {
             albedo: self.albedo,
-            normal: self.normal,
             arm: self.arm,
             materials: self.materials,
             generate_mipmaps: self.generate_mipmaps,
@@ -116,7 +104,6 @@ pub trait QuickPalette {
 
         TexturePalette {
             albedo,
-            normal: None,
             arm: None,
             materials,
             generate_mipmaps: false,
@@ -145,13 +132,11 @@ mod tests {
     #[test]
     fn test_builder_full() {
         let palette = PaletteBuilder::new(Handle::default())
-            .with_normal(Handle::default())
             .with_arm(Handle::default())
             .add_material(PaletteMaterial::new("grass").with_texture_scale(2.0))
             .with_generate_mipmaps(true)
             .build();
 
-        assert!(palette.has_normal_maps());
         assert!(palette.has_arm());
         assert!(palette.generate_mipmaps);
         assert_eq!(palette.materials[0].texture_scale, 2.0);

@@ -1,11 +1,22 @@
-// Import Bevy's built-in view uniform layout to ensure absolute memory layout alignment
-import bevy_render::view::View;
+// Draws the meshed chunks: triplanar palette texturing (albedo, plus ARM
+// under VOXEL_ARM) with material blending, per-pixel discard against the
+// chunk's visibility mask, and Bevy's PBR lighting.
+//
+// Groups 0 and 1 are Bevy's mesh view bind groups (view, lights, shadows,
+// fog, light probes), bound by voxel_raster_pass; 2 is the palette, 3 the
+// per-arena chunk data.
 
-@group(0) @binding(0) var<uniform> view: View;
+import bevy_pbr::render::{
+    mesh_view_bindings::view,
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT},
+    pbr_functions::{apply_pbr_lighting, calculate_view, main_pass_post_lighting_processing},
+};
 
-@group(1) @binding(0) var texture_array: texture_2d_array<f32>;
-@group(1) @binding(1) var texture_sampler: sampler;
-@group(2) @binding(4) var<storage, read> material_buffer: array<u32>;
+@group(2) @binding(0) var texture_array: texture_2d_array<f32>;
+@group(2) @binding(1) var texture_sampler: sampler;
+@if(VOXEL_ARM) @group(2) @binding(3) var arm_array: texture_2d_array<f32>;
+@group(3) @binding(4) var<storage, read> material_buffer: array<u32>;
 
 fn sample_material_id(slot: u32, coord: vec3<i32>) -> u32 {
     let ts = vis_uniforms.texture_size;
@@ -85,12 +96,12 @@ struct MaterialProperties {
     metallic_override: f32,
 }
 
-@group(1) @binding(2) var<storage, read> material_properties: array<MaterialProperties>;
+@group(2) @binding(2) var<storage, read> material_properties: array<MaterialProperties>;
 
-// --- Group 2: per-arena visibility data, fragment-stage only. ---
+// --- Group 3: per-arena visibility data, fragment-stage only. ---
 struct ChunkMeta {
     chunk_world_origin: vec3<f32>,
-    active_list_pos: u32,
+    lod_ranks: u32,
 }
 
 struct VisBatchUniforms {
@@ -100,10 +111,10 @@ struct VisBatchUniforms {
     voxel_size: f32,
 }
 
-@group(2) @binding(0) var<storage, read> chunk_meta: array<ChunkMeta>;
-@group(2) @binding(1) var<storage, read> visibility_mask_buffer: array<u32>;
-@group(2) @binding(2) var<storage, read> chunk_has_mask_buffer: array<u32>;
-@group(2) @binding(3) var<uniform> vis_uniforms: VisBatchUniforms;
+@group(3) @binding(0) var<storage, read> chunk_meta: array<ChunkMeta>;
+@group(3) @binding(1) var<storage, read> visibility_mask_buffer: array<u32>;
+@group(3) @binding(2) var<storage, read> chunk_has_mask_buffer: array<u32>;
+@group(3) @binding(3) var<uniform> vis_uniforms: VisBatchUniforms;
 
 struct VertexInput {
     @location(0) position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
@@ -111,7 +122,9 @@ struct VertexInput {
 };
 
 struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
+    // Invariant: the depth prepass and the shading pass must compute the
+    // exact same depth, or shading would fail its depth test.
+    @builtin(position) @invariant clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) @interpolate(flat) material_id_a: u32,
@@ -203,38 +216,72 @@ fn fragment_is_visible(slot: u32, world_pos: vec3<f32>) -> bool {
     let rounded = clamp(round(local), vec3<f32>(0.0), vec3<f32>(max_coord));
     return sample_visibility(slot, vec3<u32>(rounded));
 }
-// Weights below this are dropped (and the rest renormalized). Your
+// Weights below this are dropped (and the rest renormalized).
 // triplanar_weights already returns exact 0 for non-dominant axes outside the
 // blend band, so most pixels end up with a single projection.
 const MIN_PROJ_WEIGHT: f32 = 0.01;
 
-fn sample_triplanar(
-    layer: i32,
+// Without an ARM texture: unoccluded, fully rough, not metallic.
+const DEFAULT_ARM: vec3<f32> = vec3<f32>(1.0, 1.0, 0.0);
+
+// One material's surface at this pixel. arm = (AO, perceptual roughness,
+// metallic), with the material's overrides already applied.
+struct Surface {
+    albedo: vec4<f32>,
+    arm: vec3<f32>,
+}
+
+// One projection's sample: albedo, plus ARM under VOXEL_ARM. The ARM fetch
+// reuses the albedo's coordinates and gradients.
+fn sample_projection(layer: i32, uv: vec2<f32>, ddx_uv: vec2<f32>, ddy_uv: vec2<f32>) -> Surface {
+    var s = Surface(
+        textureSampleGrad(texture_array, texture_sampler, uv, layer, ddx_uv, ddy_uv),
+        DEFAULT_ARM,
+    );
+    @if(VOXEL_ARM)
+    s.arm = textureSampleGrad(arm_array, texture_sampler, uv, layer, ddx_uv, ddy_uv).rgb;
+    return s;
+}
+
+fn sample_material(
+    id: u32,
     p: vec3<f32>,
     ddx_p: vec3<f32>,
     ddy_p: vec3<f32>,
-    inv_scale: f32,
     N: vec3<f32>,
-    sharpness: f32,
-) -> vec4<f32> {
-    var w = triplanar_weights(N, sharpness);
+) -> Surface {
+    let mat = material_properties[id];
+    let layer = i32(id);
+    let inv_scale = 1.0 / max(mat.texture_scale, 0.0001);
+
+    var w = triplanar_weights(N, mat.blend_sharpness);
     w = select(vec3<f32>(0.0), w, w > vec3<f32>(MIN_PROJ_WEIGHT));
     w = w / (w.x + w.y + w.z); // dominant axis is always kept, so the sum is > 0
 
-    var c = vec4<f32>(0.0);
+    let q = p * inv_scale;
+    let dx = ddx_p * inv_scale;
+    let dy = ddy_p * inv_scale;
+    var s = Surface(vec4<f32>(0.0), vec3<f32>(0.0));
     if (w.x > 0.0) {
-        c += w.x * textureSampleGrad(texture_array, texture_sampler,
-            p.yz * inv_scale, layer, ddx_p.yz * inv_scale, ddy_p.yz * inv_scale);
+        let x = sample_projection(layer, q.yz, dx.yz, dy.yz);
+        s.albedo += w.x * x.albedo;
+        s.arm += w.x * x.arm;
     }
     if (w.y > 0.0) {
-        c += w.y * textureSampleGrad(texture_array, texture_sampler,
-            p.xz * inv_scale, layer, ddx_p.xz * inv_scale, ddy_p.xz * inv_scale);
+        let y = sample_projection(layer, q.xz, dx.xz, dy.xz);
+        s.albedo += w.y * y.albedo;
+        s.arm += w.y * y.arm;
     }
     if (w.z > 0.0) {
-        c += w.z * textureSampleGrad(texture_array, texture_sampler,
-            p.xy * inv_scale, layer, ddx_p.xy * inv_scale, ddy_p.xy * inv_scale);
+        let z = sample_projection(layer, q.xy, dx.xy, dy.xy);
+        s.albedo += w.z * z.albedo;
+        s.arm += w.z * z.arm;
     }
-    return c;
+
+    // A negative override means "use the texture".
+    s.arm.y = select(s.arm.y, mat.roughness_override, mat.roughness_override >= 0.0);
+    s.arm.z = select(s.arm.z, mat.metallic_override, mat.metallic_override >= 0.0);
+    return s;
 }
 
 @fragment
@@ -257,35 +304,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let need_a = same || t > 0.001;
     let need_b = !same && t < 0.999;
 
-    var color = vec4<f32>(0.0);
-    var color_a = vec4<f32>(0.0);
-    var color_b = vec4<f32>(0.0);
-
-    if (need_a) {
-        let mat_a = material_properties[blend.id_a];
-        color_a = sample_triplanar(
-            i32(blend.id_a), in.world_position, ddx_p, ddy_p,
-            1.0 / max(mat_a.texture_scale, 0.0001), N, mat_a.blend_sharpness);
-    }
-    if (need_b) {
-        let mat_b = material_properties[blend.id_b];
-        color_b = sample_triplanar(
-            i32(blend.id_b), in.world_position, ddx_p, ddy_p,
-            1.0 / max(mat_b.texture_scale, 0.0001), N, mat_b.blend_sharpness);
-    }
-
+    var surface: Surface;
     if (need_a && need_b) {
-        color = mix(color_b, color_a, t);
+        let a = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N);
+        let b = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N);
+        surface = Surface(mix(b.albedo, a.albedo, t), mix(b.arm, a.arm, t));
     } else if (need_a) {
-        color = color_a;
+        surface = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N);
     } else {
-        color = color_b;
+        surface = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N);
     }
 
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.2));
-    let diffuse = max(dot(N, light_dir), 0.0);
-    let ambient = 0.2;
-    let lighting = diffuse + ambient;
+    var pbr = pbr_input_new();
+    pbr.material.base_color = vec4<f32>(surface.albedo.rgb, 1.0);
+    pbr.material.perceptual_roughness = surface.arm.y;
+    pbr.material.metallic = surface.arm.z;
+    pbr.material.flags |= STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    pbr.diffuse_occlusion = vec3<f32>(surface.arm.x);
+    pbr.frag_coord = in.clip_position;
+    pbr.world_position = vec4<f32>(in.world_position, 1.0);
+    pbr.world_normal = N;
+    pbr.N = N;
+    pbr.is_orthographic = view.clip_from_view[3].w == 1.0;
+    pbr.V = calculate_view(pbr.world_position, pbr.is_orthographic);
+    pbr.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
-    return vec4<f32>(color.rgb * lighting, 1.0);
+    let lit = apply_pbr_lighting(pbr);
+    return main_pass_post_lighting_processing(pbr, lit);
+}
+
+// Depth prepass: depth only (no color writes), but hidden voxels must not
+// write depth either, or they'd occlude what's behind them.
+@fragment
+fn fs_prepass(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (!fragment_is_visible(in.real_slot, in.world_position)) {
+        discard;
+    }
+    return vec4<f32>(0.0);
 }

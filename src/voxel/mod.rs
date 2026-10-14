@@ -15,11 +15,11 @@ use bevy::{
     asset::{load_internal_asset, uuid_handle},
     core_pipeline::{Core3d, Core3dSystems},
     prelude::*,
-    render::{Render, RenderApp, RenderSystems},
+    render::{Render, RenderApp, RenderSystems, extract_resource::ExtractResourcePlugin},
 };
 
 use extract::{LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks};
-use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
+use pipeline::{VoxelComputePipeline, VoxelDepthPrepass, VoxelPipelineLayouts};
 
 use crate::{
     SDF, VisibilityField,
@@ -120,7 +120,9 @@ impl Plugin for VoxelRenderPlugin {
             (clear_pending_voxel_queries, drain_voxel_query_results),
         );
 
-        app.init_resource::<ForceResident>()
+        app.init_resource::<VoxelDepthPrepass>()
+            .add_plugins(ExtractResourcePlugin::<VoxelDepthPrepass>::default())
+            .init_resource::<ForceResident>()
             .add_systems(First, tick_force_resident)
             .add_systems(Update, lease_chunks_near_camera)
             .init_resource::<LiveOutbox>()
@@ -163,7 +165,9 @@ impl Plugin for VoxelRenderPlugin {
                         .chain()
                         .in_set(VoxelPrepareSet::Upload),
                     update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
-                    queue_voxel_raster_pipelines.in_set(RenderSystems::Prepare),
+                    queue_voxel_raster_pipelines
+                        .in_set(RenderSystems::Prepare)
+                        .after(update_voxel_material_bind_group),
                     prepare_voxel_view_draws
                         .in_set(RenderSystems::Prepare)
                         .after(VoxelPrepareSet::Upload),

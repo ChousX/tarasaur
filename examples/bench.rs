@@ -4,7 +4,7 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N]
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! ```
 //!
@@ -53,6 +53,7 @@ use tarasaur::{
     persistence::AutosaveIntervalSecs,
     voxel::{
         cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
+        pipeline::VoxelDepthPrepass,
         stats,
     },
 };
@@ -182,6 +183,8 @@ struct Bench {
 struct Output {
     dir: PathBuf,
     label: String,
+    /// `--depth-prepass`: draw voxel depth before shading.
+    depth_prepass: bool,
 }
 
 #[derive(Component)]
@@ -206,6 +209,7 @@ fn main() {
     let out = Output {
         dir: flag("--out").map_or_else(|| manifest.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
+        depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
     };
     let out = Output {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
@@ -252,6 +256,7 @@ fn main() {
         return;
     };
     app.insert_resource(BenchMsaa(msaa));
+    app.insert_resource(VoxelDepthPrepass(out.depth_prepass));
     if let Some(n) = flag("--max-loads").and_then(|n| n.parse().ok()) {
         app.insert_resource(MaxInFlightLoads(n));
     }
@@ -547,13 +552,14 @@ fn write_results(bench: &Bench, adapter: &str) {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map_or_else(|| "unknown".into(), |s| s.trim().to_string());
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
         } else {
             "release"
-        }
+        },
+        bench.out.depth_prepass,
     );
 
     let mut frames = header.clone();

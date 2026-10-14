@@ -9,27 +9,26 @@ use super::validation::{self, PaletteValidationError};
 
 /// A texture palette containing all materials for triplanar voxel rendering.
 ///
-/// A palette consists of texture arrays (albedo, optionally normal and ARM)
-/// where each layer corresponds to a material that can be applied to vertices.
+/// A palette is an albedo texture array, plus an optional ARM array, where
+/// each layer corresponds to a material that can be applied to vertices.
 ///
 /// # Texture Requirements
 ///
-/// All textures must be:
-/// - 2D array textures (KTX2 format recommended)
-/// - Same layer count across all texture types
-/// - Same resolution per layer
-/// - Square and power-of-two dimensions
-/// - Albedo: sRGB format (e.g., `Rgba8UnormSrgb`, `Bc7RgbaUnormSrgb`)
-/// - Normal/ARM: Linear format (e.g., `Rgba8Unorm`, `Bc5RgUnorm`)
+/// The albedo texture must be:
+/// - A 2D array texture (KTX2 format recommended)
+/// - Square and power-of-two per layer
+/// - sRGB format (e.g., `Rgba8UnormSrgb`, `Bc7RgbaUnormSrgb`)
+///
+/// The optional ARM texture must match the albedo's size and layer count,
+/// in a linear format (e.g., `Rgba8Unorm`, `Bc7RgbaUnorm`).
 ///
 /// # Example
 ///
 /// ```ignore
-/// use bevy_painter::palette::{TexturePalette, PaletteMaterial};
+/// use tarasaur::texture_palette::{TexturePalette, PaletteMaterial};
 ///
 /// let palette = TexturePalette {
 ///     albedo: asset_server.load("terrain/albedo.ktx2"),
-///     normal: Some(asset_server.load("terrain/normal.ktx2")),
 ///     arm: Some(asset_server.load("terrain/arm.ktx2")),
 ///     materials: vec![
 ///         PaletteMaterial::new("grass").with_texture_scale(1.0),
@@ -46,22 +45,18 @@ pub struct TexturePalette {
     /// **Required.** Must be sRGB format.
     pub albedo: Handle<Image>,
 
-    /// Normal map texture array.
-    ///
-    /// Optional. Must be linear format.
-    /// If provided, enables triplanar normal mapping.
-    pub normal: Option<Handle<Image>>,
-
     /// ARM (Ambient Occlusion, Roughness, Metallic) texture array.
     ///
-    /// Optional. Must be linear format.
-    /// Channel layout: R = AO, G = Roughness, B = Metallic
+    /// Optional. Must be linear format, with the albedo's size and layer
+    /// count. Channel layout: R = AO, G = perceptual roughness, B = metallic.
+    /// Without it, every material is fully unoccluded, fully rough and
+    /// non-metallic unless its overrides say otherwise.
     pub arm: Option<Handle<Image>>,
 
     /// Per-layer material properties.
     ///
-    /// The length of this vector should match the layer count of the textures.
-    /// Each material corresponds to one layer in the texture arrays.
+    /// The length of this vector should match the albedo layer count.
+    /// Each material corresponds to one layer of the albedo array.
     pub materials: Vec<PaletteMaterial>,
 
     /// Whether to generate mipmaps for textures that don't have them.
@@ -78,13 +73,7 @@ impl TexturePalette {
         self.materials.len()
     }
 
-    /// Check if this palette has normal maps.
-    #[must_use]
-    pub const fn has_normal_maps(&self) -> bool {
-        self.normal.is_some()
-    }
-
-    /// Check if this palette has ARM textures.
+    /// Check if this palette has an ARM texture.
     #[must_use]
     pub const fn has_arm(&self) -> bool {
         self.arm.is_some()
@@ -93,8 +82,8 @@ impl TexturePalette {
     /// Validate the palette against loaded image assets.
     ///
     /// This checks that:
-    /// - All textures are loaded and have correct formats
-    /// - All textures have matching layer counts and dimensions
+    /// - The albedo texture is loaded and has a valid format
+    /// - The ARM texture, once loaded, is linear and matches the albedo
     /// - Material count doesn't exceed layer count
     ///
     /// # Errors
@@ -112,19 +101,9 @@ impl TexturePalette {
 
         let layer_count = albedo_image.texture_descriptor.size.depth_or_array_layers;
 
-        // Validate normal (optional)
-        if let Some(ref normal_handle) = self.normal
-            && let Some(normal_image) = images.get(normal_handle)
-        {
-            validation::validate_linear_texture(normal_image, albedo_image, "normal")?;
-        }
-        // If not loaded yet, skip validation (will be caught on next frame)
-
-        // Validate ARM (optional)
-        if let Some(ref arm_handle) = self.arm
-            && let Some(arm_image) = images.get(arm_handle)
-        {
-            validation::validate_linear_texture(arm_image, albedo_image, "arm")?;
+        // Validate ARM (optional). If not loaded yet, it's checked next time.
+        if let Some(arm_image) = self.arm.as_ref().and_then(|h| images.get(h)) {
+            validation::validate_arm(arm_image, albedo_image)?;
         }
 
         // Validate material count
@@ -152,7 +131,6 @@ mod tests {
     fn test_default_palette() {
         let palette = TexturePalette::default();
         assert_eq!(palette.material_count(), 0);
-        assert!(!palette.has_normal_maps());
         assert!(!palette.has_arm());
     }
 }
