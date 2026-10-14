@@ -18,7 +18,7 @@ use crate::voxel::{
     extract::add_field_extraction,
     systems::{prepare_material_for_arena, prepare_voxel_arena},
 };
-use crate::{FieldLOD, FieldNew, LOD};
+use crate::{FieldLOD, FieldNew, LOD, TargetLOD};
 
 use super::{
     Field,
@@ -139,17 +139,29 @@ impl AppFieldExt for App {
     }
 }
 
-/// Gives a newly spawned chunk a default `F` at its LOD, unless it already has one.
+/// Gives a newly spawned chunk a default `F` at its LOD, unless it already
+/// has one.
+///
+/// Chunks spawned with a `TargetLOD` and no `LOD` (the `ChunkLoader`'s) are
+/// skipped: their load installs every field, so a default would only be
+/// built to be thrown away. Until then readers treat them as unloaded.
+/// Chunks spawned by hand, with an `LOD`, still get defaults to fill in.
 fn build_field_on_chunk_spawn<F: Component + FieldNew>(
     trigger: On<NewChunkSpawned>,
     mut commands: Commands,
-    lod_q: Query<&LOD>,
+    chunks: Query<(Option<&LOD>, Has<TargetLOD>)>,
     has_field: Query<(), With<F>>,
 ) {
     let entity = trigger.event().entity;
     if has_field.contains(entity) {
         return;
     }
-    let lod = lod_q.get(entity).copied().unwrap_or_default();
+    let Ok((lod, awaiting_load)) = chunks.get(entity) else {
+        return;
+    };
+    if lod.is_none() && awaiting_load {
+        return;
+    }
+    let lod = lod.copied().unwrap_or_default();
     commands.entity(entity).insert(F::new_for_lod(lod));
 }
