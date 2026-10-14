@@ -1,15 +1,53 @@
+use std::any::type_name;
+
 use bevy::{
     asset::RenderAssetUsages,
     input::mouse::MouseMotion,
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    render::{
+        RenderPlugin,
+        render_resource::{Extent3d, TextureDimension, TextureFormat},
+        settings::{RenderCreation, WgpuFeatures, WgpuLimits, WgpuSettings},
+    },
 };
 use tarasaur::{
-    VoxelMaterial,
+    LOD, MaterialField, VoxelMaterial,
+    chunk::CHUNK_SIZE,
+    field::generator::ChunkGeneratorRegistry,
     num::{f32_from_u32, i16_from_f32, u8_from_f32, usize_from},
     ops::{AccumulateExt, BlendExt},
     texture_palette::{PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette},
 };
+
+/// Renderer settings shared by the examples (and the benchmark, so it
+/// measures what the sandbox runs).
+pub fn render_plugin() -> RenderPlugin {
+    RenderPlugin {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+            features: WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT,
+            limits: WgpuLimits {
+                max_buffer_size: 1024 * 1024 * 1024,
+                max_storage_buffer_binding_size: 512 * 1024 * 1024,
+                ..default()
+            },
+            ..default()
+        })),
+        ..default()
+    }
+}
+
+/// Registers the heightfield terrain's SDF and material generators.
+pub fn register_terrain(app: &mut App) {
+    let mut g = app.world_mut().resource_mut::<ChunkGeneratorRegistry>();
+    g.register_sdf_distance(terrain_sdf);
+    // The key must equal the type_name the persistence registry uses for
+    // this field (register_field::<F> uses std::any::type_name::<F>()).
+    g.register::<u8>(
+        type_name::<MaterialField<TerrainMaterial>>(),
+        terrain_materials,
+    );
+    // No VisibilityField generator: a chunk without one is fully visible.
+}
 
 #[derive(Component)]
 pub struct FlyCam {
@@ -235,4 +273,80 @@ pub fn hash2(x: i32, z: i32, seed: u32) -> f32 {
     h = h.wrapping_mul(3_266_489_917);
     h ^= h >> 16;
     f32_from_u32(h) / f32_from_u32(u32::MAX)
+}
+
+// ---------------------------------------------------------------------------
+// Generators (run off-thread, pure functions of chunk_pos + lod)
+// ---------------------------------------------------------------------------
+
+/// The heightfield only depends on (x, z), so evaluate it once per column
+/// instead of once per voxel. Both the SDF and material generators share it.
+/// Voxel `i` samples `origin + i * voxel`, so the same chunk generated at any
+/// LOD describes the same surface.
+struct Columns {
+    size: u32,
+    voxel: f32,
+    origin: Vec3,
+    height: Vec<f32>,
+    /// 1/sqrt(1+|∇h|²): rescales (y - h) into an approximate true distance,
+    /// so brush edits that min/max against the SDF blend sensibly on slopes.
+    inv_norm: Vec<f32>,
+}
+
+impl Columns {
+    fn new(chunk_pos: IVec3, lod: LOD) -> Self {
+        let size = lod.size();
+        let voxel = CHUNK_SIZE / f32_from_u32(size);
+        let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
+        let columns = usize_from(size).pow(2);
+        let (mut height, mut inv_norm) = (Vec::with_capacity(columns), Vec::with_capacity(columns));
+        let e = 0.5;
+        for z in 0..size {
+            for x in 0..size {
+                let wx = f32_from_u32(x).mul_add(voxel, origin.x);
+                let wz = f32_from_u32(z).mul_add(voxel, origin.z);
+                let gx = (terrain_height(wx + e, wz) - terrain_height(wx - e, wz)) / (2.0 * e);
+                let gz = (terrain_height(wx, wz + e) - terrain_height(wx, wz - e)) / (2.0 * e);
+                height.push(terrain_height(wx, wz));
+                inv_norm.push(1.0 / gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt());
+            }
+        }
+        Self {
+            size,
+            voxel,
+            origin,
+            height,
+            inv_norm,
+        }
+    }
+
+    /// x-fastest, then y, then z ordering (matches the `lod_streaming` example
+    /// and what the fields expect).
+    fn fill<T>(&self, f: impl Fn(f32, f32, f32) -> T) -> Vec<T> {
+        let n = usize_from(self.size);
+        let mut out = Vec::with_capacity(n.pow(3));
+        // Columns are stored z-major: one row of x per z.
+        let rows = self
+            .height
+            .chunks_exact(n)
+            .zip(self.inv_norm.chunks_exact(n));
+        for (heights, norms) in rows {
+            for y in 0..self.size {
+                let wy = f32_from_u32(y).mul_add(self.voxel, self.origin.y);
+                for (&h, &k) in heights.iter().zip(norms) {
+                    out.push(f(wy, h, k));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Sign volume; `register_sdf` turns it into real distances with a jump flood.
+pub fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
+    Columns::new(pos, lod).fill(|y, h, k| (y - h) * k)
+}
+
+pub fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<u8> {
+    Columns::new(pos, lod).fill(|y, h, _| determine_material(h, y).to_id())
 }

@@ -14,8 +14,9 @@ use crate::systems::{
     clear_dirty_visibility, detect_topology_desync, process_sdf_csg_spheres,
     process_sdf_sphere_stamps, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
-use crate::voxel::systems::{
-    extract_voxel_chunks, prepare_material_for_arena, prepare_voxel_arena,
+use crate::voxel::{
+    extract::extract_voxel_chunks,
+    systems::{prepare_material_for_arena, prepare_voxel_arena},
 };
 use crate::{FieldLOD, FieldNew, LOD};
 

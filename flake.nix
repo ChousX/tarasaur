@@ -31,6 +31,9 @@
                                                 overlays = [ (import rust-overlay) ];
                                         };
 
+                                        # Must match the Tracy protocol Bevy's `trace_tracy` uses.
+                                        tracy = pkgs.callPackage ./nix/tracy.nix { };
+
                                         rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
                                                 extensions = [
                                                         "rust-src"
@@ -65,6 +68,7 @@
                                                         rustToolchain
                                                         pkgs.bacon
                                                         pkgs.renderdoc
+                                                        tracy
                                                 ];
                                                 LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
                                         };

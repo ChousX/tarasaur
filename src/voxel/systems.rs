@@ -6,14 +6,15 @@ use crate::num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from};
 
 use bevy::{
     diagnostic::FrameCount,
-    ecs::{entity::EntityHashMap, system::SystemParam},
+    ecs::system::SystemParam,
     prelude::*,
     render::{
         Extract,
         camera::ExtractedCamera,
+        diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
         render_resource::{
-            BindGroupEntry, CommandEncoderDescriptor, IndexFormat, MapMode, PipelineCache,
-            RenderPassDescriptor, StoreOp,
+            BindGroupEntry, CommandEncoder, CommandEncoderDescriptor, ComputePipeline, IndexFormat,
+            MapMode, PipelineCache, RenderPassDescriptor, StoreOp,
         },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         sync_world::MainEntity,
@@ -23,12 +24,12 @@ use bevy::{
 };
 
 use crate::{
-    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, ExtractGate, LOD, MaterialField, SDF,
-    Versionable, VisibilityField, VoxelMaterial,
+    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, SDF,
+    VisibilityField, VoxelMaterial,
     voxel::{
         arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
         pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
-        resident::ForceResident,
+        stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
     },
 };
@@ -444,6 +445,7 @@ pub fn dispatch_voxel_compute_passes_batched(
     pipeline: Res<VoxelComputePipeline>,
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     telemetry: Res<GuardTelemetry>,
+    diagnostics: MeshDiagnostics,
 ) {
     if !arena_set.iter().any(|a| !a.dirty_slots.is_empty()) {
         return;
@@ -478,59 +480,42 @@ pub fn dispatch_voxel_compute_passes_batched(
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_compute_encoder_batched"),
     });
-    for arena in arena_set.iter_mut() {
-        if arena.dirty_slots.is_empty() {
-            continue;
-        }
+    let mut dirty: Vec<&mut VoxelChunkArena> = arena_set
+        .iter_mut()
+        .filter(|a| !a.dirty_slots.is_empty())
+        .collect();
+    let (mut meshed_chunks, mut meshed_cells) = (0u32, 0u64);
+    for arena in &mut dirty {
         arena.dirty_slots.sort_unstable();
         arena.dirty_slots.dedup();
-        let n = u32::try_from(arena.dirty_slots.len()).unwrap_or(u32::MAX);
         render_queue.write_buffer(
             &arena.active_slot_map_buffer,
             0,
             bytemuck::cast_slice(&arena.dirty_slots),
         );
-
-        let wg1 = arena.cell_count.div_ceil(4);
-        dispatch(
-            &mut encoder,
-            "surface_nets_pass1_batched",
+        let n = dirty_count(arena);
+        meshed_chunks = meshed_chunks.saturating_add(n);
+        meshed_cells =
+            meshed_cells.saturating_add(u64::from(arena.total_cells).saturating_mul(u64::from(n)));
+    }
+    if let Some(mut stats) = diagnostics.stats {
+        stats.meshed_chunks = meshed_chunks;
+        stats.meshed_cells = meshed_cells;
+    }
+    encode_mesh_passes(
+        &mut encoder,
+        diagnostics.recorder.as_deref(),
+        [
             pass1_pipeline,
-            &arena.pass1_bind_group,
-            (wg1, wg1, wg1.saturating_mul(n)),
-        );
-        // Scan/resolve: x = block within a chunk, y = chunk. Keeps x under
-        // the 65535-workgroup limit however many chunks are dispatched.
-        let wg_scan = arena.blocks_per_chunk;
-        dispatch(
-            &mut encoder,
-            "stream_compaction_scan_batched",
             stream_compaction_pipeline,
-            &arena.compaction_bind_group,
-            (wg_scan, n, 1),
-        );
-        dispatch(
-            &mut encoder,
-            "stream_compaction_scan_block_sums_batched",
             scan_block_sums_pipeline,
-            &arena.compaction_bind_group,
-            (n, 1, 1),
-        );
-        dispatch(
-            &mut encoder,
-            "stream_compaction_resolve_batched",
             stream_compaction_resolve_pipeline,
-            &arena.compaction_bind_group,
-            (wg_scan, n, 1),
-        );
-        let wg3 = arena.cell_count.div_ceil(8);
-        dispatch(
-            &mut encoder,
-            "surface_nets_pass3_batched",
             pass3_pipeline,
-            &arena.pass3_bind_group,
-            (wg3, wg3, wg3.saturating_mul(n)),
-        );
+        ],
+        &dirty,
+    );
+
+    for arena in dirty {
         if telemetry.0 && arena.guard_state.load(Ordering::Acquire) == GUARD_FREE {
             encoder.copy_buffer_to_buffer(
                 &arena.guard_debug_buffer,
@@ -545,6 +530,100 @@ pub fn dispatch_voxel_compute_passes_batched(
         arena.dirty_slots.clear();
     }
     render_queue.submit(std::iter::once(encoder.finish()));
+}
+
+fn dirty_count(arena: &VoxelChunkArena) -> u32 {
+    u32::try_from(arena.dirty_slots.len()).unwrap_or(u32::MAX)
+}
+
+/// Optional instrumentation for the meshing dispatch.
+#[derive(SystemParam)]
+pub struct MeshDiagnostics<'w> {
+    recorder: Option<Res<'w, DiagnosticsRecorder>>,
+    stats: Option<ResMut<'w, VoxelFrameStats>>,
+}
+
+/// Records the meshing passes for every dirty arena. `pipelines` is pass1,
+/// scan, `scan_block_sums`, resolve, pass3.
+///
+/// Stage-major (every arena's pass1, then every arena's scan, ...) so each
+/// stage is one timing span. Arenas share no buffers, so the order between
+/// them doesn't matter.
+fn encode_mesh_passes(
+    encoder: &mut CommandEncoder,
+    recorder: Option<&DiagnosticsRecorder>,
+    pipelines: [&ComputePipeline; 5],
+    dirty: &[&mut VoxelChunkArena],
+) {
+    let [pass1, scan, scan_block_sums, resolve, pass3] = pipelines;
+    let mesh_span = recorder.time_span(encoder, "voxel_mesh");
+    timed(recorder, encoder, "pass1", |enc| {
+        for arena in dirty {
+            let wg1 = arena.cell_count.div_ceil(4);
+            dispatch(
+                enc,
+                "surface_nets_pass1_batched",
+                pass1,
+                &arena.pass1_bind_group,
+                (wg1, wg1, wg1.saturating_mul(dirty_count(arena))),
+            );
+        }
+    });
+    // Scan/resolve: x = block within a chunk, y = chunk. Keeps x under
+    // the 65535-workgroup limit however many chunks are dispatched.
+    timed(recorder, encoder, "scan", |enc| {
+        for arena in dirty {
+            let n = dirty_count(arena);
+            let wg_scan = arena.blocks_per_chunk;
+            dispatch(
+                enc,
+                "stream_compaction_scan_batched",
+                scan,
+                &arena.compaction_bind_group,
+                (wg_scan, n, 1),
+            );
+            dispatch(
+                enc,
+                "stream_compaction_scan_block_sums_batched",
+                scan_block_sums,
+                &arena.compaction_bind_group,
+                (n, 1, 1),
+            );
+            dispatch(
+                enc,
+                "stream_compaction_resolve_batched",
+                resolve,
+                &arena.compaction_bind_group,
+                (wg_scan, n, 1),
+            );
+        }
+    });
+    timed(recorder, encoder, "pass3", |enc| {
+        for arena in dirty {
+            let wg3 = arena.cell_count.div_ceil(8);
+            dispatch(
+                enc,
+                "surface_nets_pass3_batched",
+                pass3,
+                &arena.pass3_bind_group,
+                (wg3, wg3, wg3.saturating_mul(dirty_count(arena))),
+            );
+        }
+    });
+    mesh_span.end(encoder);
+}
+
+/// Runs `f` inside a CPU/GPU timing span. A no-op span without
+/// `RenderDiagnosticsPlugin`.
+fn timed(
+    recorder: Option<&DiagnosticsRecorder>,
+    encoder: &mut CommandEncoder,
+    name: &'static str,
+    f: impl FnOnce(&mut CommandEncoder),
+) {
+    let span = recorder.time_span(encoder, name);
+    f(encoder);
+    span.end(encoder);
 }
 
 pub fn voxel_raster_pass(
@@ -593,6 +672,7 @@ pub fn voxel_raster_pass(
         }],
     );
     let material_bind_group = &voxel_material.0;
+    let diagnostics = ctx.diagnostic_recorder();
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),
@@ -603,6 +683,8 @@ pub fn voxel_raster_pass(
         multiview_mask: None,
     });
 
+    let recorder = diagnostics.as_deref();
+    let span = recorder.pass_span(&mut render_pass, "voxel_raster");
     render_pass.set_render_pipeline(pipeline);
     render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
     render_pass.set_bind_group(1, material_bind_group, &[]);
@@ -624,6 +706,7 @@ pub fn voxel_raster_pass(
             );
         }
     }
+    span.end(&mut render_pass);
 }
 
 /// Byte stride of one slot's entry in `indirect_args_buffer`.
@@ -677,112 +760,6 @@ pub fn extract_visibility_removed(
             _type: PhantomData,
         });
     }
-}
-
-/// Which chunks `extract_voxel_chunks` skips: no surface, or fully hidden
-/// (unless forced resident).
-#[derive(SystemParam)]
-pub struct ExtractFilter<'w, 's> {
-    surface: Extract<'w, 's, Query<'static, 'static, (), With<crate::field::surface::HasSurface>>>,
-    visibility: Extract<'w, 's, Query<'static, 'static, Option<&'static VisibilityField>>>,
-    forced: Extract<'w, 's, Res<'static, ForceResident>>,
-}
-
-impl ExtractFilter<'_, '_> {
-    fn skips(&self, entity: Entity, pos: IVec3) -> bool {
-        let hidden = self
-            .visibility
-            .get(entity)
-            .is_ok_and(|v| v.is_some_and(VisibilityField::is_all_empty));
-        !self.surface.contains(entity) || (hidden && !self.forced.contains(&pos))
-    }
-}
-
-pub fn extract_voxel_chunks<T>(
-    mut commands: Commands,
-    chunk_manager: Extract<Res<ChunkManager>>,
-    query: Extract<Query<(Entity, &ChunkPosition, &T, &LOD)>>,
-    filter: ExtractFilter,
-    mut last_versions: Local<EntityHashMap<(LOD, [u64; 8])>>,
-    frame: Extract<Res<FrameCount>>,
-) where
-    T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
-{
-    for (entity, pos, field, lod) in query.iter() {
-        if filter.skips(entity, pos.0) {
-            // so gaining a surface, or leasing/un-hiding, re-extracts
-            last_versions.remove(&entity);
-            continue;
-        }
-        let size = lod.size();
-        if field.data_slice().len() != lod.volume() {
-            continue; // can't happen (LOD and fields install together); defensive
-        }
-
-        let mut versions = [0u64; 8];
-        let (own, neighbor_versions) = versions.split_at_mut(1);
-        if let Some(own) = own.first_mut() {
-            *own = field.version();
-        }
-        for ((i, offset), slot) in NEIGHBORS_MASK.iter().enumerate().zip(neighbor_versions) {
-            if let Some(n_entity) = chunk_manager.get_chunk(&pos.0.wrapping_add(*offset))
-                && let Ok((_, _, n_field, n_lod)) = query.get(n_entity)
-            {
-                // At equal LOD the apron reads only the neighbour's facing slab;
-                // across LODs it resamples more of it, so use the full version.
-                let v = if n_lod == lod {
-                    n_field.border_version(i)
-                } else {
-                    n_field.version()
-                };
-                // fold neighbour LOD in: a reload resets version to 0
-                *slot = v ^ (u64::from(n_lod.rank()).wrapping_add(1) << 56);
-            }
-        }
-
-        // Keyed by entity, not position: a chunk that despawns and respawns at
-        // the same spot comes back at version 0 with unchanged neighbours, so a
-        // position key matched and the new entity never got an arena slot.
-        let key = (*lod, versions);
-        if last_versions.get(&entity) == Some(&key) {
-            continue;
-        }
-        last_versions.insert(entity, key);
-
-        let padded_size = size.wrapping_add(PADDING);
-
-        let padded_data: Vec<u8> = if field.should_extract() {
-            let mut vol = vec![T::Elem::default(); usize_from(padded_size).saturating_pow(3)];
-            // Copy row by row: each source row of x lands at the start of the
-            // same (y, z) row in the padded volume.
-            let row_len = usize_from(size);
-            let mut src_rows = field.data_slice().chunks_exact(row_len);
-            for z in 0..size {
-                for y in 0..size {
-                    let dst = flatten_cube(0, y, z, padded_size);
-                    let dst_row = vol.get_mut(dst..dst.wrapping_add(row_len));
-                    if let (Some(src), Some(dst)) = (src_rows.next(), dst_row) {
-                        dst.copy_from_slice(src);
-                    }
-                }
-            }
-            fill_apron::<T>(&mut vol, pos.0, &chunk_manager, &query);
-            T::gpu_bytes(&vol)
-        } else {
-            Vec::new()
-        };
-
-        commands.spawn(ExtractedChunkField::<T> {
-            main_entity: entity.into(),
-            chunk_pos: pos.0,
-            padded_data,
-            size: padded_size,
-            lod: *lod,
-            seq: frame.0,
-            _type: PhantomData,
-        });
-    }
-    last_versions.retain(|e, _| query.contains(*e)); // drop despawned chunks
 }
 
 pub(crate) const PADDING: u32 = 2;
@@ -880,45 +857,6 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
         }
     }
     packed
-}
-
-type LiveChunkData = (
-    Entity,
-    &'static ChunkPosition,
-    Option<&'static VisibilityField>,
-);
-type LiveChunkFilter = (
-    With<crate::Chunk>,
-    With<LOD>,
-    With<crate::field::surface::HasSurface>,
-);
-
-pub fn release_despawned_chunks(
-    live: Extract<Query<LiveChunkData, LiveChunkFilter>>,
-    forced: Extract<Res<ForceResident>>,
-    arena_set: Option<ResMut<VoxelChunkArenaSet>>,
-) {
-    let Some(mut arena_set) = arena_set else {
-        return;
-    };
-    let wanted: std::collections::HashSet<MainEntity> = live
-        .iter()
-        .filter(|(_, pos, v)| {
-            !v.is_some_and(super::super::field::visibility::VisibilityField::is_all_empty)
-                || forced.contains(&pos.0)
-        })
-        .map(|(e, _, _)| MainEntity::from(e))
-        .collect();
-    let stale: Vec<MainEntity> = arena_set
-        .iter()
-        .flat_map(|a| a.slot_of_main_entity.keys().copied())
-        .filter(|e| !wanted.contains(e))
-        .collect();
-    for e in stale {
-        arena_set.release(e);
-    }
-    arena_set.empty.retain(|e| wanted.contains(e));
-    arena_set.live = wanted;
 }
 
 #[cfg(test)]

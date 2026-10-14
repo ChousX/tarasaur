@@ -1,8 +1,10 @@
 mod arena;
 pub mod cursor;
+pub mod extract;
 pub mod pipeline;
 pub mod query;
 pub mod resident;
+pub mod stats;
 pub mod systems;
 pub mod terrain_ray;
 pub mod types;
@@ -16,7 +18,7 @@ use bevy::{
 };
 
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
-use systems::extract_voxel_chunks;
+use extract::{extract_voxel_chunks, release_despawned_chunks};
 
 use crate::{
     SDF, VisibilityField,
@@ -35,7 +37,7 @@ use crate::{
         systems::{
             GuardTelemetry, RemeshBudget, dispatch_voxel_compute_passes_batched,
             extract_visibility_removed, map_guard_readbacks, prepare_visibility_for_arena,
-            prepare_voxel_arena, release_despawned_chunks, voxel_raster_pass,
+            prepare_voxel_arena, voxel_raster_pass,
         },
     },
 };

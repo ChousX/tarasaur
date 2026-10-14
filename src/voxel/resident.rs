@@ -9,10 +9,16 @@ const LEASE_FRAMES: u64 = 120;
 pub struct ForceResident {
     frame: u64, // 64 bits: never wraps, so `until > frame` stays valid
     until: HashMap<IVec3, u64>,
+    /// Positions whose lease started or ran out this frame. Extraction only
+    /// revisits chunks that changed, so it needs these flips spelled out.
+    changed: Vec<IVec3>,
 }
 
 impl ForceResident {
     pub fn touch(&mut self, pos: IVec3) {
+        if !self.contains(&pos) {
+            self.changed.push(pos);
+        }
         self.until
             .insert(pos, self.frame.saturating_add(LEASE_FRAMES));
     }
@@ -29,13 +35,29 @@ impl ForceResident {
     pub fn contains(&self, pos: &IVec3) -> bool {
         self.until.get(pos).is_some_and(|&u| u > self.frame)
     }
+
+    /// Positions whose lease started or ended this frame (may repeat).
+    #[must_use]
+    pub fn changed(&self) -> &[IVec3] {
+        &self.changed
+    }
 }
 
 pub fn tick_force_resident(mut r: ResMut<ForceResident>) {
+    let r = &mut *r;
     r.frame = r.frame.saturating_add(1);
-    if r.frame.is_multiple_of(64) {
-        let f = r.frame;
-        r.until.retain(|_, &mut u| u > f);
+    let frame = r.frame;
+    r.changed.clear();
+    // Leases cover the few chunks near the camera and edits, so scanning
+    // them every frame is cheap.
+    r.changed.extend(
+        r.until
+            .iter()
+            .filter(|&(_, &u)| u == frame)
+            .map(|(&pos, _)| pos),
+    );
+    if frame.is_multiple_of(64) {
+        r.until.retain(|_, &mut u| u > frame);
     }
 }
 

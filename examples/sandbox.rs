@@ -1,57 +1,24 @@
 mod common;
 
-use std::any::type_name;
-
-use bevy::{
-    input::mouse::MouseWheel,
-    prelude::*,
-    render::{
-        RenderPlugin,
-        settings::{RenderCreation, WgpuFeatures, WgpuLimits, WgpuSettings},
-    },
-};
+use bevy::{input::mouse::MouseWheel, prelude::*};
 use common::{
-    FlyCam, TerrainMaterial, determine_material, fly_cam_system, setup_terrain_palette,
-    terrain_height,
+    FlyCam, TerrainMaterial, fly_cam_system, register_terrain, render_plugin, setup_terrain_palette,
 };
 use tarasaur::{
-    LOD, MaterialField, SDF, TarasaurPlugin, VoxelMaterial,
-    chunk::{CHUNK_SIZE, ChunkLoader},
+    LOD, SDF, TarasaurPlugin,
+    chunk::ChunkLoader,
     editor::WorldEditor,
-    field::{MaterialFieldPlugin, generator::ChunkGeneratorRegistry},
-    num::{f32_from_u32, usize_from},
+    field::MaterialFieldPlugin,
     voxel::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
 };
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(RenderPlugin {
-        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-            features: WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT,
-            limits: WgpuLimits {
-                max_buffer_size: 1024 * 1024 * 1024,
-                max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                ..default()
-            },
-            ..default()
-        })),
-        ..default()
-    }))
-    // TarasaurPlugin now includes PalettePlugin.
-    .add_plugins(TarasaurPlugin)
-    .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
-
-    {
-        let mut g = app.world_mut().resource_mut::<ChunkGeneratorRegistry>();
-        g.register_sdf_distance(terrain_sdf);
-        // The key must equal the type_name the persistence registry uses for
-        // this field (register_field::<F> uses std::any::type_name::<F>()).
-        g.register::<u8>(
-            type_name::<MaterialField<TerrainMaterial>>(),
-            terrain_materials,
-        );
-        // No VisibilityField generator: a chunk without one is fully visible.
-    }
+    app.add_plugins(DefaultPlugins.set(render_plugin()))
+        // TarasaurPlugin now includes PalettePlugin.
+        .add_plugins(TarasaurPlugin)
+        .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
+    register_terrain(&mut app);
 
     app.init_resource::<Brush>()
         .insert_resource(CursorBrush { enabled: false })
@@ -61,82 +28,6 @@ fn main() {
             (fly_cam_system, terrain_edit.after(resolve_cursor_hit)),
         )
         .run();
-}
-
-// ---------------------------------------------------------------------------
-// Generators (run off-thread, pure functions of chunk_pos + lod)
-// ---------------------------------------------------------------------------
-
-/// The heightfield only depends on (x, z), so evaluate it once per column
-/// instead of once per voxel. Both the SDF and material generators share it.
-/// Voxel `i` samples `origin + i * voxel`, so the same chunk generated at any
-/// LOD describes the same surface.
-struct Columns {
-    size: u32,
-    voxel: f32,
-    origin: Vec3,
-    height: Vec<f32>,
-    /// 1/sqrt(1+|∇h|²): rescales (y - h) into an approximate true distance,
-    /// so brush edits that min/max against the SDF blend sensibly on slopes.
-    inv_norm: Vec<f32>,
-}
-
-impl Columns {
-    fn new(chunk_pos: IVec3, lod: LOD) -> Self {
-        let size = lod.size();
-        let voxel = CHUNK_SIZE / f32_from_u32(size);
-        let origin = chunk_pos.as_vec3() * CHUNK_SIZE;
-        let columns = usize_from(size).pow(2);
-        let (mut height, mut inv_norm) = (Vec::with_capacity(columns), Vec::with_capacity(columns));
-        let e = 0.5;
-        for z in 0..size {
-            for x in 0..size {
-                let wx = f32_from_u32(x).mul_add(voxel, origin.x);
-                let wz = f32_from_u32(z).mul_add(voxel, origin.z);
-                let gx = (terrain_height(wx + e, wz) - terrain_height(wx - e, wz)) / (2.0 * e);
-                let gz = (terrain_height(wx, wz + e) - terrain_height(wx, wz - e)) / (2.0 * e);
-                height.push(terrain_height(wx, wz));
-                inv_norm.push(1.0 / gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt());
-            }
-        }
-        Self {
-            size,
-            voxel,
-            origin,
-            height,
-            inv_norm,
-        }
-    }
-
-    /// x-fastest, then y, then z ordering (matches the `lod_streaming` example
-    /// and what the fields expect).
-    fn fill<T>(&self, f: impl Fn(f32, f32, f32) -> T) -> Vec<T> {
-        let n = usize_from(self.size);
-        let mut out = Vec::with_capacity(n.pow(3));
-        // Columns are stored z-major: one row of x per z.
-        let rows = self
-            .height
-            .chunks_exact(n)
-            .zip(self.inv_norm.chunks_exact(n));
-        for (heights, norms) in rows {
-            for y in 0..self.size {
-                let wy = f32_from_u32(y).mul_add(self.voxel, self.origin.y);
-                for (&h, &k) in heights.iter().zip(norms) {
-                    out.push(f(wy, h, k));
-                }
-            }
-        }
-        out
-    }
-}
-
-/// Sign volume; `register_sdf` turns it into real distances with a jump flood.
-fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
-    Columns::new(pos, lod).fill(|y, h, k| (y - h) * k)
-}
-
-fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<u8> {
-    Columns::new(pos, lod).fill(|y, h, _| determine_material(h, y).to_id())
 }
 
 // ---------------------------------------------------------------------------
