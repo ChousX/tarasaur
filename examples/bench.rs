@@ -4,7 +4,7 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! ```
 //!
@@ -29,6 +29,7 @@ use std::{
     collections::HashMap,
     fmt::Write as _,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -41,6 +42,7 @@ use bevy::{
 use common::{
     TerrainMaterial, register_terrain, render_plugin, setup_terrain_palette, terrain_height,
 };
+use renderdoc::{RenderDoc, V141};
 use tarasaur::{
     LOD, SDF, TarasaurPlugin,
     chunk::{ChunkLoader, update_cursor_focus},
@@ -124,13 +126,14 @@ impl Phase {
 
 /// Diagnostics recorded every frame. Render spans only produce a value on
 /// frames they ran in, so a column is empty when nothing new arrived.
-const COLUMNS: [(&str, &str); 14] = [
+const COLUMNS: [(&str, &str); 15] = [
     ("gpu_mesh_ms", "render/voxel_mesh/elapsed_gpu"),
     ("gpu_pass1_ms", "render/voxel_mesh/pass1/elapsed_gpu"),
     ("gpu_scan_ms", "render/voxel_mesh/scan/elapsed_gpu"),
     ("gpu_pass3_ms", "render/voxel_mesh/pass3/elapsed_gpu"),
     ("gpu_raster_ms", "render/voxel_raster/elapsed_gpu"),
     ("draws", "voxel/draws"),
+    ("resident", "voxel/resident"),
     ("meshed_chunks", "voxel/meshed_chunks"),
     ("meshed_cells", "voxel/meshed_cells"),
     ("pending_uploads", "voxel/pending_uploads"),
@@ -171,6 +174,8 @@ struct Bench {
     rows: Vec<FrameRow>,
     /// Last measurement time seen per diagnostic, to tell new values from repeats.
     seen: HashMap<&'static str, Instant>,
+    /// Every GPU pass Bevy timed, averaged over the end of each phase.
+    gpu_passes: Vec<(Phase, String, f64)>,
     out: Output,
 }
 
@@ -243,6 +248,25 @@ fn main() {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     register_terrain(&mut app);
+    let msaa = match flag("--msaa").as_deref() {
+        None => Msaa::default(),
+        Some("1") => Msaa::Off,
+        Some("2") => Msaa::Sample2,
+        Some("4") => Msaa::Sample4,
+        Some("8") => Msaa::Sample8,
+        Some(other) => {
+            eprintln!("bench: --msaa takes 1, 2, 4 or 8, not {other}");
+            return;
+        }
+    };
+    app.insert_resource(BenchMsaa(msaa));
+    if args.iter().any(|a| a == "--renderdoc") {
+        let Some(capture) = FrameCapture::attach(&out) else {
+            return;
+        };
+        app.insert_resource(capture)
+            .add_systems(Update, trigger_frame_capture);
+    }
 
     app.insert_resource(CursorBrush { enabled: false })
         // Disk writes would only add noise; nothing here needs to persist.
@@ -256,6 +280,7 @@ fn main() {
             rows: Vec::new(),
             seen: HashMap::new(),
             out,
+            gpu_passes: Vec::new(),
         })
         .add_systems(Startup, (spawn_camera, setup_terrain_palette))
         .add_systems(
@@ -272,10 +297,11 @@ fn main() {
         .run();
 }
 
-fn spawn_camera(mut commands: Commands) {
+fn spawn_camera(mut commands: Commands, msaa: Res<BenchMsaa>) {
     commands.spawn((
         BenchCamera,
         Camera3d::default(),
+        msaa.0,
         Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y),
         // Same bands as the sandbox, so this measures what it runs.
         ChunkLoader {
@@ -344,6 +370,7 @@ fn record_frame(
     time: Res<Time<Real>>,
     frame: Res<FrameCount>,
     adapter: Option<Res<RenderAdapterInfo>>,
+    capture: Option<Res<FrameCapture>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if bench.phase == Phase::Done {
@@ -398,6 +425,18 @@ fn record_frame(
         bench.frame_in_phase,
         bench.phase_started.elapsed().as_secs_f32()
     );
+    // GPU time of every pass Bevy timed, averaged over the phase's last
+    // frames (the diagnostic history).
+    let phase = bench.phase;
+    for d in store.iter() {
+        let path = d.path().as_str();
+        if path.starts_with("render/")
+            && path.ends_with("/elapsed_gpu")
+            && let Some(avg) = d.average()
+        {
+            bench.gpu_passes.push((phase, path.to_string(), avg));
+        }
+    }
     bench.phase = bench.phase.next();
     bench.frame_in_phase = 0;
     bench.phase_started = Instant::now();
@@ -407,6 +446,9 @@ fn record_frame(
             |a| format!("{} ({:?}, {})", a.name, a.backend, a.driver_info),
         );
         write_results(&bench, &adapter);
+        for path in capture.iter().flat_map(|c| c.captures()) {
+            println!("renderdoc: {}", path.display());
+        }
         exit.write(AppExit::Success);
     }
 }
@@ -474,7 +516,7 @@ fn summarize(phase: Phase, rows: &[&FrameRow], load_timed_out: bool) -> Vec<(Str
         ("fps".into(), f64_from_usize(rows.len()) * 1000.0 / total_ms),
     ];
     // Averaged over the frames that reported a value.
-    for name in ["gpu_raster_ms", "draws", "chunks"] {
+    for name in ["gpu_raster_ms", "draws", "resident", "chunks"] {
         out.push((format!("{name}_mean"), mean(&present(name))));
     }
     // Meshing runs only on some frames: report totals and the per-run cost.
@@ -553,6 +595,9 @@ fn write_results(bench: &Bench, adapter: &str) {
         for (metric, value) in &metrics {
             let _ = writeln!(summary, "{},{metric},{value}", phase.name());
         }
+        for (_, path, avg) in bench.gpu_passes.iter().filter(|(p, ..)| *p == phase) {
+            let _ = writeln!(summary, "{},gpu:{path},{avg}", phase.name());
+        }
         let get = |m: &str| {
             metrics
                 .iter()
@@ -583,6 +628,7 @@ fn write_results(bench: &Bench, adapter: &str) {
         error!("[bench] couldn't write results: {e}");
     }
     println!("\n{table}");
+    print_gpu_passes(&bench.gpu_passes, Phase::Hold);
     println!("frames:  {}", frames_path.display());
     println!("summary: {}", summary_path.display());
 }
@@ -635,3 +681,72 @@ fn total(v: &[f64]) -> f64 {
 fn ignore_cursor(mut hit: ResMut<CursorHit>) {
     hit.0 = None;
 }
+
+/// Prints one phase's GPU pass times, slowest first.
+fn print_gpu_passes(passes: &[(Phase, String, f64)], phase: Phase) {
+    let mut rows: Vec<&(Phase, String, f64)> =
+        passes.iter().filter(|(p, ..)| *p == phase).collect();
+    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+    println!(
+        "GPU passes during {} (ms, nested spans included):",
+        phase.name()
+    );
+    for (_, path, avg) in rows {
+        println!("  {avg:>7.3}  {path}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RenderDoc
+// ---------------------------------------------------------------------------
+
+/// `hold` frame to capture with `--renderdoc`: mid-phase, well after load.
+const CAPTURE_FRAME: u32 = 300;
+
+/// RenderDoc's in-app API. Only available when RenderDoc launched the bench:
+/// `renderdoccmd capture -w target/release/examples/bench --renderdoc`.
+#[derive(Resource)]
+struct FrameCapture(Mutex<RenderDoc<V141>>);
+
+impl FrameCapture {
+    fn attach(out: &Output) -> Option<Self> {
+        match RenderDoc::<V141>::new() {
+            Ok(mut rd) => {
+                let _ = std::fs::create_dir_all(&out.dir);
+                // RenderDoc appends `_frameN.rdc`.
+                rd.set_capture_file_path_template(out.dir.join(&out.label));
+                Some(Self(Mutex::new(rd)))
+            }
+            Err(e) => {
+                eprintln!(
+                    "bench: --renderdoc needs RenderDoc loaded; launch with \
+                     `renderdoccmd capture -w <bench> --renderdoc` ({e})"
+                );
+                None
+            }
+        }
+    }
+
+    fn captures(&self) -> Vec<PathBuf> {
+        let Ok(rd) = self.0.lock() else {
+            return Vec::new();
+        };
+        (0..rd.get_num_captures())
+            .filter_map(|i| rd.get_capture(i).map(|(path, _)| path))
+            .collect()
+    }
+}
+
+fn trigger_frame_capture(bench: Res<Bench>, capture: Res<FrameCapture>) {
+    if bench.phase != Phase::Hold || bench.frame_in_phase != CAPTURE_FRAME {
+        return;
+    }
+    if let Ok(mut rd) = capture.0.lock() {
+        rd.trigger_capture();
+        info!("[bench] RenderDoc: capturing the next frame");
+    }
+}
+
+/// The camera's MSAA, from `--msaa` (default: Bevy's default, 4x).
+#[derive(Resource)]
+struct BenchMsaa(Msaa);

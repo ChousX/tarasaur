@@ -10,7 +10,6 @@ use bevy::{
     prelude::*,
     render::{
         Extract,
-        camera::ExtractedCamera,
         diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
         render_resource::{
             BindGroupEntry, CommandEncoder, CommandEncoderDescriptor, ComputePipeline, IndexFormat,
@@ -24,10 +23,11 @@ use bevy::{
 };
 
 use crate::{
-    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, SDF,
-    VisibilityField, VoxelMaterial,
+    ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, SDF, VisibilityField,
+    VoxelMaterial,
     voxel::{
         arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
+        draw::{VoxelDrawPipeline, VoxelViewDraws, encode_draw_compaction},
         pipeline::{VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterPipeline},
         stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
@@ -626,53 +626,68 @@ fn timed(
     span.end(encoder);
 }
 
+/// Everything `voxel_raster_pass` draws with, besides the view.
+#[derive(SystemParam)]
+pub struct RasterResources<'w> {
+    view_uniforms: Res<'w, ViewUniforms>,
+    arena_set: Res<'w, VoxelChunkArenaSet>,
+    pipeline_cache: Res<'w, PipelineCache>,
+    raster_pipeline: Res<'w, VoxelRasterPipeline>,
+    voxel_material: Res<'w, VoxelMaterialBindGroup>,
+    draws: Res<'w, VoxelViewDraws>,
+    draw_pipeline: Res<'w, VoxelDrawPipeline>,
+}
+
+/// Draws the chunks `prepare_voxel_view_draws` found visible in this view:
+/// one multi-draw per arena.
 pub fn voxel_raster_pass(
     view: ViewQuery<(
-        &ExtractedCamera,
         &ViewTarget,
         &ViewDepthStencilTexture,
         &ViewUniformOffset,
+        &Msaa,
     )>,
-    view_uniforms: Res<ViewUniforms>,
-    arena_set: Option<Res<VoxelChunkArenaSet>>,
-    pipeline_cache: Res<PipelineCache>,
-    raster_pipeline: Res<VoxelRasterPipeline>,
-    voxel_material: Res<VoxelMaterialBindGroup>,
+    res: RasterResources,
     mut ctx: RenderContext,
 ) {
-    // Arena set may not exist yet (frame 0, before any chunk has been extracted).
-    let Some(arena_set) = arena_set else {
-        return;
-    };
-    if pipeline_cache
-        .get_render_pipeline(raster_pipeline.pipeline_id)
-        .is_none()
-    {
-        warn_once!(
-            "raster pipeline: {:?}",
-            pipeline_cache.get_render_pipeline_state(raster_pipeline.pipeline_id)
-        );
-    }
-    if arena_set.is_empty() {
+    let draws = res.draws.get(view.entity());
+    let (target, depth_texture, view_offset, msaa) = view.into_inner();
+    if draws.iter().all(|d| d.count == 0) {
         return;
     }
-    let Some(pipeline) = pipeline_cache.get_render_pipeline(raster_pipeline.pipeline_id) else {
+    let pipeline_id = res.raster_pipeline.id(msaa.samples());
+    let (Some(pipeline), Some(compaction)) = (
+        pipeline_id.and_then(|id| res.pipeline_cache.get_render_pipeline(id)),
+        res.pipeline_cache
+            .get_compute_pipeline(res.draw_pipeline.id),
+    ) else {
+        if let Some(id) = pipeline_id {
+            warn_once!(
+                "raster pipeline: {:?}",
+                res.pipeline_cache.get_render_pipeline_state(id)
+            );
+        }
         return;
     };
-    let Some(binding) = view_uniforms.uniforms.binding() else {
+    let Some(binding) = res.view_uniforms.uniforms.binding() else {
         return;
     };
-    let (_camera, target, depth_texture, view_offset) = view.into_inner();
     let view_bind_group = ctx.render_device().create_bind_group(
         Some("voxel_view_bind_group"),
-        &raster_pipeline.view_layout,
+        &res.raster_pipeline.view_layout,
         &[BindGroupEntry {
             binding: 0,
             resource: binding,
         }],
     );
-    let material_bind_group = &voxel_material.0;
+
+    encode_draw_compaction(ctx.command_encoder(), compaction, draws);
+
+    // Timed on the encoder, around the pass: on tiling GPUs (Adreno, Mali)
+    // timestamps inside a render pass can fire before the tiles are shaded.
     let diagnostics = ctx.diagnostic_recorder();
+    let recorder = diagnostics.as_deref();
+    let span = recorder.time_span(ctx.command_encoder(), "voxel_raster");
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("voxel_raster_pass"),
@@ -682,31 +697,21 @@ pub fn voxel_raster_pass(
         occlusion_query_set: None,
         multiview_mask: None,
     });
-
-    let recorder = diagnostics.as_deref();
-    let span = recorder.pass_span(&mut render_pass, "voxel_raster");
     render_pass.set_render_pipeline(pipeline);
     render_pass.set_bind_group(0, &view_bind_group, &[view_offset.offset]);
-    render_pass.set_bind_group(1, material_bind_group, &[]);
+    render_pass.set_bind_group(1, &res.voxel_material.0, &[]);
 
-    for arena in arena_set.iter() {
-        if arena.active_slots.is_empty() {
+    for d in draws.iter().filter(|d| d.count > 0) {
+        let Some(arena) = res.arena_set.arenas.get(d.lod).and_then(|a| a.get(d.arena)) else {
             continue;
-        }
-
+        };
         render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
         render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
         render_pass.set_bind_group(2, &arena.raster_chunk_bind_group, &[]);
-
-        // indirect_args is indexed by slot.
-        for &slot in &arena.active_slots {
-            render_pass.draw_indexed_indirect(
-                &arena.indirect_args_buffer,
-                u64::from(slot).wrapping_mul(ARGS_STRIDE),
-            );
-        }
+        render_pass.multi_draw_indexed_indirect(&d.args, 0, d.count);
     }
-    span.end(&mut render_pass);
+    drop(render_pass);
+    span.end(ctx.command_encoder());
 }
 
 /// Byte stride of one slot's entry in `indirect_args_buffer`.

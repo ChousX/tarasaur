@@ -17,14 +17,19 @@ use crate::{
     Chunk, LOD, TargetLOD,
     field::systems::SdfReinitTask,
     loading::ChunkDataTask,
-    voxel::arena::{VoxelChunkArena, VoxelChunkArenaSet},
+    voxel::{
+        arena::{VoxelChunkArena, VoxelChunkArenaSet},
+        draw::VoxelViewDraws,
+    },
 };
 
 /// Render-world counts for one frame.
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct VoxelFrameStats {
-    /// Indirect draws issued (one per resident slot).
+    /// Chunks drawn, summed over views (after frustum culling).
     pub draws: u32,
+    /// Chunks holding an arena slot (meshed and drawable).
+    pub resident: u32,
     /// Chunks re-meshed this frame.
     pub meshed_chunks: u32,
     /// Cells the meshing passes ran over (every cell of every re-meshed chunk).
@@ -43,6 +48,7 @@ pub struct VoxelFrameStats {
 struct VoxelStatsChannel(Arc<Mutex<VoxelFrameStats>>);
 
 pub const DRAWS: DiagnosticPath = DiagnosticPath::const_new("voxel/draws");
+pub const RESIDENT: DiagnosticPath = DiagnosticPath::const_new("voxel/resident");
 pub const MESHED_CHUNKS: DiagnosticPath = DiagnosticPath::const_new("voxel/meshed_chunks");
 pub const MESHED_CELLS: DiagnosticPath = DiagnosticPath::const_new("voxel/meshed_cells");
 pub const PENDING_UPLOADS: DiagnosticPath = DiagnosticPath::const_new("voxel/pending_uploads");
@@ -54,8 +60,9 @@ pub const LOD_PENDING: DiagnosticPath = DiagnosticPath::const_new("voxel/lod_pen
 pub const REINITS: DiagnosticPath = DiagnosticPath::const_new("voxel/reinits");
 pub const DIRTY_SLOTS: DiagnosticPath = DiagnosticPath::const_new("voxel/dirty_slots");
 
-pub const ALL: [DiagnosticPath; 9] = [
+pub const ALL: [DiagnosticPath; 10] = [
     DRAWS,
+    RESIDENT,
     MESHED_CHUNKS,
     MESHED_CELLS,
     PENDING_UPLOADS,
@@ -91,6 +98,7 @@ impl Plugin for VoxelDiagnosticsPlugin {
 fn send_frame_stats(
     mut stats: ResMut<VoxelFrameStats>,
     arena_set: Res<VoxelChunkArenaSet>,
+    draws: Res<VoxelViewDraws>,
     channel: Res<VoxelStatsChannel>,
 ) {
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
@@ -98,7 +106,8 @@ fn send_frame_stats(
         count(arena_set.iter().map(f).fold(0, usize::saturating_add))
     };
     if let Ok(mut out) = channel.0.lock() {
-        out.draws = sum(|a| a.active_slots.len());
+        out.draws = draws.total();
+        out.resident = sum(|a| a.active_slots.len());
         out.dirty_slots = sum(|a| a.dirty_slots.len());
         out.pending_uploads = count(arena_set.deferred.len());
         out.meshed_chunks = out.meshed_chunks.saturating_add(stats.meshed_chunks);
@@ -144,6 +153,7 @@ fn publish_voxel_diagnostics(
         return;
     };
     diagnostics.add_measurement(&DRAWS, || f64::from(stats.draws));
+    diagnostics.add_measurement(&RESIDENT, || f64::from(stats.resident));
     diagnostics.add_measurement(&MESHED_CHUNKS, || f64::from(stats.meshed_chunks));
     diagnostics.add_measurement(&MESHED_CELLS, || {
         f64::from(u32::try_from(stats.meshed_cells).unwrap_or(u32::MAX))

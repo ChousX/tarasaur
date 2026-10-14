@@ -36,3 +36,14 @@ tracy                                                  # GUI: click Connect
 tracy-capture -o hold.tracy -s 8                       # or headless, 8 seconds
 tracy-csvexport hold.tracy > hold.csv                  # per-zone totals
 ```
+
+GPU frame capture with RenderDoc (also in the dev shell). The bench grabs one frame
+in the middle of its `hold` phase, and the summary script replays it headlessly:
+
+```sh
+renderdoccmd capture -w target/release/examples/bench --renderdoc --label rdc
+RDC=bench_results/rdc_frameN.rdc RDC_OUT=summary.txt qrenderdoc --python tools/renderdoc_summary.py
+```
+
+On tiling GPUs (Adreno, Mali) RenderDoc's per-draw timings come from replaying each
+draw on its own, so trust them for proportions, and the bench's per-pass times for totals.

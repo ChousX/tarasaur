@@ -17,3 +17,6 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-indexing-slicing-in-tests = true
 allow-panic-in-tests = true
+
+# Product names that aren't code; ".." keeps clippy's built-in list.
+doc-valid-idents = ["RenderDoc", ".."]

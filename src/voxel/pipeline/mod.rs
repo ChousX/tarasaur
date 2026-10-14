@@ -1,8 +1,9 @@
-mod layouts;
+pub(crate) mod layouts;
 use bevy::{
     mesh::VertexBufferLayout,
     prelude::*,
     render::{
+        camera::ExtractedCamera,
         render_asset::RenderAssets,
         render_resource::{
             AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
@@ -21,7 +22,7 @@ use bevy::{
         texture::GpuImage,
     },
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::{
     texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
@@ -148,31 +149,60 @@ impl FromWorld for VoxelComputePipeline {
     }
 }
 
+/// The voxel raster pipeline, one per MSAA sample count in use: a view's
+/// pipeline must match its target's sample count.
 #[derive(Resource)]
 pub struct VoxelRasterPipeline {
-    pub pipeline_id: CachedRenderPipelineId,
+    pipelines: HashMap<u32, CachedRenderPipelineId>,
     pub view_layout: BindGroupLayout,
     pub material_layout: BindGroupLayout,
+}
+
+impl VoxelRasterPipeline {
+    /// The pipeline for `samples`, once `queue_voxel_raster_pipelines` has
+    /// queued it.
+    #[must_use]
+    pub fn id(&self, samples: u32) -> Option<CachedRenderPipelineId> {
+        self.pipelines.get(&samples).copied()
+    }
+
+    fn queue(&mut self, pipeline_cache: &PipelineCache, samples: u32) {
+        self.pipelines.entry(samples).or_insert_with(|| {
+            pipeline_cache.queue_render_pipeline(raster_pipeline_descriptor(
+                view_layout_entries(),
+                material_layout_entries(),
+                samples,
+            ))
+        });
+    }
 }
 
 impl FromWorld for VoxelRasterPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let view_entries = view_layout_entries();
-        let material_entries = material_layout_entries();
-        let view_layout =
-            render_device.create_bind_group_layout(Some("voxel_view_layout"), &view_entries);
+        let view_layout = render_device
+            .create_bind_group_layout(Some("voxel_view_layout"), &view_layout_entries());
         let material_layout = render_device
-            .create_bind_group_layout(Some("voxel_material_layout"), &material_entries);
-        let pipeline_id = pipeline_cache
-            .queue_render_pipeline(raster_pipeline_descriptor(view_entries, material_entries));
-
-        Self {
-            pipeline_id,
+            .create_bind_group_layout(Some("voxel_material_layout"), &material_layout_entries());
+        let mut pipeline = Self {
+            pipelines: HashMap::new(),
             view_layout,
             material_layout,
-        }
+        };
+        // Start compiling the common case before any view asks for it.
+        pipeline.queue(world.resource::<PipelineCache>(), Msaa::default().samples());
+        pipeline
+    }
+}
+
+/// Queues a raster pipeline for every camera's MSAA sample count.
+pub fn queue_voxel_raster_pipelines(
+    views: Query<&Msaa, With<ExtractedCamera>>,
+    pipeline_cache: Res<PipelineCache>,
+    mut pipeline: ResMut<VoxelRasterPipeline>,
+) {
+    for msaa in &views {
+        pipeline.queue(&pipeline_cache, msaa.samples());
     }
 }
 
@@ -229,6 +259,7 @@ fn material_layout_entries() -> Vec<BindGroupLayoutEntry> {
 fn raster_pipeline_descriptor(
     view_entries: Vec<BindGroupLayoutEntry>,
     material_entries: Vec<BindGroupLayoutEntry>,
+    samples: u32,
 ) -> RenderPipelineDescriptor {
     RenderPipelineDescriptor {
         label: Some("voxel_raster_pipeline".into()),
@@ -292,7 +323,7 @@ fn raster_pipeline_descriptor(
             bias: DepthBiasState::default(),
         }),
         multisample: MultisampleState {
-            count: Msaa::default().samples(),
+            count: samples,
             mask: !0,
             alpha_to_coverage_enabled: false,
         },

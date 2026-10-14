@@ -39,16 +39,8 @@ const AUDIT_INTERVAL: u32 = 120;
 /// folded in. Unchanged key = unchanged padded volume.
 type ExtractKey = (LOD, [u64; 8]);
 
-type FieldQuery<'w, 's, T> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static ChunkPosition,
-        &'static T,
-        &'static LOD,
-    ),
->;
+type FieldQuery<'w, 's, T> =
+    Query<'w, 's, (Entity, &'static ChunkPosition, &'static T, &'static LOD)>;
 
 /// Marks `pos` and every chunk whose apron reads `pos` (`pos - offset`).
 fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
@@ -86,11 +78,8 @@ pub struct ResidencyChanges<'w, 's> {
     surface_added:
         Extract<'w, 's, Query<'static, 'static, &'static ChunkPosition, Added<HasSurface>>>,
     surface_removed: Extract<'w, 's, RemovedComponents<'static, 'static, HasSurface>>,
-    visibility_changed: Extract<
-        'w,
-        's,
-        Query<'static, 'static, &'static ChunkPosition, Changed<VisibilityField>>,
-    >,
+    visibility_changed:
+        Extract<'w, 's, Query<'static, 'static, &'static ChunkPosition, Changed<VisibilityField>>>,
     visibility_removed: Extract<'w, 's, RemovedComponents<'static, 'static, VisibilityField>>,
     forced: Extract<'w, 's, Res<'static, ForceResident>>,
 }
@@ -122,11 +111,7 @@ impl ResidencyChanges<'_, '_> {
 /// Everything that can make chunks holding `T` need re-extraction.
 #[derive(SystemParam)]
 pub struct FieldChanges<'w, 's, T: Component> {
-    changed: Extract<
-        'w,
-        's,
-        Query<'static, 'static, (Entity, &'static ChunkPosition), Changed<T>>,
-    >,
+    changed: Extract<'w, 's, Query<'static, 'static, (Entity, &'static ChunkPosition), Changed<T>>>,
     removed: Extract<'w, 's, RemovedComponents<'static, 'static, T>>,
     residency: ResidencyChanges<'w, 's>,
 }
@@ -408,7 +393,10 @@ fn audit_live(changes: &LiveChanges, arena_set: &mut VoxelChunkArenaSet) {
         .chain(held)
         .filter(|e| !wanted.contains(e))
         .collect();
-    let missing = wanted.iter().filter(|e| !arena_set.live.contains(*e)).count();
+    let missing = wanted
+        .iter()
+        .filter(|e| !arena_set.live.contains(*e))
+        .count();
     if extra.is_empty() && missing == 0 {
         return;
     }

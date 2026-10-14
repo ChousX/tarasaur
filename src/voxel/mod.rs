@@ -1,5 +1,6 @@
 mod arena;
 pub mod cursor;
+pub mod draw;
 pub mod extract;
 pub mod pipeline;
 pub mod query;
@@ -17,15 +18,22 @@ use bevy::{
     render::{Render, RenderApp, RenderSystems},
 };
 
-use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 use extract::{extract_voxel_chunks, release_despawned_chunks};
+use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
     SDF, VisibilityField,
     voxel::{
         arena::VoxelChunkArenaSet,
         cursor::CursorPlugin,
-        pipeline::{VoxelMaterialBindGroup, VoxelRasterPipeline, update_voxel_material_bind_group},
+        draw::{
+            DRAW_COMPACTION_SHADER_HANDLE, VoxelDrawPipeline, VoxelViewDraws,
+            prepare_voxel_view_draws,
+        },
+        pipeline::{
+            VoxelMaterialBindGroup, VoxelRasterPipeline, queue_voxel_raster_pipelines,
+            update_voxel_material_bind_group,
+        },
         query::{
             CollisionLOD, ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries,
             VoxelQueryBuffers, VoxelQueryResultChannel, VoxelQueryResultReceiver,
@@ -67,40 +75,49 @@ pub enum VoxelPrepareSet {
 
 pub struct VoxelRenderPlugin;
 
+/// Embeds the voxel shaders.
+fn load_shaders(app: &mut App) {
+    load_internal_asset!(
+        app,
+        DRAW_COMPACTION_SHADER_HANDLE,
+        "shaders/draw_compaction.wgsl",
+        Shader::from_wgsl
+    );
+    load_internal_asset!(
+        app,
+        SURFACE_NETS_PASS1_SHADER_HANDLE,
+        "shaders/surface_nets_pass1.wgsl",
+        Shader::from_wgsl
+    );
+    load_internal_asset!(
+        app,
+        STREAM_COMPACTION_SHADER_HANDLE,
+        "shaders/stream_compaction.wgsl",
+        Shader::from_wgsl
+    );
+    load_internal_asset!(
+        app,
+        SURFACE_NETS_PASS3_SHADER_HANDLE,
+        "shaders/surface_nets_pass3.wgsl",
+        Shader::from_wgsl
+    );
+    load_internal_asset!(
+        app,
+        VOXEL_RASTER_SHADER_HANDLE,
+        "shaders/voxel_raster.wesl",
+        Shader::from_wesl
+    );
+    load_internal_asset!(
+        app,
+        CURSOR_QUERY_SHADER_HANDLE,
+        "shaders/cursor_query.wgsl",
+        Shader::from_wgsl
+    );
+}
+
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(
-            app,
-            SURFACE_NETS_PASS1_SHADER_HANDLE,
-            "shaders/surface_nets_pass1.wgsl",
-            Shader::from_wgsl
-        );
-        load_internal_asset!(
-            app,
-            STREAM_COMPACTION_SHADER_HANDLE,
-            "shaders/stream_compaction.wgsl",
-            Shader::from_wgsl
-        );
-        load_internal_asset!(
-            app,
-            SURFACE_NETS_PASS3_SHADER_HANDLE,
-            "shaders/surface_nets_pass3.wgsl",
-            Shader::from_wgsl
-        );
-
-        load_internal_asset!(
-            app,
-            VOXEL_RASTER_SHADER_HANDLE,
-            "shaders/voxel_raster.wesl",
-            Shader::from_wesl
-        );
-
-        load_internal_asset!(
-            app,
-            CURSOR_QUERY_SHADER_HANDLE,
-            "shaders/cursor_query.wgsl",
-            Shader::from_wgsl
-        );
+        load_shaders(app);
 
         let (query_tx, query_rx) = crossbeam_channel::unbounded();
         app.insert_resource(VoxelQueryResultReceiver { receiver: query_rx });
@@ -121,6 +138,7 @@ impl Plugin for VoxelRenderPlugin {
         };
         render_app.insert_resource(VoxelQueryResultChannel { sender: query_tx });
         render_app.init_resource::<CollisionLOD>();
+        render_app.init_resource::<VoxelViewDraws>();
         render_app.init_resource::<ExtractedVoxelQueries>();
         render_app.init_resource::<NextQuerySlot>();
 
@@ -154,6 +172,10 @@ impl Plugin for VoxelRenderPlugin {
                         .chain()
                         .in_set(VoxelPrepareSet::Upload),
                     update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
+                    queue_voxel_raster_pipelines.in_set(RenderSystems::Prepare),
+                    prepare_voxel_view_draws
+                        .in_set(RenderSystems::Prepare)
+                        .after(VoxelPrepareSet::Upload),
                     prepare_voxel_queries
                         .in_set(VoxelPrepareSet::Upload)
                         .after(prepare_visibility_for_arena),
@@ -178,6 +200,7 @@ impl Plugin for VoxelRenderPlugin {
             .init_resource::<VoxelMaterialBindGroup>()
             .init_resource::<VoxelPipelineLayouts>()
             .init_resource::<VoxelComputePipeline>()
+            .init_resource::<VoxelDrawPipeline>()
             .init_resource::<VoxelQueryBuffers>();
     }
 }
