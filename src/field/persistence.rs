@@ -1,4 +1,5 @@
 use std::{
+    marker::PhantomData,
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -135,9 +136,39 @@ pub struct FieldVTable {
     pub version: fn(&World, Entity) -> u64,
     /// Exact downsample of a serialized payload (`from >= to`).
     pub downsample: fn(&[u8], LOD, LOD) -> Vec<u8>,
-    /// Builds the field for `lod` from `bytes` and inserts it. `None` (or a
-    /// size mismatch) inserts the default field, or removes it if OPTIONAL.
-    pub install: fn(&mut EntityWorldMut<'_>, LOD, Option<&[u8]>),
+    /// Builds the field for `lod` from `bytes`. `None` (or a size mismatch)
+    /// gives the default field, or its removal if OPTIONAL. Pure, so it runs
+    /// off the main thread; the result only inserts on it.
+    pub prepare: fn(LOD, Option<&[u8]>) -> PreparedField,
+}
+
+/// A field built off-thread, applied to its chunk on the main thread.
+///
+/// A trait rather than a boxed `FnOnce(&mut EntityWorldMut)`: that closure
+/// type is higher-ranked, and returning it from a `TaskPool::scope` task
+/// makes the compiler demand the scope's borrows be `'static`.
+pub trait ApplyField: Send {
+    fn apply(self: Box<Self>, em: &mut EntityWorldMut<'_>);
+}
+
+pub type PreparedField = Box<dyn ApplyField>;
+
+/// Inserts a built field.
+struct InsertField<F>(F);
+
+impl<F: Component> ApplyField for InsertField<F> {
+    fn apply(self: Box<Self>, em: &mut EntityWorldMut<'_>) {
+        em.insert(self.0);
+    }
+}
+
+/// Removes an optional field that has no data.
+struct RemoveField<F>(PhantomData<fn() -> F>);
+
+impl<F: Component> ApplyField for RemoveField<F> {
+    fn apply(self: Box<Self>, em: &mut EntityWorldMut<'_>) {
+        em.remove::<F>();
+    }
 }
 
 #[derive(Resource, Default, Clone)]
@@ -189,18 +220,17 @@ impl ChunkPersistenceRegistry {
             },
             version: |w, e| w.get::<F>(e).map_or(0, |f| Versionable::version(f)),
             downsample: |b, from, to| downsample_bytes::<F>(b, from, to),
-            install: |em, lod, bytes| {
+            prepare: |lod, bytes| {
                 if let Some(b) = bytes {
                     let elems: Vec<F::Elem> = bytemuck::pod_collect_to_vec(b);
                     if elems.len() == lod.volume() {
-                        em.insert(F::from_raw(lod, elems));
-                        return;
+                        return Box::new(InsertField(F::from_raw(lod, elems)));
                     }
                 }
                 if F::OPTIONAL {
-                    em.remove::<F>();
+                    Box::new(RemoveField::<F>(PhantomData))
                 } else {
-                    em.insert(F::new_for_lod(lod));
+                    Box::new(InsertField(F::new_for_lod(lod)))
                 }
             },
         });

@@ -1,14 +1,16 @@
 // field/loading.rs
 use crate::{DirtyField, SDF, VisibilityField, field::systems::SdfReinitTask};
+use std::sync::{Mutex, PoisonError};
 use bevy::{
     prelude::*,
-    tasks::{AsyncComputeTaskPool, Task, block_on, poll_once},
+    tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
 };
 
 use super::generator::ChunkGeneratorRegistry;
 use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin, chebyshev};
 use crate::persistence::{
-    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, SaveCache, build_if_dirty,
+    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, PreparedField, SaveCache,
+    build_if_dirty,
     commit_save, read_save,
 };
 use crate::{LOD, MaxEditLod, TargetLOD};
@@ -44,6 +46,10 @@ impl Plugin for ChunkLoadingPlugin {
 /// A save is usable when its LOD >= target. We never upsample. Saves are
 /// only ever written at max LOD, so in practice this is "use the high-res
 /// save first, generate only if there isn't one".
+///
+/// Only produces bytes: the async pool is small (a quarter of the cores by
+/// default), so building the fields here would slow generation. They are
+/// built in `resolve_chunk_data_tasks`, on the compute pool.
 fn make_task(
     pos: IVec3,
     lod: LOD,
@@ -74,6 +80,26 @@ fn make_task(
     })
 }
 
+/// Builds every registered field from a load's payloads. A field with no
+/// payload gets its default (or is removed, if optional).
+fn prepare_fields(
+    registry: &ChunkPersistenceRegistry,
+    lod: LOD,
+    payloads: &[FieldSavePayload],
+) -> Vec<PreparedField> {
+    registry
+        .fields
+        .iter()
+        .map(|f| {
+            let bytes = payloads
+                .iter()
+                .find(|p| p.field_type_id == f.type_id)
+                .map(|p| p.bytes.as_slice());
+            (f.prepare)(lod, bytes)
+        })
+        .collect()
+}
+
 /// A chunk that may need a load: (entity, position, target, current LOD,
 /// reinit in flight, SDF dirty, edit-pinned).
 type LoadCandidate = (
@@ -92,6 +118,7 @@ pub struct LoadSources<'w> {
     generators: Res<'w, ChunkGeneratorRegistry>,
     registry: Res<'w, ChunkPersistenceRegistry>,
     cache: Res<'w, SaveCache>,
+    max: Res<'w, MaxEditLod>,
 }
 
 /// How many more loads may start this frame.
@@ -112,7 +139,6 @@ pub fn start_chunk_loads(
     chunks: Query<LoadCandidate, (With<Chunk>, Without<ChunkDataTask>)>,
     loaders: Query<&CurrentChunk, With<ChunkLoader>>,
     slots: LoadSlots,
-    max: Res<MaxEditLod>,
     sources: LoadSources,
     mut commands: Commands,
 ) {
@@ -142,7 +168,7 @@ pub fn start_chunk_loads(
         if slots == 0 {
             break;
         }
-        if lod == Some(&max.0) {
+        if lod == Some(&sources.max.0) {
             if reinit || dirty {
                 continue;
             } // let JFA finish so the save has real distances
@@ -167,44 +193,62 @@ pub fn start_chunk_loads(
 pub fn resolve_chunk_data_tasks(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut ChunkDataTask, &TargetLOD)>,
+    registry: Res<ChunkPersistenceRegistry>,
 ) {
-    for (entity, mut t, target) in tasks.iter_mut() {
+    let mut done = Vec::new();
+    for (entity, mut t, target) in &mut tasks {
         let Some(payloads) = block_on(poll_once(&mut t.task)) else {
             continue;
         };
-        let lod = t.lod;
-        if lod != target.0 {
+        if t.lod != target.0 {
             // Target moved while loading: discard; start_chunk_loads re-issues.
             commands.entity(entity).remove::<ChunkDataTask>();
             continue;
         }
-        commands.queue(move |world: &mut World| install_chunk(world, entity, lod, payloads));
+        done.push((entity, t.lod, payloads));
+    }
+    if done.is_empty() {
+        return;
+    }
+    // Results go through a mutex rather than as the scope's output: a scope
+    // returning boxed trait objects makes rustc demand `'static` borrows.
+    let registry = &*registry;
+    let built: Mutex<Vec<(usize, Vec<PreparedField>)>> = Mutex::new(Vec::new());
+    ComputeTaskPool::get().scope(|s| {
+        for (i, (_, lod, payloads)) in done.iter().enumerate() {
+            let built = &built;
+            s.spawn(async move {
+                let fields = prepare_fields(registry, *lod, payloads);
+                if let Ok(mut b) = built.lock() {
+                    b.push((i, fields));
+                }
+            });
+        }
+    });
+    let built = built.into_inner().unwrap_or_else(PoisonError::into_inner);
+    for (i, fields) in built {
+        let Some(&(entity, lod, _)) = done.get(i) else {
+            continue;
+        };
+        commands.queue(move |world: &mut World| install_chunk(world, entity, lod, fields));
     }
 }
 
 /// Replaces every field and `LOD` in one command, so they never disagree.
-fn install_chunk(world: &mut World, entity: Entity, lod: LOD, payloads: Vec<FieldSavePayload>) {
-    if world.get::<TargetLOD>(entity).is_none_or(|t| t.0 != lod) {
-        if let Ok(mut em) = world.get_entity_mut(entity) {
-            em.remove::<ChunkDataTask>();
-        }
+fn install_chunk(world: &mut World, entity: Entity, lod: LOD, fields: Vec<PreparedField>) {
+    let Ok(mut em) = world.get_entity_mut(entity) else {
+        return;
+    };
+    if em.get::<TargetLOD>().is_none_or(|t| t.0 != lod) {
+        em.remove::<ChunkDataTask>();
         return;
     }
-    world.resource_scope(|world, registry: Mut<ChunkPersistenceRegistry>| {
-        let Ok(mut em) = world.get_entity_mut(entity) else {
-            return;
-        };
-        for f in &registry.fields {
-            let bytes = payloads
-                .iter()
-                .find(|p| p.field_type_id == f.type_id)
-                .map(|p| p.bytes.as_slice());
-            (f.install)(&mut em, lod, bytes);
-        }
-        em.remove::<SdfReinitTask>();
-        em.remove::<DirtyField<SDF, f32>>();
-        em.remove::<DirtyField<VisibilityField, bool>>();
-        em.insert((lod, ChunkSaveState(0))); // fresh fields all start at version 0
-        em.remove::<ChunkDataTask>();
-    });
+    for apply in fields {
+        apply.apply(&mut em);
+    }
+    em.remove::<SdfReinitTask>();
+    em.remove::<DirtyField<SDF, f32>>();
+    em.remove::<DirtyField<VisibilityField, bool>>();
+    em.insert((lod, ChunkSaveState(0))); // fresh fields all start at version 0
+    em.remove::<ChunkDataTask>();
 }
