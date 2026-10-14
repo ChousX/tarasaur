@@ -898,7 +898,6 @@ mod tests {
         SDF::gpu_bytes(&v)
     }
 
-
     /// Each `NEIGHBORS_MASK` neighbour's voxels and size, if present.
     type Neighbors<E> = [Option<(Vec<E>, u32)>; 7];
 
@@ -938,10 +937,11 @@ mod tests {
 
     /// Deterministic noise in `0..bound` for test volumes.
     fn lcg(seed: &mut u64, bound: u32) -> u32 {
-        *seed = seed
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        u32::try_from(*seed >> 33).unwrap().checked_rem(bound).unwrap()
+        *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        u32::try_from(*seed >> 33)
+            .unwrap()
+            .checked_rem(bound)
+            .unwrap()
     }
 
     /// Fills a `size`^3 interior and the 7 neighbours, then checks the fast
@@ -990,7 +990,15 @@ mod tests {
         // neighbours, mixed.
         let layouts = [
             [Some(16); 7],
-            [Some(16), Some(32), Some(4), None, Some(16), Some(64), Some(16)],
+            [
+                Some(16),
+                Some(32),
+                Some(4),
+                None,
+                Some(16),
+                Some(64),
+                Some(16),
+            ],
             [None; 7],
         ];
         // Includes exact zeros of both signs: the fast path must not change

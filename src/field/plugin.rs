@@ -66,13 +66,12 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app
-            .add_systems(
-                Render,
-                prepare_material_for_arena::<M>
-                    .after(prepare_voxel_arena)
-                    .in_set(crate::voxel::VoxelPrepareSet::Upload),
-            );
+        render_app.add_systems(
+            Render,
+            prepare_material_for_arena::<M>
+                .after(prepare_voxel_arena)
+                .in_set(crate::voxel::VoxelPrepareSet::Upload),
+        );
     }
 }
 

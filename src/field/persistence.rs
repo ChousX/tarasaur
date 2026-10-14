@@ -1,6 +1,6 @@
 use std::{
-    marker::PhantomData,
     collections::HashMap,
+    marker::PhantomData,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };

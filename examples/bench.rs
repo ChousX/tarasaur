@@ -4,7 +4,7 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8]
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! ```
 //!
@@ -48,6 +48,7 @@ use tarasaur::{
     chunk::{ChunkLoader, update_cursor_focus},
     editor::WorldEditor,
     field::MaterialFieldPlugin,
+    loading::MaxInFlightLoads,
     num::f32_from_u32,
     persistence::AutosaveIntervalSecs,
     voxel::{
@@ -248,18 +249,13 @@ fn main() {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     register_terrain(&mut app);
-    let msaa = match flag("--msaa").as_deref() {
-        None => Msaa::default(),
-        Some("1") => Msaa::Off,
-        Some("2") => Msaa::Sample2,
-        Some("4") => Msaa::Sample4,
-        Some("8") => Msaa::Sample8,
-        Some(other) => {
-            eprintln!("bench: --msaa takes 1, 2, 4 or 8, not {other}");
-            return;
-        }
+    let Some(msaa) = parse_msaa(flag("--msaa").as_deref()) else {
+        return;
     };
     app.insert_resource(BenchMsaa(msaa));
+    if let Some(n) = flag("--max-loads").and_then(|n| n.parse().ok()) {
+        app.insert_resource(MaxInFlightLoads(n));
+    }
     if args.iter().any(|a| a == "--renderdoc") {
         let Some(capture) = FrameCapture::attach(&out) else {
             return;
@@ -750,3 +746,18 @@ fn trigger_frame_capture(bench: Res<Bench>, capture: Res<FrameCapture>) {
 /// The camera's MSAA, from `--msaa` (default: Bevy's default, 4x).
 #[derive(Resource)]
 struct BenchMsaa(Msaa);
+
+/// `--msaa`: 1, 2, 4 or 8 samples; Bevy's default (4x) when absent.
+fn parse_msaa(arg: Option<&str>) -> Option<Msaa> {
+    match arg {
+        None => Some(Msaa::default()),
+        Some("1") => Some(Msaa::Off),
+        Some("2") => Some(Msaa::Sample2),
+        Some("4") => Some(Msaa::Sample4),
+        Some("8") => Some(Msaa::Sample8),
+        Some(other) => {
+            eprintln!("bench: --msaa takes 1, 2, 4 or 8, not {other}");
+            None
+        }
+    }
+}

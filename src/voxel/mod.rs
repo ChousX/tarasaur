@@ -154,10 +154,7 @@ impl Plugin for VoxelRenderPlugin {
                 ExtractSchedule,
                 (
                     release_despawned_chunks,
-                    (
-                        extract_visibility_removed,
-                        extract_voxel_queries,
-                    ),
+                    (extract_visibility_removed, extract_voxel_queries),
                 )
                     .chain(),
             )

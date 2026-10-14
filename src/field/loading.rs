@@ -1,17 +1,16 @@
 // field/loading.rs
 use crate::{DirtyField, SDF, VisibilityField, field::systems::SdfReinitTask};
-use std::sync::{Mutex, PoisonError};
 use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
 };
+use std::sync::{Mutex, PoisonError};
 
 use super::generator::ChunkGeneratorRegistry;
 use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin, chebyshev};
 use crate::persistence::{
     ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, PreparedField, SaveCache,
-    build_if_dirty,
-    commit_save, read_save,
+    build_if_dirty, commit_save, read_save,
 };
 use crate::{LOD, MaxEditLod, TargetLOD};
 use bevy::ecs::system::SystemParam;
@@ -24,11 +23,16 @@ pub struct ChunkDataTask {
     lod: LOD,
 }
 
+/// Loads allowed in flight at once.
+///
+/// Most loads are low-detail chunks that
+/// finish within a frame, so this caps loads started per frame; 32 left
+/// streaming unable to keep up while moving (64 and 128 benched the same).
 #[derive(Resource)]
 pub struct MaxInFlightLoads(pub usize);
 impl Default for MaxInFlightLoads {
     fn default() -> Self {
-        Self(32)
+        Self(64)
     }
 }
 
@@ -37,7 +41,9 @@ impl Plugin for ChunkLoadingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MaxInFlightLoads>().add_systems(
             Update,
-            (start_chunk_loads, resolve_chunk_data_tasks).chain(),
+            // Resolve first: a finished load holds its slot until resolved,
+            // so starting first left those slots unusable for a frame.
+            (resolve_chunk_data_tasks, start_chunk_loads).chain(),
         );
     }
 }
