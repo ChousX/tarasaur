@@ -85,7 +85,8 @@ fn max_chunks(
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub struct ChunkMeta {
     pub chunk_world_origin: [f32; 3],
-    pub active_list_pos: u32, // unused; kept so every shader's ChunkMeta stays 16 bytes
+    /// Neighbour LODs for seam stitching; see `systems::seam_lod_ranks`.
+    pub lod_ranks: u32,
 }
 
 /// First-fit allocator over a range of vertex cells, with coalescing frees.

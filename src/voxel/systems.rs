@@ -24,7 +24,7 @@ use bevy::{
 
 use crate::{
     ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, SDF, VisibilityField,
-    VoxelMaterial,
+    VoxelDataSlice, VoxelMaterial,
     voxel::{
         arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
         draw::{VoxelDrawPipeline, VoxelViewDraws, encode_draw_compaction},
@@ -43,6 +43,8 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub padded_data: std::sync::Arc<[u8]>,
     pub size: u32,
     pub lod: LOD,
+    /// See [`seam_lod_ranks`]; only the SDF upload uses it.
+    pub lod_ranks: u32,
     /// Main-world frame it was extracted in. An upload can wait several
     /// frames; when a newer one for the same chunk arrives, the newest wins.
     pub seq: u32,
@@ -283,7 +285,7 @@ fn upload_chunk(
 
     let meta = ChunkMeta {
         chunk_world_origin: (x.chunk_pos.as_vec3() * CHUNK_SIZE).into(),
-        active_list_pos: 0,
+        lod_ranks: x.lod_ranks,
     };
     render_queue.write_buffer(
         &arena.chunk_meta_buffer,
@@ -732,12 +734,14 @@ pub fn extract_visibility_removed(
             padded_data: std::sync::Arc::from([]),
             size: lod.size().wrapping_add(PADDING),
             lod: *lod,
+            lod_ranks: 0,
             seq: frame.0,
             _type: PhantomData,
         });
     }
 }
 
+/// Apron width in voxels on the +x/+y/+z sides of a padded volume.
 pub(crate) const PADDING: u32 = 2;
 
 /// Fills the `+x/+y/+z` apron of a padded volume from the 7 neighbours in
@@ -754,22 +758,74 @@ pub fn fill_apron<T>(
 ) where
     T: Component + ApronSample,
 {
-    let field_at = |pos: IVec3| {
-        let (_, _, field, lod) = query.get(chunk_manager.get_chunk(&pos)?).ok()?;
-        Some((field, *lod))
-    };
-    let Some((_, lod)) = field_at(chunk_pos) else {
+    let Some((_, lod)) = field_at(chunk_pos, chunk_manager, query) else {
         return;
     };
     fill_apron_with::<T>(vol, lod.size(), |offset| {
-        field_at(chunk_pos.wrapping_add(offset))
-            .filter(|(f, l)| f.data_slice().len() == l.volume())
+        apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
             .map(|(f, l)| (f.data_slice(), l.size()))
     });
 }
 
+fn field_at<'a, T: Component>(
+    pos: IVec3,
+    chunk_manager: &ChunkManager,
+    query: &'a Query<(Entity, &ChunkPosition, &T, &LOD)>,
+) -> Option<(&'a T, LOD)> {
+    let (_, _, field, lod) = query.get(chunk_manager.get_chunk(&pos)?).ok()?;
+    Some((field, *lod))
+}
+
+/// The neighbour at `pos` if the apron can read it: present, and its data
+/// matching its LOD (not mid-LOD-change).
+fn apron_source<'a, T: Component + VoxelDataSlice>(
+    pos: IVec3,
+    chunk_manager: &ChunkManager,
+    query: &'a Query<(Entity, &ChunkPosition, &T, &LOD)>,
+) -> Option<(&'a T, LOD)> {
+    field_at(pos, chunk_manager, query).filter(|(f, l)| f.data_slice().len() == l.volume())
+}
+
+/// The LODs pass3 needs to stitch seams, packed for `ChunkMeta::lod_ranks`:
+///
+/// - bits 0-1: this chunk's LOD rank;
+/// - bits `2 + 2k`: the rank whose voxel units apron region `k`
+///   (`NEIGHBORS_MASK` order) holds: the neighbour's, or this chunk's own
+///   where the apron fell back to its edge;
+/// - bits `16 + 2a`: the rank of the `-a` face neighbour if it is coarser
+///   than this chunk, else this chunk's own.
+///
+/// Keep in sync with `fill_apron` (which neighbours it reads) and the
+/// decoding in `surface_nets_pass3.wgsl` and `cursor_query.wgsl`.
+#[must_use]
+pub fn seam_lod_ranks<T: Component + VoxelDataSlice>(
+    chunk_pos: IVec3,
+    lod: LOD,
+    chunk_manager: &ChunkManager,
+    query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
+) -> u32 {
+    let mut ranks = lod.rank();
+    for (shift, offset) in (2u32..).step_by(2).zip(NEIGHBORS_MASK) {
+        let source = apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
+            .map_or(lod, |(_, l)| l);
+        ranks |= source.rank() << shift;
+    }
+    for (shift, axis) in (16u32..).step_by(2).zip([IVec3::X, IVec3::Y, IVec3::Z]) {
+        let below = apron_source(chunk_pos.wrapping_sub(axis), chunk_manager, query)
+            .map(|(_, l)| l)
+            .filter(|l| l.size() < lod.size())
+            .unwrap_or(lod);
+        ranks |= below.rank() << shift;
+    }
+    ranks
+}
+
 /// [`fill_apron`] over plain data: `neighbor(offset)` gives that neighbour's
 /// voxels and size, or `None` to fall back to this chunk's edge.
+///
+/// Same-LOD neighbours are copied as-is. Other LODs are resampled at this
+/// chunk's spacing but keep the neighbour's voxel units, so SDF values never
+/// clip at `SDF_BAND`; pass3 rescales them (see [`seam_lod_ranks`]).
 pub(crate) fn fill_apron_with<'a, T>(
     vol: &mut [T::Elem],
     size: u32,
@@ -804,10 +860,16 @@ pub(crate) fn fill_apron_with<'a, T>(
                                 .unwrap_or_default(),
                             1.0,
                         ),
+                        // A coarser neighbour's 2 apron layers are its first
+                        // 2 voxels, so a border cell spans one of its cells
+                        // and pass3 can snap it to the coarse vertex.
                         Some((data, n_size)) => {
                             let ratio = f32_from_u32(n_size) / f32_from_u32(size);
-                            let at = local.as_vec3() * ratio;
-                            T::rescale(T::sample_apron(data, n_size, at.x, at.y, at.z), ratio)
+                            let mut at = local.as_vec3() * ratio;
+                            if n_size < size {
+                                at = Vec3::select(dir.cmpeq(UVec3::ONE), local.as_vec3(), at);
+                            }
+                            T::sample_apron(data, n_size, at.x, at.y, at.z)
                         }
                         None => vol.get(idx(cell.min(edge))).copied().unwrap_or_default(),
                     };
@@ -880,7 +942,7 @@ mod tests {
     ) {
         use super::{NEIGHBORS_MASK, PADDING};
         use crate::num::f32_from_u32;
-        use bevy::math::UVec3;
+        use bevy::math::{UVec3, Vec3};
         let padded = size.wrapping_add(PADDING);
         let idx = |c: UVec3| flatten_cube(c.x, c.y, c.z, padded);
         let edge = UVec3::splat(size.wrapping_sub(1));
@@ -895,8 +957,14 @@ mod tests {
                         vol[idx(cell)] = match n {
                             Some((data, n_size)) => {
                                 let ratio = f32_from_u32(*n_size) / f32_from_u32(size);
-                                let at = cell.wrapping_sub(origin).as_vec3() * ratio;
-                                T::rescale(T::sample_apron(data, *n_size, at.x, at.y, at.z), ratio)
+                                let local = cell.wrapping_sub(origin).as_vec3();
+                                // coarser: apron layers are its own voxels 0 and 1
+                                let at = if *n_size < size {
+                                    Vec3::select(dir.cmpeq(UVec3::ONE), local, local * ratio)
+                                } else {
+                                    local * ratio
+                                };
+                                T::sample_apron(data, *n_size, at.x, at.y, at.z)
                             }
                             None => vol[idx(cell.min(edge))],
                         };

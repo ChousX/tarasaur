@@ -20,7 +20,7 @@ struct BatchUniforms {
 
 struct ChunkMeta {
     chunk_world_origin: vec3<f32>,
-    active_list_pos: u32,
+    lod_ranks: u32, // see seam_lod_ranks in voxel/systems.rs
 }
 
 @group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;
@@ -75,16 +75,82 @@ fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
     return coord.z * texture_size * texture_size + coord.y * texture_size + coord.x;
 }
 
+// --- LOD seams ---
+// Apron voxels from a neighbour at another LOD hold that neighbour's voxel
+// units, and a coarser neighbour's two apron layers are its first two
+// voxels, so along that axis layer n+1 sits a whole coarse voxel past n.
+// The functions below turn texels back into this chunk's units and
+// positions. Set from ChunkMeta at the top of cs_main.
+var<private> lod_ranks: u32;
+
+fn rank_log2_size(rank: u32) -> i32 {
+    let log2_sizes = array<i32, 4>(2, 4, 5, 6); // LOD sizes 4, 16, 32, 64
+    return log2_sizes[rank & 3u];
+}
+
+// log2(own size / source size) for the voxels at texel `t`: > 0 inside a
+// coarser neighbour's apron, < 0 inside a finer one's, else 0.
+fn texel_lod_shift(t: vec3<u32>) -> i32 {
+    let n = uniforms.cell_count - 1u;
+    let o = select(vec3<u32>(0u), vec3<u32>(1u), t >= vec3<u32>(n));
+    let bits = o.x | (o.y << 1u) | (o.z << 2u);
+    if (bits == 0u) {
+        return 0;
+    }
+    // (t >= n) bits -> NEIGHBORS_MASK index
+    let region = array<u32, 8>(0u, 0u, 1u, 3u, 2u, 4u, 5u, 6u);
+    let source = (lod_ranks >> (2u + 2u * region[bits])) & 3u;
+    return rank_log2_size(lod_ranks) - rank_log2_size(source);
+}
+
+// Rank shift of the coarser -x/-y/-z face neighbour (0 if none).
+fn below_lod_shift(axis: u32) -> i32 {
+    let below = (lod_ranks >> (16u + 2u * axis)) & 3u;
+    return rank_log2_size(lod_ranks) - rank_log2_size(below);
+}
+
+// Where texel `t` sits, in this chunk's voxels.
+fn texel_pos(t: vec3<u32>) -> vec3<f32> {
+    let p = vec3<f32>(t);
+    let shift = texel_lod_shift(t);
+    if (shift <= 0) {
+        return p;
+    }
+    let n = uniforms.cell_count - 1u;
+    let far = vec3<f32>(f32(n) + ldexp(1.0, shift));
+    return select(p, far, t > vec3<u32>(n));
+}
+
+// Inverse of texel_pos, for continuous positions.
+fn texel_coord(p: vec3<f32>) -> vec3<f32> {
+    let n = f32(uniforms.cell_count - 1u);
+    if (all(p <= vec3<f32>(n))) {
+        return p;
+    }
+    let max_t = vec3<f32>(f32(uniforms.texture_size - 1u));
+    let shift = texel_lod_shift(vec3<u32>(clamp(p, vec3<f32>(0.0), max_t)));
+    if (shift <= 0) {
+        return p;
+    }
+    let q = vec3<f32>(n) + (p - vec3<f32>(n)) * ldexp(1.0, -shift);
+    return select(p, q, p > vec3<f32>(n));
+}
+
+// SDF at texel `t`, in this chunk's voxels.
+fn sdf_at(sdf_base: u32, t: vec3<u32>) -> f32 {
+    let i = sdf_base + flatten_sdf_idx(t, uniforms.texture_size);
+    return ldexp(decode_sdf(sdf_buffer[i >> 1u], i), texel_lod_shift(t));
+}
+
 fn sample_sdf(sdf_base: u32, coord: vec3<i32>) -> f32 {
     let max_coord = i32(uniforms.texture_size) - 1;
     let clamped = clamp(coord, vec3<i32>(0), vec3<i32>(max_coord));
-    let idx = u32(clamped.z) * uniforms.texture_size * uniforms.texture_size
-        + u32(clamped.y) * uniforms.texture_size + u32(clamped.x);
-    let i = sdf_base + idx;
-    return decode_sdf(sdf_buffer[i >> 1u], i);
+    return sdf_at(sdf_base, vec3<u32>(clamped));
 }
 
-fn sample_sdf_trilinear(sdf_base: u32, p: vec3<f32>) -> f32 {
+// Trilinear at `pos`, in this chunk's voxels.
+fn sample_sdf_trilinear(sdf_base: u32, pos: vec3<f32>) -> f32 {
+    let p = texel_coord(pos);
     let ip = vec3<i32>(floor(p));
     let f = fract(p);
     let c000 = sample_sdf(sdf_base, ip + vec3<i32>(0, 0, 0));
@@ -119,7 +185,9 @@ struct MaterialBlend {
     weight_u8: u32, // weight of id_a, 0-255; id_b implicitly gets (255 - weight_u8)
 }
 
-fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) -> MaterialBlend {
+// Corner i of the cell is texel `lo + corners[i] * step`; `frac` is the
+// vertex's position within it, 0..1 per axis.
+fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, frac: vec3<f32>) -> MaterialBlend {
     let corners = array<vec3<u32>, 8>(
         vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
         vec3<u32>(0u, 1u, 0u), vec3<u32>(1u, 1u, 0u),
@@ -141,7 +209,7 @@ fn tally_corner_materials(material_base: u32, id: vec3<u32>, frac: vec3<f32>) ->
     var uniq_count = 0u;
 
     for (var i = 0u; i < 8u; i++) {
-        let mat_id = sample_material_id(material_base, flatten_sdf_idx(id + corners[i], uniforms.texture_size));
+        let mat_id = sample_material_id(material_base, flatten_sdf_idx(lo + corners[i] * step, uniforms.texture_size));
         let w = corner_weights[i];
 
         var found = false;
@@ -206,6 +274,61 @@ fn pack_material_b(id_b: u32, real_slot: u32) -> f32 {
     return bitcast<f32>(packed);
 }
 
+// Surface-nets vertex of the cell whose corner i is texel
+// `lo + corners[i] * step`, in this chunk's voxels; .w = crossing edges.
+fn cell_surface_vertex(sdf_base: u32, lo: vec3<u32>, step: vec3<u32>) -> vec4<f32> {
+    let corners = array<vec3<u32>, 8>(
+        vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
+        vec3<u32>(0u, 1u, 0u), vec3<u32>(1u, 1u, 0u),
+        vec3<u32>(0u, 0u, 1u), vec3<u32>(1u, 0u, 1u),
+        vec3<u32>(0u, 1u, 1u), vec3<u32>(1u, 1u, 1u)
+    );
+    let edges = array<vec2<u32>, 12>(
+        vec2<u32>(0u, 1u), vec2<u32>(2u, 3u), vec2<u32>(4u, 5u), vec2<u32>(6u, 7u),
+        vec2<u32>(0u, 2u), vec2<u32>(1u, 3u), vec2<u32>(4u, 6u), vec2<u32>(5u, 7u),
+        vec2<u32>(0u, 4u), vec2<u32>(1u, 5u), vec2<u32>(2u, 6u), vec2<u32>(3u, 7u)
+    );
+
+    var sdfs: array<f32, 8>;
+    var pos: array<vec3<f32>, 8>;
+    for (var i = 0u; i < 8u; i++) {
+        let t = lo + corners[i] * step;
+        sdfs[i] = sdf_at(sdf_base, t);
+        pos[i] = texel_pos(t);
+    }
+
+    var vert_pos = vec3<f32>(0.0);
+    var edge_count = 0.0;
+    for (var i = 0u; i < 12u; i++) {
+        let c0 = edges[i].x;
+        let c1 = edges[i].y;
+        let v0 = sdfs[c0];
+        let v1 = sdfs[c1];
+        if ((v0 <= 0.0) != (v1 <= 0.0)) {
+            // Prevent divide-by-zero or step artifacts
+            let diff = v1 - v0;
+            let t = select(0.5, -v0 / diff, abs(diff) > 0.00001);
+
+            vert_pos += mix(pos[c0], pos[c1], clamp(t, 0.0, 1.0));
+            edge_count += 1.0;
+        }
+    }
+
+    if (edge_count > 0.0) {
+        return vec4<f32>(vert_pos / edge_count, edge_count);
+    }
+    return vec4<f32>((pos[0] + pos[7]) * 0.5, 0.0);
+}
+
+// An `axis` edge at `id` whose cells all lie in a finer +neighbour's apron
+// slab: that neighbour meshes the slab, snapping its border cells to ours.
+fn in_finer_apron_slab(id: vec3<u32>, axis: u32) -> bool {
+    let n = uniforms.cell_count - 1u;
+    var others = id;
+    others[axis] = 0u;
+    return id[axis] == n && all(others < vec3<u32>(n)) && texel_lod_shift(id) < 0;
+}
+
 // One invocation per active cell (pass1's list), not per cell: only a few
 // percent of a chunk's cells carry surface. Dispatched as x = vertex within
 // the chunk, y = chunk; x is sized from the CPU's per-chunk count.
@@ -240,6 +363,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cc = uniforms.cell_count;
     let id = vec3<u32>(cell % cc, (cell / cc) % cc, cell / (cc * cc));
     let cmeta = chunk_meta[real_slot];
+    lod_ranks = cmeta.lod_ranks;
     let sdf_base = sdf_offset_for(real_slot);
     let vbase = slot_vertex_base[real_slot];
     let idx_base = vbase * 18u;
@@ -248,54 +372,45 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     {
         let vert_idx = vbase + vertex;
 
-        let corners = array<vec3<u32>, 8>(
-            vec3<u32>(0u, 0u, 0u), vec3<u32>(1u, 0u, 0u),
-            vec3<u32>(0u, 1u, 0u), vec3<u32>(1u, 1u, 0u),
-            vec3<u32>(0u, 0u, 1u), vec3<u32>(1u, 0u, 1u),
-            vec3<u32>(0u, 1u, 1u), vec3<u32>(1u, 1u, 1u)
-        );
-        let edges = array<vec2<u32>, 12>(
-            vec2<u32>(0u, 1u), vec2<u32>(2u, 3u), vec2<u32>(4u, 5u), vec2<u32>(6u, 7u),
-            vec2<u32>(0u, 2u), vec2<u32>(1u, 3u), vec2<u32>(4u, 6u), vec2<u32>(5u, 7u),
-            vec2<u32>(0u, 4u), vec2<u32>(1u, 5u), vec2<u32>(2u, 6u), vec2<u32>(3u, 7u)
-        );
-
-        var sdfs: array<f32, 8>;
-        for (var i = 0u; i < 8u; i++) {
-            sdfs[i] = sample_sdf(sdf_base, vec3<i32>(id + corners[i]));
-        }
-
-        var vert_pos = vec3<f32>(0.0);
-        var edge_count = 0.0;
-        for (var i = 0u; i < 12u; i++) {
-            let c0 = edges[i].x;
-            let c1 = edges[i].y;
-            let v0 = sdfs[c0];
-            let v1 = sdfs[c1];
-            if ((v0 <= 0.0) != (v1 <= 0.0)) {
-                let p0 = vec3<f32>(id + corners[c0]);
-                let p1 = vec3<f32>(id + corners[c1]);
-
-                // Prevent divide-by-zero or step artifacts
-                let diff = v1 - v0;
-                let t = select(0.5, -v0 / diff, abs(diff) > 0.00001);
-
-                vert_pos += mix(p0, p1, clamp(t, 0.0, 1.0));
-                edge_count += 1.0;
+        // Next to a coarser chunk the vertex is the coarse cell's, so both
+        // sides of the seam share it. Cells at our +faces lie in a coarser
+        // neighbour's apron and already span one of its cells; cells
+        // against a coarser -face neighbour lie inside one of its +face
+        // border cells, which it meshes from our voxels on its own grid.
+        let n = cc - 1u;
+        let up = texel_lod_shift(id);
+        var shift = max(up, 0);
+        for (var a = 0u; a < 3u; a++) {
+            if (id[a] == 0u) {
+                shift = max(shift, below_lod_shift(a));
             }
         }
-
-        if (edge_count > 0.0) {
-            vert_pos = vert_pos / edge_count;
-        } else {
-            vert_pos = vec3<f32>(id) + vec3<f32>(0.5);
+        var lo = id;
+        var step = vec3<u32>(1u);
+        var vert = vec4<f32>(0.0);
+        // Apron axes span the coarse cell only if that apron is at `shift`.
+        if (shift > 0 && (all(id < vec3<u32>(n)) || up == shift)) {
+            let r = 1u << u32(shift);
+            let at_apron = id == vec3<u32>(n);
+            lo = select((id / r) * r, id, at_apron);
+            step = select(vec3<u32>(r), vec3<u32>(1u), at_apron);
+            vert = cell_surface_vertex(sdf_base, lo, step);
         }
+        // Not snapped, or the coarse cell has no crossing (a feature finer
+        // than the coarse grid): use our own cell.
+        if (vert.w == 0.0) {
+            lo = id;
+            step = vec3<u32>(1u);
+            vert = cell_surface_vertex(sdf_base, lo, step);
+        }
+        let vert_pos = vert.xyz;
 
         let normal = compute_normal(sdf_base, vert_pos);
         let world_pos = cmeta.chunk_world_origin + (vert_pos * uniforms.voxel_size);
 
-        let frac = vert_pos - vec3<f32>(id);
-        let blend = tally_corner_materials(sdf_base, id, frac);
+        let p_lo = texel_pos(lo);
+        let frac = (vert_pos - p_lo) / (texel_pos(lo + step) - p_lo);
+        let blend = tally_corner_materials(sdf_base, lo, step, frac);
 
         vertex_buffer[vert_idx] = Vertex(
             vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8)),
@@ -311,7 +426,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let id_x = id + vec3<u32>(1u, 0u, 0u);
     let sdf_x = sample_sdf(sdf_base, vec3<i32>(id_x));
     if (curr_inside != (sdf_x <= 0.0)) {
-        if (id.y > 0u && id.z > 0u) {
+        if (id.y > 0u && id.z > 0u && !in_finer_apron_slab(id, 0u)) {
             let idx_0 = get_cell_index(id, cell_base);
             let idx_1 = get_cell_index(id - vec3<u32>(0u, 1u, 0u), cell_base);
             let idx_2 = get_cell_index(id - vec3<u32>(0u, 1u, 1u), cell_base);
@@ -345,7 +460,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let id_y = id + vec3<u32>(0u, 1u, 0u);
     let sdf_y = sample_sdf(sdf_base, vec3<i32>(id_y));
     if (curr_inside != (sdf_y <= 0.0)) {
-        if (id.x > 0u && id.z > 0u) {
+        if (id.x > 0u && id.z > 0u && !in_finer_apron_slab(id, 1u)) {
             let idx_0 = get_cell_index(id, cell_base);
             let idx_1 = get_cell_index(id - vec3<u32>(0u, 0u, 1u), cell_base);
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 0u, 1u), cell_base);
@@ -379,7 +494,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let id_z = id + vec3<u32>(0u, 0u, 1u);
     let sdf_z = sample_sdf(sdf_base, vec3<i32>(id_z));
     if (curr_inside != (sdf_z <= 0.0)) {
-        if (id.x > 0u && id.y > 0u) {
+        if (id.x > 0u && id.y > 0u && !in_finer_apron_slab(id, 2u)) {
             let idx_0 = get_cell_index(id, cell_base);
             let idx_1 = get_cell_index(id - vec3<u32>(1u, 0u, 0u), cell_base);
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 1u, 0u), cell_base);

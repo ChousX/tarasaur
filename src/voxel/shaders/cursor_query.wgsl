@@ -16,7 +16,7 @@ struct HitResult {
  
 struct ChunkMetaGpu {
     chunk_world_origin: vec3<f32>,
-    active_list_pos: u32,
+    lod_ranks: u32,
 };
 
 struct QueryUniforms {
@@ -89,6 +89,19 @@ fn sdf_index(base: u32, x: u32, y: u32, z: u32, s: u32) -> u32 {
     return base + (z * s + y) * s + x;
 }
 
+// Apron voxels from a neighbour at another LOD hold that neighbour's voxel
+// units (see seam_lod_ranks in voxel/systems.rs): factor to this chunk's.
+fn apron_scale(lod_ranks: u32, n: u32, x: u32, y: u32, z: u32) -> f32 {
+    let bits = u32(x >= n) | (u32(y >= n) << 1u) | (u32(z >= n) << 2u);
+    if (bits == 0u) {
+        return 1.0;
+    }
+    let log2_sizes = array<i32, 4>(2, 4, 5, 6); // LOD sizes 4, 16, 32, 64
+    let region = array<u32, 8>(0u, 0u, 1u, 3u, 2u, 4u, 5u, 6u); // -> NEIGHBORS_MASK index
+    let source = (lod_ranks >> (2u + 2u * region[bits])) & 3u;
+    return ldexp(1.0, log2_sizes[lod_ranks & 3u] - log2_sizes[source]);
+}
+
 // Trilinear sample, parameterized over which buffer/texture_size to hit —
 // one function per bound buffer since WGSL can't index storage-buffer
 // bindings dynamically without a binding_array.
@@ -103,11 +116,17 @@ fn sample_sdf(rank: u32, slot: u32, texture_size: u32, local_pos: vec3<f32>) -> 
     let z1 = min(z0 + 1u, texture_size - 1u);
     let s = texture_size;
     let base = slot * s * s * s;
+    let ranks = chunk_meta_at(rank, slot).lod_ranks;
+    let n = s - 2u;
 
-    let c000 = read_sdf(rank, sdf_index(base, x0, y0, z0, s)); let c100 = read_sdf(rank, sdf_index(base, x1, y0, z0, s));
-    let c010 = read_sdf(rank, sdf_index(base, x0, y1, z0, s)); let c110 = read_sdf(rank, sdf_index(base, x1, y1, z0, s));
-    let c001 = read_sdf(rank, sdf_index(base, x0, y0, z1, s)); let c101 = read_sdf(rank, sdf_index(base, x1, y0, z1, s));
-    let c011 = read_sdf(rank, sdf_index(base, x0, y1, z1, s)); let c111 = read_sdf(rank, sdf_index(base, x1, y1, z1, s));
+    let c000 = read_sdf(rank, sdf_index(base, x0, y0, z0, s)) * apron_scale(ranks, n, x0, y0, z0);
+    let c100 = read_sdf(rank, sdf_index(base, x1, y0, z0, s)) * apron_scale(ranks, n, x1, y0, z0);
+    let c010 = read_sdf(rank, sdf_index(base, x0, y1, z0, s)) * apron_scale(ranks, n, x0, y1, z0);
+    let c110 = read_sdf(rank, sdf_index(base, x1, y1, z0, s)) * apron_scale(ranks, n, x1, y1, z0);
+    let c001 = read_sdf(rank, sdf_index(base, x0, y0, z1, s)) * apron_scale(ranks, n, x0, y0, z1);
+    let c101 = read_sdf(rank, sdf_index(base, x1, y0, z1, s)) * apron_scale(ranks, n, x1, y0, z1);
+    let c011 = read_sdf(rank, sdf_index(base, x0, y1, z1, s)) * apron_scale(ranks, n, x0, y1, z1);
+    let c111 = read_sdf(rank, sdf_index(base, x1, y1, z1, s)) * apron_scale(ranks, n, x1, y1, z1);
 
     let c00 = mix(c000, c100, t.x); let c10 = mix(c010, c110, t.x);
     let c01 = mix(c001, c101, t.x); let c11 = mix(c011, c111, t.x);

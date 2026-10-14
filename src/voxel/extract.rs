@@ -29,25 +29,28 @@ use crate::{
     voxel::{
         arena::VoxelChunkArenaSet,
         resident::ForceResident,
-        systems::{ExtractedChunkField, NEIGHBORS_MASK, PADDING, fill_apron},
+        systems::{ExtractedChunkField, NEIGHBORS_MASK, PADDING, fill_apron, seam_lod_ranks},
     },
 };
 
 /// Frames between full consistency checks in debug builds.
 const AUDIT_INTERVAL: u32 = 120;
 
-/// What a chunk's padded volume depends on: its LOD, its own version and
-/// each `NEIGHBORS_MASK` neighbour's (border) version with that neighbour's
-/// LOD folded in. Unchanged key = unchanged padded volume.
-type ExtractKey = (LOD, [u64; 8]);
+/// What a chunk's upload depends on: its LOD, its own version, each
+/// `NEIGHBORS_MASK` neighbour's (border) version with that neighbour's LOD
+/// folded in, and its `seam_lod_ranks` (which add the -face neighbours'
+/// LODs). Unchanged key = unchanged upload.
+type ExtractKey = (LOD, [u64; 8], u32);
 
 type FieldQuery<'w, 's, T> =
     Query<'w, 's, (Entity, &'static ChunkPosition, &'static T, &'static LOD)>;
 
-/// Marks `pos` and every chunk whose apron reads `pos` (`pos - offset`).
+/// Marks `pos`, every chunk whose apron reads `pos` (`pos - offset`), and
+/// the `+x/+y/+z` neighbours, whose seam stitching depends on its LOD.
 fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
     dirty.insert(pos);
     dirty.extend(NEIGHBORS_MASK.iter().map(|off| pos.wrapping_sub(*off)));
+    dirty.extend([IVec3::X, IVec3::Y, IVec3::Z].map(|axis| pos.wrapping_add(axis)));
 }
 
 /// Registers the hand-off of field `T`: the main-world padding system and
@@ -126,6 +129,8 @@ pub struct PaddedChunk {
     pub entity: Entity,
     pub pos: IVec3,
     pub lod: LOD,
+    /// See `seam_lod_ranks`.
+    pub lod_ranks: u32,
     /// Shared with the render world rather than copied.
     pub bytes: Arc<[u8]>,
     /// Main-world frame it was built in.
@@ -185,7 +190,7 @@ impl ExtractState {
     }
 }
 
-fn extract_key<T: Component + Versionable>(
+fn extract_key<T: Component + Versionable + ApronSample>(
     field: &T,
     pos: IVec3,
     lod: LOD,
@@ -212,7 +217,11 @@ fn extract_key<T: Component + Versionable>(
             *slot = v ^ (u64::from(n_lod.rank()).wrapping_add(1) << 56);
         }
     }
-    (lod, versions)
+    (
+        lod,
+        versions,
+        seam_lod_ranks(pos, lod, chunk_manager, query),
+    )
 }
 
 /// The chunk's field plus its `+x/+y/+z` apron, as uploaded.
@@ -295,29 +304,29 @@ pub fn pad_dirty_chunks<T>(
         if last.get(&entity) == Some(&key) {
             continue;
         }
+        let lod_ranks = key.2;
         last.insert(entity, key);
-        jobs.push((entity, *pos, field, *lod));
+        jobs.push((entity, *pos, field, *lod, lod_ranks));
     }
 
     // Building the volumes: the expensive part, one task per chunk.
     let (manager, fields) = (&*chunk_manager, &query);
     let mut built: Vec<(usize, Vec<u8>)> = ComputeTaskPool::get().scope(|s| {
-        for (i, &(_, pos, field, lod)) in jobs.iter().enumerate() {
+        for (i, &(_, pos, field, lod, _)) in jobs.iter().enumerate() {
             s.spawn(async move { (i, padded_bytes(field, pos, lod, manager, fields)) });
         }
     });
     built.sort_unstable_by_key(|b| b.0);
-    outbox.chunks.extend(
-        jobs.iter()
-            .zip(built)
-            .map(|(&(entity, pos, _, lod), (_, bytes))| PaddedChunk {
-                entity,
-                pos,
-                lod,
-                bytes: bytes.into(),
-                seq: frame.0,
-            }),
-    );
+    outbox.chunks.extend(jobs.iter().zip(built).map(
+        |(&(entity, pos, _, lod, lod_ranks), (_, bytes))| PaddedChunk {
+            entity,
+            pos,
+            lod,
+            lod_ranks,
+            bytes: bytes.into(),
+            seq: frame.0,
+        },
+    ));
 }
 
 /// Forwards this frame's padded volumes of `T` to the render world.
@@ -332,6 +341,7 @@ where
             padded_data: Arc::clone(&c.bytes),
             size: c.lod.size().wrapping_add(PADDING),
             lod: c.lod,
+            lod_ranks: c.lod_ranks,
             seq: c.seq,
             _type: PhantomData,
         });
