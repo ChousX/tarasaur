@@ -9,10 +9,8 @@ repository = "https://github.com/ChousX/tarasaur"
 readme = "README.md"
 keywords = ["bevy", "voxel", "terrain", "gamedev", "surface-nets"]
 categories = ["game-development", "rendering"]
-# Dev tooling, bench output and the unused source textures stay out of the
-# published crate (crates.io caps packages at 10 MB).
+# Dev tooling and bench output stay out of the published crate.
 exclude = [
-    "/assets",
     "/bench_results",
     "/saves",
     "/tools",
