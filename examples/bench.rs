@@ -1214,6 +1214,8 @@ struct MeshReport {
     /// Triangles facing down, value = face normal y (centroid). The
     /// heightfield has no overhangs, so a correct triangle faces up.
     folds: Vec<MeshFlag>,
+    /// Each fold's corners, in its chunk's voxels, in `folds`' order.
+    fold_corners: Vec<[Vec3; 3]>,
     /// Vertex normals more than `MESH_MAX_NORMAL_DEG` degrees off the
     /// heightfield's: what showed as dark streaks along LOD seams.
     bad_normals: Vec<MeshFlag>,
@@ -1232,6 +1234,7 @@ impl MeshReport {
         self.off_surface.extend(part.off_surface);
         self.long_edges.extend(part.long_edges);
         self.folds.extend(part.folds);
+        self.fold_corners.extend(part.fold_corners);
         self.bad_normals.extend(part.bad_normals);
         for (m, p) in self.max_off.iter_mut().zip(part.max_off) {
             *m = m.max(p);
@@ -1758,6 +1761,9 @@ fn check_triangles(
             report
                 .folds
                 .push(chunk.flag(cross.normalize_or_zero().y, centroid));
+            report
+                .fold_corners
+                .push([a, b, c].map(|p| chunk.flag(0.0, p).local));
         }
     }
 }
@@ -1844,6 +1850,23 @@ fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
         .chain(normals.iter().take(8))
     {
         lines.push(describe_flag(kind, f, &r.lods));
+    }
+    let mut order: Vec<usize> = (0..r.folds.len()).collect();
+    order.sort_by(|&a, &b| {
+        let y = |i: usize| r.folds.get(i).map_or(0.0, |f| f.value);
+        y(a).total_cmp(&y(b))
+    });
+    for i in order.into_iter().take(12) {
+        if let (Some(f), Some(c)) = (r.folds.get(i), r.fold_corners.get(i)) {
+            let c = c.map(|v| format!("({:.2}, {:.2}, {:.2})", v.x, v.y, v.z));
+            lines.push(format!(
+                "  fold corners {:.2} chunk {} {:?}: {}",
+                f.value,
+                f.pos,
+                f.lod,
+                c.join(" ")
+            ));
+        }
     }
     lines
 }
