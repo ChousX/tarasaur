@@ -13,6 +13,7 @@ use bevy::prelude::*;
 ///
 /// let palette = PaletteBuilder::new(asset_server.load("terrain/albedo.ktx2"))
 ///     .with_arm(asset_server.load("terrain/arm.ktx2"))
+///     .with_normal(asset_server.load("terrain/normal.ktx2"))
 ///     .add_material(PaletteMaterial::new("grass").with_texture_scale(1.0))
 ///     .add_material(PaletteMaterial::new("stone").with_texture_scale(0.5))
 ///     .add_material(PaletteMaterial::new("dirt"))
@@ -21,6 +22,7 @@ use bevy::prelude::*;
 pub struct PaletteBuilder {
     albedo: Handle<Image>,
     arm: Option<Handle<Image>>,
+    normal: Option<Handle<Image>>,
     materials: Vec<PaletteMaterial>,
     generate_mipmaps: bool,
 }
@@ -33,6 +35,7 @@ impl PaletteBuilder {
         Self {
             albedo,
             arm: None,
+            normal: None,
             materials: Vec::new(),
             generate_mipmaps: false,
         }
@@ -45,6 +48,16 @@ impl PaletteBuilder {
     #[must_use]
     pub fn with_arm(mut self, arm: Handle<Image>) -> Self {
         self.arm = Some(arm);
+        self
+    }
+
+    /// Set the tangent-space normal map texture array.
+    ///
+    /// Optional. OpenGL convention (green = +V); R and G hold X and Y, and Z
+    /// is rebuilt in the shader. Must match the albedo's size and layer count.
+    #[must_use]
+    pub fn with_normal(mut self, normal: Handle<Image>) -> Self {
+        self.normal = Some(normal);
         self
     }
 
@@ -85,6 +98,7 @@ impl PaletteBuilder {
         TexturePalette {
             albedo: self.albedo,
             arm: self.arm,
+            normal: self.normal,
             materials: self.materials,
             generate_mipmaps: self.generate_mipmaps,
         }
@@ -105,6 +119,7 @@ pub trait QuickPalette {
         TexturePalette {
             albedo,
             arm: None,
+            normal: None,
             materials,
             generate_mipmaps: false,
         }
@@ -133,11 +148,13 @@ mod tests {
     fn test_builder_full() {
         let palette = PaletteBuilder::new(Handle::default())
             .with_arm(Handle::default())
+            .with_normal(Handle::default())
             .add_material(PaletteMaterial::new("grass").with_texture_scale(2.0))
             .with_generate_mipmaps(true)
             .build();
 
         assert!(palette.has_arm());
+        assert!(palette.has_normal());
         assert!(palette.generate_mipmaps);
         assert_eq!(palette.materials[0].texture_scale, 2.0);
     }

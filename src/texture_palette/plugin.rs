@@ -47,6 +47,7 @@ impl Plugin for PalettePlugin {
 pub struct ExtractedPalette {
     pub albedo: Handle<Image>,
     pub arm: Option<Handle<Image>>,
+    pub normal: Option<Handle<Image>>,
     pub materials: Vec<PaletteMaterial>,
 }
 
@@ -64,6 +65,7 @@ fn extract_palette(
     commands.insert_resource(ExtractedPalette {
         albedo: palette.albedo.clone(),
         arm: palette.arm.clone(),
+        normal: palette.normal.clone(),
         materials: palette.materials.clone(),
     });
 }

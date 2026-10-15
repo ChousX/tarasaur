@@ -1,5 +1,5 @@
 // Draws the meshed chunks: triplanar palette texturing (albedo, plus ARM
-// under VOXEL_ARM) with material blending, per-pixel discard against the
+// under VOXEL_ARM and normal maps under VOXEL_NORMAL) with material blending, per-pixel discard against the
 // chunk's visibility mask, and Bevy's PBR lighting.
 //
 // Groups 0 and 1 are Bevy's mesh view bind groups (view, lights, shadows,
@@ -17,6 +17,7 @@ import bevy_pbr::render::{
 @group(2) @binding(0) var texture_array: texture_2d_array<f32>;
 @group(2) @binding(1) var texture_sampler: sampler;
 @if(VOXEL_ARM) @group(2) @binding(3) var arm_array: texture_2d_array<f32>;
+@if(VOXEL_NORMAL) @group(2) @binding(4) var normal_array: texture_2d_array<f32>;
 @group(3) @binding(4) var<storage, read> material_buffer: array<u32>;
 
 fn sample_material_id(slot: u32, coord: vec3<i32>) -> u32 {
@@ -95,6 +96,8 @@ struct MaterialProperties {
     blend_sharpness: f32,
     roughness_override: f32,
     metallic_override: f32,
+    normal_fade_start: f32,
+    normal_fade_end: f32,
 }
 
 @group(2) @binding(2) var<storage, read> material_properties: array<MaterialProperties>;
@@ -210,22 +213,69 @@ const MIN_PROJ_WEIGHT: f32 = 0.01;
 const DEFAULT_ARM: vec3<f32> = vec3<f32>(1.0, 1.0, 0.0);
 
 // One material's surface at this pixel. arm = (AO, perceptual roughness,
-// metallic), with the material's overrides already applied.
+// metallic), with the material's overrides already applied. normal is a
+// world-space shading normal, unnormalized (only filled under VOXEL_NORMAL).
+// From sample_projection, normal is instead the tangent-space sample.
 struct Surface {
     albedo: vec4<f32>,
     arm: vec3<f32>,
+    normal: vec3<f32>,
 }
 
-// One projection's sample: albedo, plus ARM under VOXEL_ARM. The ARM fetch
-// reuses the albedo's coordinates and gradients.
-fn sample_projection(layer: i32, uv: vec2<f32>, ddx_uv: vec2<f32>, ddy_uv: vec2<f32>) -> Surface {
+// One projection's sample: albedo, plus ARM under VOXEL_ARM and, if
+// `normal`, the tangent-space normal under VOXEL_NORMAL. Those fetches reuse
+// the albedo's coordinates and gradients.
+fn sample_projection(
+    layer: i32,
+    uv: vec2<f32>,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>,
+    normal: bool,
+) -> Surface {
     var s = Surface(
         textureSampleGrad(texture_array, texture_sampler, uv, layer, ddx_uv, ddy_uv),
         DEFAULT_ARM,
+        vec3<f32>(0.0, 0.0, 1.0),
     );
     @if(VOXEL_ARM)
     s.arm = textureSampleGrad(arm_array, texture_sampler, uv, layer, ddx_uv, ddy_uv).rgb;
+    @if(VOXEL_NORMAL)
+    s.normal = sample_normal(layer, uv, ddx_uv, ddy_uv, normal);
     return s;
+}
+
+// The tangent-space normal, or flat without fetching when `fetch` is false.
+// Explicit gradients make the fetch safe in non-uniform control flow.
+@if(VOXEL_NORMAL)
+fn sample_normal(
+    layer: i32,
+    uv: vec2<f32>,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>,
+    fetch: bool,
+) -> vec3<f32> {
+    if (!fetch) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return decode_normal(textureSampleGrad(normal_array, texture_sampler, uv, layer, ddx_uv, ddy_uv).rg);
+}
+
+// Tangent-space normal from its X and Y; Z is rebuilt, so two-channel
+// formats (BC5, RG8) work. Maps are OpenGL convention like Bevy's
+// StandardMaterial (green = up the image), and +V runs down the image, so
+// green is flipped.
+fn decode_normal(rg: vec2<f32>) -> vec3<f32> {
+    let xy = (rg * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
+    return vec3<f32>(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+}
+
+// Whiteout blend of a projection's tangent-space normal `t` onto the mesh
+// normal, where the projection's U and V run along world axes with mesh
+// normal components `n_uv`, and `n_w` is the component along its own axis.
+// Returns (U, V, W) world components; callers swizzle them back to xyz.
+// UVs aren't mirrored on back faces, so the tangent frame needs no sign flips.
+fn whiteout(t: vec3<f32>, n_uv: vec2<f32>, n_w: f32) -> vec3<f32> {
+    return vec3<f32>(t.xy + n_uv, abs(t.z) * n_w);
 }
 
 fn sample_material(
@@ -234,8 +284,17 @@ fn sample_material(
     ddx_p: vec3<f32>,
     ddy_p: vec3<f32>,
     N: vec3<f32>,
+    view_dist: f32,
 ) -> Surface {
     let mat = material_properties[id];
+    // 1 near the camera, 0 past normal_fade_end, where the normal map isn't
+    // sampled at all. smoothstep by hand: WGSL's is undefined when
+    // start == end, which here should just cut off at that distance.
+    let fade_t = saturate(
+        (view_dist - mat.normal_fade_start) / max(mat.normal_fade_end - mat.normal_fade_start, 1e-4),
+    );
+    let normal_fade = 1.0 - fade_t * fade_t * (3.0 - 2.0 * fade_t);
+    let normal = normal_fade > 0.0;
     let layer = i32(id);
     let inv_scale = 1.0 / max(mat.texture_scale, 0.0001);
 
@@ -246,22 +305,30 @@ fn sample_material(
     let q = p * inv_scale;
     let dx = ddx_p * inv_scale;
     let dy = ddy_p * inv_scale;
-    var s = Surface(vec4<f32>(0.0), vec3<f32>(0.0));
+    var s = Surface(vec4<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
     if (w.x > 0.0) {
-        let x = sample_projection(layer, q.yz, dx.yz, dy.yz);
+        let x = sample_projection(layer, q.yz, dx.yz, dy.yz, normal);
         s.albedo += w.x * x.albedo;
         s.arm += w.x * x.arm;
+        @if(VOXEL_NORMAL)
+        s.normal += w.x * whiteout(x.normal, N.yz, N.x).zxy;
     }
     if (w.y > 0.0) {
-        let y = sample_projection(layer, q.xz, dx.xz, dy.xz);
+        let y = sample_projection(layer, q.xz, dx.xz, dy.xz, normal);
         s.albedo += w.y * y.albedo;
         s.arm += w.y * y.arm;
+        @if(VOXEL_NORMAL)
+        s.normal += w.y * whiteout(y.normal, N.xz, N.y).xzy;
     }
     if (w.z > 0.0) {
-        let z = sample_projection(layer, q.xy, dx.xy, dy.xy);
+        let z = sample_projection(layer, q.xy, dx.xy, dy.xy, normal);
         s.albedo += w.z * z.albedo;
         s.arm += w.z * z.arm;
+        @if(VOXEL_NORMAL)
+        s.normal += w.z * whiteout(z.normal, N.xy, N.z);
     }
+    @if(VOXEL_NORMAL)
+    s.normal = mix(N, s.normal, normal_fade);
 
     // A negative override means "use the texture".
     s.arm.y = select(s.arm.y, mat.roughness_override, mat.roughness_override >= 0.0);
@@ -281,6 +348,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let N = normalize(in.world_normal);
+    let view_dist = distance(in.world_position, view.world_position);
     let blend = fragment_material_blend(in.real_slot, in.world_position);
 
     // Decide which materials are actually needed.
@@ -291,13 +359,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var surface: Surface;
     if (need_a && need_b) {
-        let a = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N);
-        let b = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N);
-        surface = Surface(mix(b.albedo, a.albedo, t), mix(b.arm, a.arm, t));
+        let a = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N, view_dist);
+        let b = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N, view_dist);
+        surface = Surface(
+            mix(b.albedo, a.albedo, t),
+            mix(b.arm, a.arm, t),
+            mix(b.normal, a.normal, t),
+        );
     } else if (need_a) {
-        surface = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N);
+        surface = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N, view_dist);
     } else {
-        surface = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N);
+        surface = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N, view_dist);
     }
 
     var pbr = pbr_input_new();
@@ -308,8 +380,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr.diffuse_occlusion = vec3<f32>(surface.arm.x);
     pbr.frag_coord = in.clip_position;
     pbr.world_position = vec4<f32>(in.world_position, 1.0);
+    // world_normal stays the mesh normal (Bevy uses it for shadow biasing);
+    // N is the shading normal.
     pbr.world_normal = N;
     pbr.N = N;
+    @if(VOXEL_NORMAL)
+    pbr.N = normalize(surface.normal);
     pbr.is_orthographic = view.clip_from_view[3].w == 1.0;
     pbr.V = calculate_view(pbr.world_position, pbr.is_orthographic);
     pbr.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;

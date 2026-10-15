@@ -158,6 +158,9 @@ pub fn determine_material(height: f32, world_y: f32) -> TerrainMaterial {
     }
 }
 
+/// How strongly the generated normal maps tilt per unit of height change.
+const NORMAL_STRENGTH: f32 = 1.5;
+
 pub fn setup_terrain_palette(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -181,8 +184,17 @@ pub fn setup_terrain_palette(
         .saturating_mul(colors.len());
     let mut albedo_data = Vec::with_capacity(bytes);
     let mut arm_data = Vec::with_capacity(bytes);
+    let mut normal_data = Vec::with_capacity(bytes);
 
     for (seed, (base_col, roughness)) in (1u32..).zip(colors) {
+        // The noise doubles as a height map (dark = low, like the AO), wrapped
+        // so the tiling has no seams.
+        let wrap = |v: u32, d: i32| {
+            v.cast_signed()
+                .wrapping_add(d)
+                .rem_euclid(size.cast_signed())
+        };
+        let height = |x: u32, y: u32, dx: i32, dy: i32| hash2(wrap(x, dx), wrap(y, dy), seed);
         for y in 0..size {
             for x in 0..size {
                 let noise = hash2(x.cast_signed(), y.cast_signed(), seed);
@@ -197,6 +209,13 @@ pub fn setup_terrain_palette(
                 let ao = u8_from_f32(noise.mul_add(90.0, 165.0));
                 let rough = roughness.saturating_add(u8_from_f32((1.0 - noise) * 30.0));
                 arm_data.extend([ao, rough, 0, 255]);
+
+                // OpenGL convention: green = up the image, i.e. towards row 0.
+                let ddx = height(x, y, 1, 0) - height(x, y, -1, 0);
+                let ddy = height(x, y, 0, 1) - height(x, y, 0, -1);
+                let n = Vec3::new(-ddx, ddy, 1.0 / NORMAL_STRENGTH).normalize();
+                let unorm = |c: f32| u8_from_f32(c.mul_add(127.5, 127.5));
+                normal_data.extend([unorm(n.x), unorm(n.y), unorm(n.z), 255]);
             }
         }
     }
@@ -223,11 +242,21 @@ pub fn setup_terrain_palette(
         RenderAssetUsages::default(),
     );
 
+    let normal_image = Image::new(
+        extent,
+        TextureDimension::D2,
+        normal_data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+
     let albedo_handle = images.add(albedo_image);
     let arm_handle = images.add(arm_image);
+    let normal_handle = images.add(normal_image);
 
     let palette = PaletteBuilder::new(albedo_handle)
         .with_arm(arm_handle)
+        .with_normal(normal_handle)
         .add_material(
             PaletteMaterial::new("grass")
                 .with_texture_scale(1.0)

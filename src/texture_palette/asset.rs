@@ -9,8 +9,9 @@ use super::validation::{self, PaletteValidationError};
 
 /// A texture palette containing all materials for triplanar voxel rendering.
 ///
-/// A palette is an albedo texture array, plus an optional ARM array, where
-/// each layer corresponds to a material that can be applied to vertices.
+/// A palette is an albedo texture array, plus optional ARM and normal map
+/// arrays, where each layer corresponds to a material that can be applied to
+/// vertices.
 ///
 /// # Texture Requirements
 ///
@@ -19,8 +20,9 @@ use super::validation::{self, PaletteValidationError};
 /// - Square and power-of-two per layer
 /// - sRGB format (e.g., `Rgba8UnormSrgb`, `Bc7RgbaUnormSrgb`)
 ///
-/// The optional ARM texture must match the albedo's size and layer count,
-/// in a linear format (e.g., `Rgba8Unorm`, `Bc7RgbaUnorm`).
+/// The optional ARM and normal map textures must match the albedo's size and
+/// layer count, in a linear format (e.g., `Rgba8Unorm`, `Bc7RgbaUnorm`, or
+/// `Bc5RgUnorm` for normals).
 ///
 /// # Example
 ///
@@ -30,6 +32,7 @@ use super::validation::{self, PaletteValidationError};
 /// let palette = TexturePalette {
 ///     albedo: asset_server.load("terrain/albedo.ktx2"),
 ///     arm: Some(asset_server.load("terrain/arm.ktx2")),
+///     normal: Some(asset_server.load("terrain/normal.ktx2")),
 ///     materials: vec![
 ///         PaletteMaterial::new("grass").with_texture_scale(1.0),
 ///         PaletteMaterial::new("stone").with_texture_scale(0.5),
@@ -52,6 +55,14 @@ pub struct TexturePalette {
     /// Without it, every material is fully unoccluded, fully rough and
     /// non-metallic unless its overrides say otherwise.
     pub arm: Option<Handle<Image>>,
+
+    /// Tangent-space normal map texture array.
+    ///
+    /// Optional. Must be linear format, with the albedo's size and layer
+    /// count. OpenGL convention (green = +V): R and G hold the normal's X and
+    /// Y, and Z is rebuilt in the shader, so a two-channel format such as
+    /// `Bc5RgUnorm` works. Without it, terrain is lit by its mesh normals.
+    pub normal: Option<Handle<Image>>,
 
     /// Per-layer material properties.
     ///
@@ -79,11 +90,18 @@ impl TexturePalette {
         self.arm.is_some()
     }
 
+    /// Check if this palette has a normal map texture.
+    #[must_use]
+    pub const fn has_normal(&self) -> bool {
+        self.normal.is_some()
+    }
+
     /// Validate the palette against loaded image assets.
     ///
     /// This checks that:
     /// - The albedo texture is loaded and has a valid format
-    /// - The ARM texture, once loaded, is linear and matches the albedo
+    /// - The ARM and normal map textures, once loaded, are linear and match
+    ///   the albedo
     /// - Material count doesn't exceed layer count
     ///
     /// # Errors
@@ -104,6 +122,9 @@ impl TexturePalette {
         // Validate ARM (optional). If not loaded yet, it's checked next time.
         if let Some(arm_image) = self.arm.as_ref().and_then(|h| images.get(h)) {
             validation::validate_arm(arm_image, albedo_image)?;
+        }
+        if let Some(normal_image) = self.normal.as_ref().and_then(|h| images.get(h)) {
+            validation::validate_normal(normal_image, albedo_image)?;
         }
 
         // Validate material count
@@ -132,5 +153,6 @@ mod tests {
         let palette = TexturePalette::default();
         assert_eq!(palette.material_count(), 0);
         assert!(!palette.has_arm());
+        assert!(!palette.has_normal());
     }
 }

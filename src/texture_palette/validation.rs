@@ -35,6 +35,25 @@ pub enum PaletteValidationError {
         arm_height: u32,
     },
 
+    #[error("Normal map texture has invalid format: expected linear format, got {found:?}")]
+    InvalidNormalFormat { found: TextureFormat },
+
+    #[error("Normal map texture must be a 2D array texture, got {found:?}")]
+    NormalNotArray { found: TextureDimension },
+
+    #[error("Normal map texture has {normal} layers, albedo has {albedo}")]
+    NormalLayerCountMismatch { albedo: u32, normal: u32 },
+
+    #[error(
+        "Normal map texture is {normal_width}x{normal_height}, albedo is {albedo_width}x{albedo_height}"
+    )]
+    NormalSizeMismatch {
+        albedo_width: u32,
+        albedo_height: u32,
+        normal_width: u32,
+        normal_height: u32,
+    },
+
     #[error("Material count ({material_count}) exceeds texture layer count ({layer_count})")]
     TooManyMaterials {
         material_count: usize,
@@ -166,6 +185,51 @@ pub fn validate_arm(arm: &Image, albedo: &Image) -> Result<(), PaletteValidation
     Ok(())
 }
 
+/// Check if a texture format is valid for the linear normal map texture:
+/// any ARM format, plus two-channel ones (the shader rebuilds Z).
+#[must_use]
+pub fn is_valid_normal_format(format: TextureFormat) -> bool {
+    is_valid_linear_format(format)
+        || matches!(
+            format,
+            TextureFormat::Rg8Unorm | TextureFormat::Bc5RgUnorm | TextureFormat::EacRg11Unorm
+        )
+}
+
+/// Validate the normal map texture against the albedo texture.
+///
+/// # Errors
+///
+/// If the normal map is not a linear 2D array matching the albedo's layer
+/// count and size.
+pub fn validate_normal(normal: &Image, albedo: &Image) -> Result<(), PaletteValidationError> {
+    let desc = &normal.texture_descriptor;
+    if desc.dimension != TextureDimension::D2 {
+        return Err(PaletteValidationError::NormalNotArray {
+            found: desc.dimension,
+        });
+    }
+    if !is_valid_normal_format(desc.format) {
+        return Err(PaletteValidationError::InvalidNormalFormat { found: desc.format });
+    }
+    let albedo_size = albedo.texture_descriptor.size;
+    if desc.size.depth_or_array_layers != albedo_size.depth_or_array_layers {
+        return Err(PaletteValidationError::NormalLayerCountMismatch {
+            albedo: albedo_size.depth_or_array_layers,
+            normal: desc.size.depth_or_array_layers,
+        });
+    }
+    if desc.size.width != albedo_size.width || desc.size.height != albedo_size.height {
+        return Err(PaletteValidationError::NormalSizeMismatch {
+            albedo_width: albedo_size.width,
+            albedo_height: albedo_size.height,
+            normal_width: desc.size.width,
+            normal_height: desc.size.height,
+        });
+    }
+    Ok(())
+}
+
 /// Validate material count against texture layers and maximum.
 ///
 /// # Errors
@@ -208,5 +272,13 @@ mod tests {
         assert!(is_valid_linear_format(TextureFormat::Rgba8Unorm));
         assert!(is_valid_linear_format(TextureFormat::Bc7RgbaUnorm));
         assert!(!is_valid_linear_format(TextureFormat::Rgba8UnormSrgb)); // sRGB, not linear
+    }
+
+    #[test]
+    fn test_normal_formats() {
+        assert!(is_valid_normal_format(TextureFormat::Rgba8Unorm));
+        assert!(is_valid_normal_format(TextureFormat::Bc5RgUnorm));
+        assert!(is_valid_normal_format(TextureFormat::Rg8Unorm));
+        assert!(!is_valid_normal_format(TextureFormat::Rgba8UnormSrgb)); // sRGB, not linear
     }
 }

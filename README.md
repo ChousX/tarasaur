@@ -38,10 +38,10 @@ hardware such as a Steam Deck.
 - **Persistence.** Edited chunks autosave to `./saves/chunks/` (`SaveDirectory`). Saves load
   before generators, and lower LODs are downsampled from the save.
 - **Triplanar texturing with PBR lighting.** A `TexturePalette` albedo
-  array, plus an optional ARM array (ambient occlusion, roughness,
-  metallic), blended between voxel materials. Lighting is Bevy's own PBR,
-  so terrain gets the scene's lights, shadows from other meshes, fog, light
-  probes and tonemapping.
+  array, plus optional ARM (ambient occlusion, roughness, metallic) and
+  normal map arrays, blended between voxel materials. Lighting is Bevy's
+  own PBR, so terrain gets the scene's lights, shadows from other meshes,
+  fog, light probes and tonemapping.
 - **Terrain ray casts.** A CPU `TerrainRay` answers in the same frame at any
   LOD. A GPU query pipeline reads results back a few frames later.
 - **Batched drawing.** Chunks live in large per-LOD GPU arenas. Each view
@@ -113,10 +113,13 @@ with `CursorBrush { enabled: false, ..default() }` and edit from
    array (R = AO, G = roughness, B = metallic, linear format, same size and
    layer count as the albedo). Without one, every material is matte and
    non-metallic. `PaletteMaterial::with_roughness` / `with_metallic`
-   override the texture per material.
+   override the texture per material. Add `.with_normal(handle)` for a
+   tangent-space normal map array (OpenGL convention, like Bevy's
+   `StandardMaterial`; R and G only, so `Bc5RgUnorm` works). A palette
+   without one skips the normal mapping shader code entirely.
 
 `examples/common/mod.rs` does all four steps for a heightfield terrain,
-including a generated ARM array.
+including generated ARM and normal map arrays.
 
 The terrain doesn't cast shadows yet, and it isn't drawn in Bevy's
 prepasses, so screen-space effects (SSAO, SSR) don't see it.

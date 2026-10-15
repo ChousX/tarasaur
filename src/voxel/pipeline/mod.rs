@@ -155,12 +155,13 @@ pub enum RasterPass {
 /// What a raster pipeline is specialized on.
 ///
 /// The view's mesh pipeline key (MSAA, target format, tonemapping, prepasses,
-/// fog, light probes, ...), whether the palette has an ARM texture to
-/// sample, and which pass.
+/// fog, light probes, ...), whether the palette has ARM and normal map
+/// textures to sample, and which pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoxelRasterKey {
     pub view: MeshPipelineKey,
     pub arm: bool,
+    pub normal: bool,
     pub pass: RasterPass,
 }
 
@@ -209,18 +210,19 @@ pub fn raster_keys(
     depth_prepass: VoxelDepthPrepass,
 ) -> Option<(Option<VoxelRasterKey>, VoxelRasterKey)> {
     let &view_key = view_keys.get(&view.retained_view_entity)?;
-    let key = |arm, pass| VoxelRasterKey {
+    let key = |textures: bool, pass| VoxelRasterKey {
         view: view_key,
-        arm,
+        arm: textures && material.has_arm,
+        normal: textures && material.has_normal,
         pass,
     };
     Some(if depth_prepass.0 {
         (
             Some(key(false, RasterPass::Prepass)),
-            key(material.has_arm, RasterPass::ShadeAfterPrepass),
+            key(true, RasterPass::ShadeAfterPrepass),
         )
     } else {
-        (None, key(material.has_arm, RasterPass::Shade))
+        (None, key(true, RasterPass::Shade))
     })
 }
 
@@ -285,6 +287,9 @@ fn material_layout_entries() -> Vec<BindGroupLayoutEntry> {
         // Binding 3: ARM (a 1x1 dummy when the palette has none; the shader
         // only samples it under `VOXEL_ARM`)
         texture_array(3),
+        // Binding 4: normal map (a dummy when the palette has none; sampled
+        // only under `VOXEL_NORMAL`)
+        texture_array(4),
     ]
 }
 
@@ -457,6 +462,9 @@ fn raster_pipeline_descriptor(
     if key.arm {
         shader_defs.push("VOXEL_ARM".into());
     }
+    if key.normal {
+        shader_defs.push("VOXEL_NORMAL".into());
+    }
     // The prepass writes depth only; the shading pass after it tests against
     // that depth without writing it, so each pixel is shaded once.
     let (label, fragment_entry, color_writes, depth_write) = match key.pass {
@@ -547,12 +555,18 @@ fn raster_pipeline_descriptor(
     }
 }
 
+/// The palette's texture arrays, or dummies standing in for them.
+struct MaterialTextures<'a> {
+    albedo: &'a TextureView,
+    arm: &'a TextureView,
+    normal: &'a TextureView,
+}
+
 fn material_bind_group(
     render_device: &RenderDevice,
     layout: &BindGroupLayout,
     label: &'static str,
-    albedo: &TextureView,
-    arm: &TextureView,
+    textures: &MaterialTextures,
     sampler: &Sampler,
     properties: &Buffer,
 ) -> BindGroup {
@@ -562,7 +576,7 @@ fn material_bind_group(
         &[
             BindGroupEntry {
                 binding: 0,
-                resource: BindingResource::TextureView(albedo),
+                resource: BindingResource::TextureView(textures.albedo),
             },
             BindGroupEntry {
                 binding: 1,
@@ -574,7 +588,11 @@ fn material_bind_group(
             },
             BindGroupEntry {
                 binding: 3,
-                resource: BindingResource::TextureView(arm),
+                resource: BindingResource::TextureView(textures.arm),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: BindingResource::TextureView(textures.normal),
             },
         ],
     )
@@ -634,8 +652,12 @@ pub struct VoxelMaterialBindGroup {
     pub bind_group: BindGroup,
     /// Whether `bind_group` holds a real ARM texture (selects `VOXEL_ARM`).
     pub has_arm: bool,
+    /// Whether `bind_group` holds a real normal map (selects `VOXEL_NORMAL`).
+    pub has_normal: bool,
     /// Stands in for a palette without an ARM texture.
     dummy_arm: TextureView,
+    /// Stands in for a palette without a normal map.
+    dummy_normal: TextureView,
 }
 
 impl FromWorld for VoxelMaterialBindGroup {
@@ -660,6 +682,15 @@ impl FromWorld for VoxelMaterialBindGroup {
             TextureFormat::Rgba8Unorm,
             [255, 255, 0, 255],
         );
+        // Flat (+Z). Never sampled (no `VOXEL_NORMAL`), but the layout
+        // needs a texture here.
+        let dummy_normal = dummy_texture_array(
+            render_device,
+            render_queue,
+            "voxel_dummy_normal_texture",
+            TextureFormat::Rgba8Unorm,
+            [128, 128, 255, 255],
+        );
         let sampler = render_device.create_sampler(&SamplerDescriptor {
             label: Some("voxel_dummy_sampler"),
             mag_filter: FilterMode::Linear,
@@ -667,10 +698,11 @@ impl FromWorld for VoxelMaterialBindGroup {
             ..default()
         });
         // One entry in MaterialPropertiesGpu's layout: texture_scale,
-        // blend_sharpness, roughness_override, metallic_override.
+        // blend_sharpness, roughness_override, metallic_override,
+        // normal_fade_start, normal_fade_end.
         let properties = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_dummy_material_properties_buffer"),
-            contents: bytemuck::cast_slice(&[0.1f32, 4.0, -1.0, -1.0]),
+            contents: bytemuck::cast_slice(&[0.1f32, 4.0, -1.0, -1.0, 0.0, 0.0]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
@@ -679,24 +711,33 @@ impl FromWorld for VoxelMaterialBindGroup {
                 render_device,
                 &raster_pipeline.material_layout,
                 "voxel_dummy_material_bind_group",
-                &albedo,
-                &dummy_arm,
+                &MaterialTextures {
+                    albedo: &albedo,
+                    arm: &dummy_arm,
+                    normal: &dummy_normal,
+                },
                 &sampler,
                 &properties,
             ),
             has_arm: false,
+            has_normal: false,
             dummy_arm,
+            dummy_normal,
         }
     }
 }
 
-/// The textures a material bind group was built from: (albedo, ARM).
-type PaletteIds = (AssetId<Image>, Option<AssetId<Image>>);
+/// The textures a material bind group was built from: (albedo, ARM, normal).
+type PaletteIds = (
+    AssetId<Image>,
+    Option<AssetId<Image>>,
+    Option<AssetId<Image>>,
+);
 
 /// Runs in `RenderSystems::Prepare`.
 ///
 /// Rebuilds `VoxelMaterialBindGroup` once the active palette's albedo (and
-/// ARM, if it has one) image is loaded, and never again after that for the
+/// ARM and normal map, if it has them) images are loaded, and never again after that for the
 /// same handles — in-place edits to palette.materials after the initial
 /// build won't hot-reload; only a handle change (different palette asset)
 /// triggers a rebuild.
@@ -715,6 +756,7 @@ pub fn update_voxel_material_bind_group(
     let ids = (
         extracted.albedo.id(),
         extracted.arm.as_ref().map(Handle::id),
+        extracted.normal.as_ref().map(Handle::id),
     );
     if *built_for == Some(ids) {
         return; // Already built for these exact textures — nothing changed.
@@ -722,12 +764,19 @@ pub fn update_voxel_material_bind_group(
     let Some(albedo) = gpu_images.get(&extracted.albedo) else {
         return; // Not loaded/converted to GPU form yet — try again next frame.
     };
-    let arm = match &extracted.arm {
-        Some(handle) => match gpu_images.get(handle) {
-            Some(image) => Some(&image.texture_view),
-            None => return, // wait for it, so the first build already has it
-        },
-        None => None,
+    // Wait for optional textures too, so the first build already has them.
+    let optional = |handle: &Option<Handle<Image>>| {
+        handle.as_ref().map_or(Some(None), |handle| {
+            gpu_images
+                .get(handle)
+                .map(|image| Some(&image.texture_view))
+        })
+    };
+    let Some(arm) = optional(&extracted.arm) else {
+        return;
+    };
+    let Some(normal) = optional(&extracted.normal) else {
+        return;
     };
 
     // A zero-length storage buffer is invalid, so an empty palette gets one
@@ -760,11 +809,15 @@ pub fn update_voxel_material_bind_group(
         &render_device,
         &raster_pipeline.material_layout,
         "voxel_material_bind_group",
-        &albedo.texture_view,
-        arm.unwrap_or(&material.dummy_arm),
+        &MaterialTextures {
+            albedo: &albedo.texture_view,
+            arm: arm.unwrap_or(&material.dummy_arm),
+            normal: normal.unwrap_or(&material.dummy_normal),
+        },
         &sampler,
         &properties,
     );
     material.has_arm = arm.is_some();
+    material.has_normal = normal.is_some();
     *built_for = Some(ids);
 }

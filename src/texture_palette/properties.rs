@@ -40,6 +40,20 @@ pub struct PaletteMaterial {
     /// If `Some`, this value overrides the metallic from the ARM texture.
     /// If `None`, the ARM texture value is used, or 0.0 without one.
     pub metallic_override: Option<f32>,
+
+    /// Distance from the camera, in world units, where the normal map starts
+    /// fading out.
+    ///
+    /// Default: 20.0
+    pub normal_fade_start: f32,
+
+    /// Distance from the camera, in world units, past which the normal map
+    /// is not sampled at all and the mesh normal is used. Far away, mipmaps
+    /// average a normal map to nearly flat anyway, so this mostly saves its
+    /// cost. `f32::INFINITY` never fades.
+    ///
+    /// Default: 35.0
+    pub normal_fade_end: f32,
 }
 
 impl Default for PaletteMaterial {
@@ -50,6 +64,8 @@ impl Default for PaletteMaterial {
             blend_sharpness: 4.0,
             roughness_override: None,
             metallic_override: None,
+            normal_fade_start: 20.0,
+            normal_fade_end: 35.0,
         }
     }
 }
@@ -90,6 +106,14 @@ impl PaletteMaterial {
         self.metallic_override = Some(metallic);
         self
     }
+
+    /// Set the camera distances over which the normal map fades out.
+    #[must_use]
+    pub const fn with_normal_fade(mut self, start: f32, end: f32) -> Self {
+        self.normal_fade_start = start;
+        self.normal_fade_end = end;
+        self
+    }
 }
 
 /// GPU-side representation of material properties.
@@ -109,6 +133,12 @@ pub struct MaterialPropertiesGpu {
 
     /// Metallic override. Negative value means "use texture".
     pub metallic_override: f32,
+
+    /// Camera distance where the normal map starts fading out.
+    pub normal_fade_start: f32,
+
+    /// Camera distance past which the normal map isn't sampled.
+    pub normal_fade_end: f32,
 }
 
 impl From<&PaletteMaterial> for MaterialPropertiesGpu {
@@ -118,6 +148,8 @@ impl From<&PaletteMaterial> for MaterialPropertiesGpu {
             blend_sharpness: mat.blend_sharpness,
             roughness_override: mat.roughness_override.unwrap_or(-1.0),
             metallic_override: mat.metallic_override.unwrap_or(-1.0),
+            normal_fade_start: mat.normal_fade_start,
+            normal_fade_end: mat.normal_fade_end,
         }
     }
 }
