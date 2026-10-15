@@ -14,6 +14,7 @@ exclude = [
     "/bench_results",
     "/saves",
     "/captures",
+    "/docs",
     "/tools",
     "/nix",
     "/flake.nix",
