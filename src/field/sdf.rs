@@ -7,7 +7,8 @@
 use crate::num::{f32_from_i32, f32_from_u32, i16_from_f32};
 use crate::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice};
 
-use super::{Field, LOD, flatten_cube};
+use super::{Field, LOD};
+use crate::grid::{NEIGHBORS_MASK, PADDING, flatten_cube, sample_neighbor};
 use bevy::prelude::*;
 
 /// Packed representation of a 3D grid coordinate for JFA seeds.
@@ -172,7 +173,7 @@ impl SDF {
         // Only bump the borders the JFA actually changed, so neighbours whose
         // apron is untouched don't re-mesh after every stroke.
         let n = self.lod.size();
-        let pad = crate::voxel::systems::PADDING;
+        let pad = PADDING;
         for z in 0..n {
             for y in 0..n {
                 let x_end = if z < pad || y < pad { n } else { pad.min(n) };
@@ -188,12 +189,12 @@ impl SDF {
 
     /// Bumps the border versions of every neighbour whose apron reads (x, y, z).
     fn touch_border(&mut self, x: u32, y: u32, z: u32) {
-        let pad = crate::voxel::systems::PADDING;
+        let pad = PADDING;
         let near = [x < pad, y < pad, z < pad];
         if !near.contains(&true) {
             return;
         }
-        let masks = crate::voxel::systems::NEIGHBORS_MASK.iter();
+        let masks = NEIGHBORS_MASK.iter();
         for (version, off) in self.border_versions.iter_mut().zip(masks) {
             if (off.x == 0 || near[0]) && (off.y == 0 || near[1]) && (off.z == 0 || near[2]) {
                 *version = version.wrapping_add(1);
@@ -325,7 +326,7 @@ impl FieldFromRaw for SDF {
 
 impl ApronSample for SDF {
     fn sample_apron(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
-        crate::voxel::systems::sample_neighbor(data, size, x, y, z)
+        sample_neighbor(data, size, x, y, z)
     }
 }
 

@@ -4,7 +4,8 @@
 use super::Field;
 use crate::{
     ApronSample, ExtractGate, FieldFromRaw, FieldLOD, LOD, Versionable, VoxelDataSlice,
-    flatten_with_size, num::usize_from,
+    grid::{flatten_with_size, nearest_neighbor_sample},
+    num::usize_from,
 };
 use bevy::prelude::*;
 
@@ -129,7 +130,7 @@ impl FieldFromRaw for VisibilityField {
 
 impl ApronSample for VisibilityField {
     fn sample_apron(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
-        crate::voxel::systems::nearest_neighbor_sample(data, size, x, y, z)
+        nearest_neighbor_sample(data, size, x, y, z)
     }
 }
 

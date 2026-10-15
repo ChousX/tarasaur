@@ -26,6 +26,7 @@
 
 pub mod chunk;
 pub mod field;
+pub mod grid;
 pub mod num;
 mod plugin;
 pub mod prelude;

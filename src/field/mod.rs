@@ -11,6 +11,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::marker::PhantomData;
 
+pub mod apron;
 pub mod editor;
 pub mod generator;
 pub mod loading;
@@ -55,26 +56,6 @@ pub trait Field<T: Copy + Default>: Component {
     fn get(&self, x: u32, y: u32, z: u32) -> T;
     /// Sets the value at the given grid coordinates.
     fn set(&mut self, x: u32, y: u32, z: u32, value: T);
-}
-
-#[inline]
-#[must_use]
-pub const fn flatten_with_size(x: u32, y: u32, z: u32, size: UVec3) -> usize {
-    use crate::num::usize_from;
-    // Index = (z * height + y) * width + x. Wrapping can't change a valid
-    // index; an out-of-range one just fails the caller's `get`.
-    usize_from(z)
-        .wrapping_mul(usize_from(size.y))
-        .wrapping_add(usize_from(y))
-        .wrapping_mul(usize_from(size.x))
-        .wrapping_add(usize_from(x))
-}
-
-/// [`flatten_with_size`] for a cube `size` voxels on each side.
-#[inline]
-#[must_use]
-pub const fn flatten_cube(x: u32, y: u32, z: u32, size: u32) -> usize {
-    flatten_with_size(x, y, z, UVec3::splat(size))
 }
 
 pub trait Versionable: Component {

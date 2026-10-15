@@ -13,10 +13,10 @@ use std::{
 };
 
 use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
-use crate::field::flatten_cube;
 use crate::field::generator::ChunkGeneratorRegistry;
 use crate::field::loading::ChunkDataTask;
 use crate::field::{FieldFromRaw, FieldNew, Versionable, VoxelDataSlice};
+use crate::grid::flatten_cube;
 use crate::num::{f32_from_u32, usize_from};
 use crate::{DirtyField, field::systems::SdfReinitTask};
 use crate::{LOD, MaxEditLod};

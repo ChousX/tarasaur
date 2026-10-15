@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::{
     SDF,
     chunk::{Chunk, ChunkManager, ChunkPosition},
-    voxel::systems::NEIGHBORS_MASK,
+    grid::NEIGHBORS_MASK,
 };
 
 /// Present on chunks whose padded SDF volume contains a sign change, i.e.

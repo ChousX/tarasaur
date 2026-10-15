@@ -3,9 +3,8 @@
 
 use crate::{
     ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
-    flatten_with_size,
+    grid::{flatten_with_size, nearest_neighbor_sample},
     ops::{AccumulateExt, BlendExt},
-    voxel::systems::nearest_neighbor_sample,
 };
 
 use super::{Field, LOD};

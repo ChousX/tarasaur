@@ -24,13 +24,13 @@ use bevy::{
 use crate::{
     ApronSample, Chunk, ChunkManager, ChunkPosition, ExtractGate, LOD, Versionable,
     VisibilityField,
-    field::{flatten_cube, surface::HasSurface},
-    num::usize_from,
-    voxel::{
-        arena::VoxelChunkArenaSet,
-        resident::ForceResident,
-        systems::{ExtractedChunkField, NEIGHBORS_MASK, PADDING, fill_apron, seam_lod_ranks},
+    field::{
+        apron::{fill_apron, seam_lod_ranks},
+        surface::HasSurface,
     },
+    grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
+    num::usize_from,
+    voxel::{arena::VoxelChunkArenaSet, resident::ForceResident, systems::ExtractedChunkField},
 };
 
 /// Frames between full consistency checks in debug builds.
