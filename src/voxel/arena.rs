@@ -43,6 +43,13 @@ const ACTIVE_FRACTION_ESTIMATE: f32 = 0.03;
 /// Uploads past it in one frame wait for the next (keeping their mesh).
 const SCRATCH_CELLS: u32 = 8 * 1024 * 1024;
 
+/// Slots per arena. Every vertex carries its slot in 15 bits
+/// (`pack_material_b` in pass3), which the raster shader reads back.
+const MAX_SLOTS: u64 = 1 << 15;
+
+/// Edge of pass1's cubic `@workgroup_size`.
+pub const PASS1_WORKGROUP_EDGE: u32 = 4;
+
 /// Indices emitted per active cell, worst case (3 quads x 6).
 pub const INDICES_PER_CELL: u32 = 18;
 
@@ -86,7 +93,10 @@ fn max_chunks(
         .max(vertex_bytes)
         .max(index_bytes);
 
-    let fit = limit.checked_div(worst_bytes_per_chunk).unwrap_or(0).max(1);
+    let fit = limit
+        .checked_div(worst_bytes_per_chunk)
+        .unwrap_or(0)
+        .clamp(1, MAX_SLOTS);
     let capped = u32::try_from(fit).unwrap_or(u32::MAX);
     info!(
         "[VoxelChunkArena] limit={} bytes, worst-case/chunk={} bytes, capping to {} chunks (budget={} cells/chunk, {:.0}% of {})",
@@ -267,11 +277,18 @@ impl ArenaSizes {
             budget_cells_per_chunk,
         );
         // Per-dispatch scratch, indexed by position in the dispatch, not slot:
-        // only chunks re-meshed this frame need flags and offsets.
+        // only chunks re-meshed this frame need flags and offsets. A dispatch
+        // stacks its chunks along pass1's z (`wg_per_chunk_z` each) and
+        // pass3's y, so it must also fit the workgroup-count limit.
+        let max_groups = render_device.limits().max_compute_workgroups_per_dimension;
+        let dispatch_chunks = max_groups
+            .checked_div(cell_count.div_ceil(PASS1_WORKGROUP_EDGE))
+            .unwrap_or(1);
         let scratch_chunks = SCRATCH_CELLS
             .checked_div(total_cells)
             .unwrap_or(1)
             .min(max_chunks)
+            .min(dispatch_chunks)
             .max(1);
         Self {
             cell_count,
@@ -379,7 +396,12 @@ impl ArenaBuffers {
                 per_chunk(meta_bytes),
                 STORAGE_DST,
             ),
-            batch_uniform: batch_uniform_buffer(dev, sizes, "arena_batch_uniform_buffer", 4),
+            batch_uniform: batch_uniform_buffer(
+                dev,
+                sizes,
+                "arena_batch_uniform_buffer",
+                PASS1_WORKGROUP_EDGE,
+            ),
             batch_uniform_pass3: batch_uniform_buffer(
                 dev,
                 sizes,
@@ -432,8 +454,8 @@ fn indirect_args_buffer(render_device: &RenderDevice, max_chunks: u32) -> Buffer
     })
 }
 
-/// Pass 1 uses `@workgroup_size(4, 4, 4)` and pass 3 `@workgroup_size(8, 8, 8)`,
-/// so each gets its own z-stride.
+/// Pass 1 uses `@workgroup_size(4, 4, 4)`; the raster pass reads pass3's copy
+/// for `voxel_size`/`texture_size`, so its z-stride (8) is unused.
 fn batch_uniform_buffer(
     render_device: &RenderDevice,
     sizes: &ArenaSizes,

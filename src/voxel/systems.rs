@@ -36,7 +36,10 @@ use crate::{
     ApronSample, CHUNK_SIZE, ChunkManager, ChunkPosition, LOD, MaterialField, SDF, VisibilityField,
     VoxelDataSlice, VoxelMaterial,
     voxel::{
-        arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
+        arena::{
+            ArenaSlot, ChunkMeta, INDICES_PER_CELL, PASS1_WORKGROUP_EDGE, VoxelChunkArena,
+            VoxelChunkArenaSet,
+        },
         draw::{VoxelDrawPipeline, VoxelViewDraws, encode_draw_compaction},
         pipeline::{
             VoxelDepthPrepass, VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterKey,
@@ -602,7 +605,7 @@ fn encode_mesh_passes(
         for arena in dirty {
             // pass1 counts each chunk's active cells into these.
             enc.clear_buffer(&arena.chunk_counts_buffer, 0, None);
-            let wg1 = arena.cell_count.div_ceil(4);
+            let wg1 = arena.cell_count.div_ceil(PASS1_WORKGROUP_EDGE);
             dispatch(
                 enc,
                 "surface_nets_pass1_batched",
