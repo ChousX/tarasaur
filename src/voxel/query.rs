@@ -62,25 +62,13 @@ pub struct QueryUniforms {
     pub lookup_capacity: u32,
     pub max_dda_steps: u32,
     pub max_sphere_steps: u32,
-    pub lod_active_mask: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
     pub lod_voxel_size: [f32; 4],
     pub lod_texture_size: [u32; 4],
     pub lod_surface_epsilon: [f32; 4],
 }
-/// Which LOD's arena the query shader runs against. Only one arena is
-/// tested per query today — see the multi-LOD caveat from the design
-/// writeup if you need queries to hit lower-detail terrain too.
-#[derive(Resource)]
-pub struct CollisionLOD(pub LOD);
-
-impl Default for CollisionLOD {
-    fn default() -> Self {
-        Self(LOD::High)
-    }
-}
-
 /// Main-world: gameplay code pushes ray queries here each frame.
 #[derive(Resource, Default)]
 pub struct PendingVoxelQueries(pub Vec<RayQuery>);
@@ -319,7 +307,6 @@ pub fn prepare_voxel_queries(
     let mut lod_voxel_size = [0.0f32; 4];
     let mut lod_texture_size = [0u32; 4];
     let mut lod_surface_epsilon = [0.0f32; 4];
-    let mut lod_active_mask = 0u32;
     let mut current_presence = [false; LOD::COUNT];
 
     for (r, arena) in arena_set.query_arenas() {
@@ -336,7 +323,6 @@ pub fn prepare_voxel_queries(
         *texture = arena.texture_size;
         *epsilon = voxel_size * 0.05;
         *present = true;
-        lod_active_mask |= 1 << r;
     }
 
     let uniforms = QueryUniforms {
@@ -345,9 +331,9 @@ pub fn prepare_voxel_queries(
         lookup_capacity: query_buffers.merged_lookup_capacity,
         max_dda_steps: 64,
         max_sphere_steps: 256,
-        lod_active_mask,
         _pad0: 0,
         _pad1: 0,
+        _pad2: 0,
         lod_voxel_size,
         lod_texture_size,
         lod_surface_epsilon,

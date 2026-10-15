@@ -157,7 +157,6 @@ Every module starts with a `//!` summary. `cargo doc --open` shows them all.
 | `AutosaveIntervalSecs` | 2.0 | Autosave period |
 | `EditPinTimeout` | 2.0 s | How long an edited chunk stays at max LOD after the last edit |
 | `CursorQueryMode` | `Auto` | Cursor ray backend (Auto uses the CPU) |
-| `CollisionLOD` | `High` | The arena the GPU ray queries search |
 | `ShowChunkBounds` | absent | Insert it to draw chunk bounds, colored by LOD |
 | `VoxelDepthPrepass` | `false` | Draw terrain depth before shading, so each pixel is shaded once. Slower on tile-based GPUs (+3.4 ms on Adreno); bench it on yours |
 

@@ -3,13 +3,11 @@
 //! follows the (2-3 frame late) hit under the cursor.
 
 use bevy::prelude::*;
-use bevy::render::RenderApp;
 use tarasaur::DirtyField;
 use tarasaur::{
     Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     voxel::cursor::{CursorBrush, CursorHit, CursorQueryMode, resolve_cursor_hit},
-    voxel::query::CollisionLOD,
 };
 
 const SPHERE_CENTER: Vec3 = Vec3::ZERO;
@@ -19,7 +17,6 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(TarasaurPlugin)
-        .add_plugins(CursorCollisionSetupPlugin) // pins CollisionLOD to Medium
         // Test the GPU path only; the built-in brush would carve the test sphere.
         .insert_resource(CursorQueryMode::Gpu)
         .insert_resource(CursorBrush { enabled: false })
@@ -78,9 +75,6 @@ fn spawn_sphere_chunks(mut commands: Commands) {
         for y in -1..=0 {
             for z in -1..=0 {
                 let chunk_pos = IVec3::new(x, y, z);
-                // Must match CursorCollisionSetupPlugin's CollisionLOD below —
-                // the query pass only tests one arena, so a mismatch here
-                // means every cursor query silently misses.
                 let lod = LOD::Medium;
                 let mut sdf = SDF::new(lod);
                 fill_sphere_sdf(&mut sdf, chunk_pos, SPHERE_CENTER, SPHERE_RADIUS);
@@ -118,21 +112,6 @@ fn fill_sphere_sdf(field: &mut SDF, chunk_pos: IVec3, center: Vec3, radius: f32)
                 field.set(x, y, z, d);
             }
         }
-    }
-}
-
-/// Pins the collision arena to `LOD::Medium`, matching the chunks this
-/// example spawns. Overrides `TarasaurPlugin`'s `CollisionLOD` default
-/// (`LOD::High`) regardless of plugin registration order — `insert_resource`
-/// always wins over `init_resource`, whichever runs second.
-struct CursorCollisionSetupPlugin;
-
-impl Plugin for CursorCollisionSetupPlugin {
-    fn build(&self, app: &mut App) {
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-        render_app.insert_resource(CollisionLOD(LOD::Medium));
     }
 }
 

@@ -117,7 +117,7 @@ pub fn query_entries() -> Vec<BindGroupLayoutEntry> {
     let mut entries = vec![
         storage_buffer_entry(0, ShaderStages::COMPUTE, true), // queries
         storage_buffer_entry(1, ShaderStages::COMPUTE, false), // hits
-        uniform_buffer_entry(2, ShaderStages::COMPUTE, NonZeroU64::new(80)), // QueryUniforms, grew
+        uniform_buffer_entry(2, ShaderStages::COMPUTE, NonZeroU64::new(80)), // QueryUniforms
         storage_buffer_entry(3, ShaderStages::COMPUTE, true), // merged chunk_lookup
     ];
     // Bindings 4, 5 for LOD rank 0; 6, 7 for rank 1; ...

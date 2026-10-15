@@ -52,11 +52,10 @@ use crate::{
             update_voxel_material_bind_group,
         },
         query::{
-            CollisionLOD, ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries,
-            VoxelQueryBuffers, VoxelQueryResultChannel, VoxelQueryResultReceiver,
-            VoxelQueryResults, clear_pending_voxel_queries, dispatch_voxel_query_pass,
-            drain_voxel_query_results, extract_voxel_queries, map_voxel_query_results,
-            prepare_voxel_queries,
+            ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries, VoxelQueryBuffers,
+            VoxelQueryResultChannel, VoxelQueryResultReceiver, VoxelQueryResults,
+            clear_pending_voxel_queries, dispatch_voxel_query_pass, drain_voxel_query_results,
+            extract_voxel_queries, map_voxel_query_results, prepare_voxel_queries,
         },
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         systems::{
@@ -153,7 +152,6 @@ impl Plugin for VoxelRenderPlugin {
             return;
         };
         render_app.insert_resource(VoxelQueryResultChannel { sender: query_tx });
-        render_app.init_resource::<CollisionLOD>();
         render_app.init_resource::<VoxelViewDraws>();
         render_app.init_resource::<ExtractedVoxelQueries>();
         render_app.init_resource::<NextQuerySlot>();

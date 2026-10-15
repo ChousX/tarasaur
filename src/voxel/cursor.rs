@@ -30,7 +30,7 @@ pub enum CursorQueryMode {
     /// after the cursor leaves the terrain).
     #[default]
     Auto,
-    /// GPU readback only (2-3 frames late, `CollisionLOD` arena only).
+    /// GPU readback only (2-3 frames late).
     Gpu,
     /// CPU SDF raycast only. No GPU query is submitted.
     Cpu,
