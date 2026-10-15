@@ -45,7 +45,7 @@ use tarasaur::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins((DefaultPlugins, TarasaurPlugin));
+    app.add_plugins((DefaultPlugins, TarasaurPlugin::default()));
 
     // Terrain comes from generators: a pure function of (chunk, LOD) that
     // runs off-thread. This one returns world-space signed distances.
@@ -150,18 +150,33 @@ one path in its module, and `tarasaur::prelude` gathers the common ones.
 
 ## Tuning
 
-| Resource | Default | Effect |
+Engine settings are fields on `TarasaurPlugin`:
+
+```rust
+app.add_plugins(TarasaurPlugin {
+    save_dir: "my_world/chunks".into(),
+    depth_prepass: true,
+    ..default()
+});
+```
+
+| Field | Default | Effect |
 |---|---|---|
-| `MaxChunkOpsPerFrame` | 64 | Chunk spawns and LOD retargets applied per frame |
-| `MaxInFlightLoads` | 64 | Load tasks running at once |
-| `RemeshBudget` | 4M cells | Cells re-meshed per frame. Past the budget, chunks keep their old mesh |
-| `MaxEditLod` | `High` | The only LOD that is edited and saved |
-| `AutosaveIntervalSecs` | 2.0 | Autosave period |
-| `SaveDirectory` | `./saves/chunks` | Where chunk saves are read and written |
-| `EditPinTimeout` | 2.0 s | How long an edited chunk stays at max LOD after the last edit |
-| `CursorQueryMode` | `Auto` | Cursor ray backend (Auto uses the CPU) |
-| `ShowChunkBounds` | absent | Insert it to draw chunk bounds, colored by LOD |
-| `VoxelDepthPrepass` | `false` | Draw terrain depth before shading, so each pixel is shaded once. Slower on tile-based GPUs (+3.4 ms on Adreno); bench it on yours |
+| `max_edit_lod` | `High` | The only LOD that is edited and saved |
+| `save_dir` | `./saves/chunks` | Where chunk saves are read and written |
+| `autosave_secs` | 2.0 | Autosave period |
+| `edit_pin_secs` | 2.0 | How long an edited chunk stays at max LOD after the last edit |
+| `max_chunk_ops_per_frame` | 64 | Chunk spawns and LOD retargets applied per frame |
+| `max_loads_in_flight` | 64 | Load tasks running at once |
+| `remesh_cells_per_frame` | 4M | Cells re-meshed per frame. Past the budget, chunks keep their old mesh |
+| `arenas` | see below | GPU arena sizes and how many each LOD may have |
+| `depth_prepass` | `false` | Draw terrain depth before shading, so each pixel is shaded once. Slower on tile-based GPUs (+3.4 ms on Adreno); bench it on yours |
+| `guard_telemetry` | debug builds | Log pass3's range guard (should never fire) |
+
+Each becomes a resource of the same name (`MaxEditLod`, `SaveDirectory`, ...);
+the main-world ones can be changed at runtime. Two more are plain resources:
+`CursorQueryMode` (cursor ray backend, `Auto` uses the CPU) and
+`ShowChunkBounds` (insert it to draw chunk bounds, colored by LOD).
 
 The arenas size themselves from the device's
 `max_storage_buffer_binding_size` and `max_buffer_size`, capped by

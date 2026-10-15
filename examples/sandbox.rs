@@ -19,7 +19,7 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(render_plugin()))
         // TarasaurPlugin now includes PalettePlugin.
-        .add_plugins(TarasaurPlugin)
+        .add_plugins(TarasaurPlugin::default())
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
     register_terrain(&mut app);
 

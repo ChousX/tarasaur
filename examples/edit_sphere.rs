@@ -10,7 +10,7 @@ use tarasaur::{
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(TarasaurPlugin)
+        .add_plugins(TarasaurPlugin::default())
         .add_systems(Startup, (setup_scene, spawn_chunk_grid))
         .add_systems(
             Update,

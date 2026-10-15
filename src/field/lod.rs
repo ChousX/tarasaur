@@ -45,6 +45,8 @@ impl Default for MaxEditLod {
 
 impl LOD {
     pub const COUNT: usize = 4;
+    /// Every LOD, coarsest first: `ALL[lod.rank()] == lod`.
+    pub const ALL: [Self; Self::COUNT] = [Self::Lowest, Self::Low, Self::Medium, Self::High];
     #[inline]
     #[must_use]
     pub const fn size(self) -> u32 {

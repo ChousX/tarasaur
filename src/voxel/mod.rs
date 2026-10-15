@@ -15,9 +15,10 @@
 //!
 //! GPU ray queries against the arenas live in `raycast::gpu`.
 
-pub mod arena;
+pub(crate) mod arena;
 pub(crate) mod draw;
 pub(crate) mod extract;
+pub mod inspect;
 pub(crate) mod mesh;
 pub(crate) mod pipeline;
 pub(crate) mod raster;
@@ -28,6 +29,7 @@ pub(crate) mod types;
 pub(crate) mod upload;
 pub(crate) mod util;
 
+pub use arena::ArenaConfig;
 pub use pipeline::VoxelDepthPrepass;
 pub use telemetry::GuardTelemetry;
 pub use upload::RemeshBudget;

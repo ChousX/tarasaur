@@ -56,7 +56,6 @@ use bevy::{
         diagnostic::RenderDiagnosticsPlugin,
         render_resource::{BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode},
         renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
-        sync_world::MainEntity,
     },
     window::{PresentMode, WindowResolution},
 };
@@ -79,15 +78,7 @@ use tarasaur::{
         gpu::{HitResult, PendingVoxelQueries, RayQuery, VoxelQueryResults},
         terrain_ray::TerrainRay,
     },
-    storage::{
-        loading::MaxInFlightLoads,
-        persistence::{AutosaveIntervalSecs, SaveDirectory},
-    },
-    voxel::{
-        VoxelDepthPrepass,
-        arena::{ArenaConfig, VoxelChunkArenaSet},
-        stats,
-    },
+    voxel::{ArenaConfig, inspect::ArenaInspector, stats},
 };
 
 // ---------------------------------------------------------------------------
@@ -331,7 +322,21 @@ fn main() -> AppExit {
         ..default()
     }))
     .add_plugins((
-        TarasaurPlugin,
+        TarasaurPlugin {
+            save_dir: world_dir,
+            // Disk writes would only add noise; nothing here needs to persist.
+            autosave_secs: f32::INFINITY,
+            depth_prepass: out.depth_prepass,
+            max_loads_in_flight: flag("--max-loads")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| TarasaurPlugin::default().max_loads_in_flight),
+            arenas: if out.small_arenas {
+                BENCH_ARENAS
+            } else {
+                ArenaConfig::default()
+            },
+            ..default()
+        },
         MaterialFieldPlugin::<TerrainMaterial>::new(),
         stats::VoxelDiagnosticsPlugin,
     ));
@@ -340,15 +345,10 @@ fn main() -> AppExit {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     register_terrain(&mut app);
-    app.insert_resource(SaveDirectory(world_dir));
     let Some(msaa) = parse_msaa(flag("--msaa").as_deref()) else {
         return AppExit::error();
     };
     app.insert_resource(BenchMsaa(msaa));
-    app.insert_resource(VoxelDepthPrepass(out.depth_prepass));
-    if let Some(n) = flag("--max-loads").and_then(|n| n.parse().ok()) {
-        app.insert_resource(MaxInFlightLoads(n));
-    }
     if args.iter().any(|a| a == "--renderdoc") {
         let Some(capture) = FrameCapture::attach(&out) else {
             return AppExit::error();
@@ -359,8 +359,6 @@ fn main() -> AppExit {
 
     add_checked_phases(&mut app, out.small_arenas);
     app.insert_resource(CursorBrush { enabled: false })
-        // Disk writes would only add noise; nothing here needs to persist.
-        .insert_resource(AutosaveIntervalSecs(f32::INFINITY))
         .insert_resource(Bench {
             phase: Phase::Load,
             frame_in_phase: 0,
@@ -397,12 +395,6 @@ struct SmallArenas(bool);
 fn add_checked_phases(app: &mut App, small_arenas: bool) {
     let probe = SlotProbe::default();
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        if small_arenas {
-            render_app
-                .world_mut()
-                .resource_mut::<VoxelChunkArenaSet>()
-                .config = BENCH_ARENAS;
-        }
         render_app.insert_resource(probe.clone()).add_systems(
             Render,
             (read_back_slots, report_arenas).in_set(RenderSystems::Cleanup),
@@ -965,28 +957,23 @@ struct ArenaReport {
     /// Arenas per LOD rank.
     counts: [usize; LOD::COUNT],
     /// Chunk position -> (LOD rank, arena index).
-    chunk_arena: HashMap<IVec3, (usize, usize)>,
+    chunk_arena: HashMap<IVec3, (LOD, usize)>,
 }
 
 /// Answers an arena-report request with the arena of every resident chunk.
-fn report_arenas(probe: Res<SlotProbe>, arena_set: Res<VoxelChunkArenaSet>) {
+fn report_arenas(probe: Res<SlotProbe>, arenas: ArenaInspector) {
     let Ok(mut state) = probe.0.lock() else {
         return;
     };
     if !std::mem::take(&mut state.arena_request) {
         return;
     }
-    let mut chunk_arena = HashMap::new();
-    for (rank, arenas) in arena_set.arenas.iter().enumerate() {
-        for (arena_idx, arena) in arenas.iter().enumerate() {
-            for &pos in arena.slot_of_chunk_pos.keys() {
-                chunk_arena.insert(pos, (rank, arena_idx));
-            }
-        }
-    }
     state.arena_report = Some(ArenaReport {
-        counts: arena_set.arenas.each_ref().map(Vec::len),
-        chunk_arena,
+        counts: arenas.arena_counts(),
+        chunk_arena: arenas
+            .resident_chunks()
+            .map(|(pos, lod, arena)| (pos, (lod, arena)))
+            .collect(),
     });
 }
 
@@ -998,7 +985,7 @@ struct SlotProbe(Arc<Mutex<ProbeState>>);
 /// compares its interior (the padded volume minus the apron) with the field.
 fn read_back_slots(
     probe: Res<SlotProbe>,
-    arena_set: Res<VoxelChunkArenaSet>,
+    arenas: ArenaInspector,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
 ) {
@@ -1008,21 +995,14 @@ fn read_back_slots(
     };
     for req in requests {
         let pos = req.pos;
-        let slot = arena_set.find_slot(req.lod, MainEntity::from(req.entity));
-        let arena = slot.and_then(|s| {
-            arena_set
-                .arenas
-                .get(VoxelChunkArenaSet::lod_index(req.lod))
-                .and_then(|a| a.get(s.arena_idx))
-                .map(|a| (s.slot, a))
-        });
-        let Some((slot, arena)) = arena else {
+        let Some(slot) = arenas.material_slot(req.lod, req.entity) else {
             if let Ok(mut s) = probe.0.lock() {
                 s.results.push(format!("chunk {pos}: no slot"));
             }
             continue;
         };
-        let bytes = u64::from(arena.sdf_elems_per_chunk);
+        let padded = slot.padded_size;
+        let bytes = u64::from(padded).pow(3);
         let readback = device.create_buffer(&BufferDescriptor {
             label: Some("bench_material_readback"),
             size: bytes,
@@ -1032,16 +1012,9 @@ fn read_back_slots(
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("bench_material_readback"),
         });
-        encoder.copy_buffer_to_buffer(
-            &arena.material_buffer,
-            u64::from(slot).saturating_mul(bytes),
-            &readback,
-            0,
-            bytes,
-        );
+        encoder.copy_buffer_to_buffer(&slot.buffer, slot.offset, &readback, 0, bytes);
         queue.submit(std::iter::once(encoder.finish()));
 
-        let padded = arena.texture_size;
         let n = req.lod.size();
         let state = probe.0.clone();
         readback

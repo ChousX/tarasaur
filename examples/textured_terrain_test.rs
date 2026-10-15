@@ -113,7 +113,7 @@ struct FlyCam {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(TarasaurPlugin)
+        .add_plugins(TarasaurPlugin::default())
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new())
         .init_resource::<TerrainReady>()
         .add_systems(

@@ -1,23 +1,28 @@
 //! Where the layers meet: `TarasaurPlugin`, and `add_voxel_field`, which
 //! wires one field type into editing, saving and rendering.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, path::PathBuf};
 
-use bevy::prelude::*;
+use bevy::{prelude::*, render::RenderApp};
 
 use crate::{
-    chunk::ChunkPlugin,
+    chunk::{ChunkPlugin, EditPinTimeout, MaxChunkOpsPerFrame},
     field::{
-        Field, FieldsPlugin, MaterialField, SDF, VisibilityField, VoxelField, VoxelMaterial,
-        register_edits, surface::SurfaceCullPlugin,
+        Field, FieldsPlugin, LOD, MaterialField, MaxEditLod, SDF, VisibilityField, VoxelField,
+        VoxelMaterial, register_edits, surface::SurfaceCullPlugin,
     },
     raycast::RaycastPlugin,
     storage::{
-        loading::ChunkLoadingPlugin,
-        persistence::{ChunkPersistencePlugin, register_saveable},
+        loading::{ChunkLoadingPlugin, MaxInFlightLoads},
+        persistence::{
+            AutosaveIntervalSecs, ChunkPersistencePlugin, SaveDirectory, register_saveable,
+        },
     },
     texture_palette::plugin::PalettePlugin,
-    voxel::{VoxelRenderPlugin, register_field_upload},
+    voxel::{
+        ArenaConfig, GuardTelemetry, RemeshBudget, VoxelDepthPrepass, VoxelRenderPlugin,
+        arena::VoxelChunkArenaSet, register_field_upload,
+    },
 };
 
 /// Everything the engine needs, with `SDF` and `VisibilityField` registered.
@@ -25,7 +30,83 @@ use crate::{
 /// That's chunks, loading, fields, persistence, rendering and palettes. Add
 /// `MaterialFieldPlugin<M>` for materials and register generators in
 /// `ChunkGeneratorRegistry` for terrain.
-pub struct TarasaurPlugin;
+///
+/// The fields are the engine's settings; `TarasaurPlugin::default()` uses
+/// the defaults below. Each becomes a resource (render-world ones in the
+/// render app), and the main-world ones can still be changed at runtime.
+#[derive(Clone, Debug)]
+pub struct TarasaurPlugin {
+    /// The only LOD at which chunks are edited and saved (`MaxEditLod`).
+    /// Default `High`.
+    pub max_edit_lod: LOD,
+    /// Where chunk saves are read and written (`SaveDirectory`). Default
+    /// `./saves/chunks`.
+    pub save_dir: PathBuf,
+    /// Seconds between autosaves (`AutosaveIntervalSecs`). Default 2.
+    pub autosave_secs: f32,
+    /// Seconds an edited chunk stays pinned at max LOD after its last edit
+    /// (`EditPinTimeout`). Default 2.
+    pub edit_pin_secs: f32,
+    /// Chunk spawns and LOD retargets applied per frame
+    /// (`MaxChunkOpsPerFrame`). Default 64.
+    pub max_chunk_ops_per_frame: usize,
+    /// Chunk loads running at once (`MaxInFlightLoads`). Default 64.
+    pub max_loads_in_flight: usize,
+    /// Cells re-meshed per frame; past it, chunks keep their old mesh
+    /// (`RemeshBudget`). Default 4M.
+    pub remesh_cells_per_frame: u32,
+    /// GPU arena sizes and counts per LOD. Render world, fixed once arenas
+    /// exist.
+    pub arenas: ArenaConfig,
+    /// Draw terrain depth before shading it (`VoxelDepthPrepass`). Default
+    /// off; it's slower on tile-based GPUs.
+    pub depth_prepass: bool,
+    /// Read back and log pass3's range guard (`GuardTelemetry`). Default:
+    /// on in debug builds.
+    pub guard_telemetry: bool,
+}
+
+impl Default for TarasaurPlugin {
+    fn default() -> Self {
+        Self {
+            max_edit_lod: MaxEditLod::default().0,
+            save_dir: SaveDirectory::default().0,
+            autosave_secs: AutosaveIntervalSecs::default().0,
+            edit_pin_secs: EditPinTimeout::default().0,
+            max_chunk_ops_per_frame: MaxChunkOpsPerFrame::default().0,
+            max_loads_in_flight: MaxInFlightLoads::default().0,
+            remesh_cells_per_frame: RemeshBudget::default().cells_per_frame,
+            arenas: ArenaConfig::default(),
+            depth_prepass: VoxelDepthPrepass::default().0,
+            guard_telemetry: GuardTelemetry::default().0,
+        }
+    }
+}
+
+impl TarasaurPlugin {
+    /// Inserts the settings, over the defaults the sub-plugins installed.
+    fn apply_settings(&self, app: &mut App) {
+        app.insert_resource(MaxEditLod(self.max_edit_lod))
+            .insert_resource(SaveDirectory(self.save_dir.clone()))
+            .insert_resource(AutosaveIntervalSecs(self.autosave_secs))
+            .insert_resource(EditPinTimeout(self.edit_pin_secs))
+            .insert_resource(MaxChunkOpsPerFrame(self.max_chunk_ops_per_frame))
+            .insert_resource(MaxInFlightLoads(self.max_loads_in_flight))
+            .insert_resource(VoxelDepthPrepass(self.depth_prepass));
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        render_app
+            .insert_resource(RemeshBudget {
+                cells_per_frame: self.remesh_cells_per_frame,
+            })
+            .insert_resource(GuardTelemetry(self.guard_telemetry));
+        render_app
+            .world_mut()
+            .resource_mut::<VoxelChunkArenaSet>()
+            .config = self.arenas.clone();
+    }
+}
 
 impl Plugin for TarasaurPlugin {
     fn build(&self, app: &mut App) {
@@ -41,6 +122,7 @@ impl Plugin for TarasaurPlugin {
         ))
         .add_voxel_field::<SDF>()
         .add_voxel_field::<VisibilityField>();
+        self.apply_settings(app);
     }
 }
 

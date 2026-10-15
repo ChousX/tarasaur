@@ -17,7 +17,8 @@ use tarasaur::{chunk::Chunk, field::SDF};
 fn main() {
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins).add_plugins(TarasaurPlugin);
+    app.add_plugins(DefaultPlugins)
+        .add_plugins(TarasaurPlugin::default());
 
     app.add_systems(Update, debug_stages);
     // Registered once, up front. Every chunk the ChunkLoader spawns or

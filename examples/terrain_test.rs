@@ -30,7 +30,7 @@ struct FlyCam {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(TarasaurPlugin)
+        .add_plugins(TarasaurPlugin::default())
         .init_resource::<TerrainReady>()
         .add_systems(Startup, (spawn_camera_and_light, spawn_terrain_chunks))
         .add_systems(

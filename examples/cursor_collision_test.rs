@@ -17,7 +17,7 @@ const SPHERE_RADIUS: f32 = 7.0;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(TarasaurPlugin)
+        .add_plugins(TarasaurPlugin::default())
         // Test the GPU path only; the built-in brush would carve the test sphere.
         .insert_resource(CursorQueryMode::Gpu)
         .insert_resource(CursorBrush { enabled: false })
