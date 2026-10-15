@@ -15,8 +15,11 @@ use crate::{
     chunk::CHUNK_SIZE,
     chunk::{ChunkManager, overlapping_chunks},
     field::{
-        DirtyField, MaxEditLod,
-        editor::{SdfCsgSphere, SdfSphereStamp},
+        DirtyField, MaterialField, MaxEditLod, VoxelMaterial,
+        editor::{
+            MaterialPaint, MaterialPaintVoxels, SdfCsgSphere, SdfSculptOp, SdfSculptSphere,
+            SdfSphereStamp, WorldEditor,
+        },
         ops::{FieldSphereOps, ShapeEditOps},
     },
     num::f32_from_u32,
@@ -288,6 +291,7 @@ pub fn process_sdf_csg_spheres(
     max: Res<MaxEditLod>,
     mut deferred: Local<Vec<DeferredEdit<SdfCsgSphere>>>,
     mut resident: ResMut<ForceResident>,
+    mut paint: MessageWriter<MaterialPaintVoxels>,
 ) {
     let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
     let new = events.read().map(|&op| {
@@ -299,16 +303,88 @@ pub fn process_sdf_csg_spheres(
         new,
         &chunk_manager,
         &mut editable,
-        |_, sdf, origin, voxel_size, op| {
+        |chunk, sdf, origin, voxel_size, op| {
             // No DirtyField: CSG output is already a valid distance field.
             // `set` bumps version/inside_count, which drives re-extract.
-            sdf.csg_sphere(
+            let filled = sdf.csg_sphere(
                 (op.center - origin) / voxel_size,
                 op.radius / voxel_size,
                 SDF_CSG_REACH_VOXELS,
                 op.subtract,
+                op.max_step.map(|s| s / voxel_size),
             );
+            if let Some(material) = op.paint
+                && !filled.is_empty()
+            {
+                paint.write(MaterialPaintVoxels {
+                    chunk,
+                    voxels: sdf.with_air_neighbours(&filled),
+                    material,
+                });
+            }
         },
         |chunk_pos| warn!("[csg] chunk {chunk_pos:?} never reached MaxEditLod, edit dropped"),
     );
+}
+
+pub fn process_sdf_sculpts(
+    mut events: MessageReader<SdfSculptSphere>,
+    mut editable: EditableChunks<SDF>,
+    chunk_manager: Res<ChunkManager>,
+    mut deferred: Local<Vec<DeferredEdit<SdfSculptSphere>>>,
+    mut resident: ResMut<ForceResident>,
+) {
+    let new = events.read().map(|&op| {
+        resident.touch_sphere(op.center, op.radius);
+        (op.center, Vec3::splat(op.radius), op)
+    });
+    apply_edits(
+        &mut deferred,
+        new,
+        &chunk_manager,
+        &mut editable,
+        |_, sdf, origin, voxel_size, op| {
+            // Like CSG: the output is still a distance field, so no DirtyField.
+            let center = (op.center - origin) / voxel_size;
+            let radius = op.radius / voxel_size;
+            match op.op {
+                SdfSculptOp::Smooth => sdf.smooth_sphere(center, radius, op.amount),
+                SdfSculptOp::Flatten { point, normal } => sdf.flatten_sphere(
+                    center,
+                    radius,
+                    (point - origin) / voxel_size,
+                    normal,
+                    op.amount,
+                ),
+            }
+        },
+        |chunk_pos| warn!("[sculpt] chunk {chunk_pos:?} never reached MaxEditLod, edit dropped"),
+    );
+}
+
+/// Applies `MaterialPaintVoxels` to `MaterialField<M>`. The chunk was just
+/// edited, so it's at max LOD; one whose field isn't ready is skipped.
+pub fn apply_material_paint_voxels<M: VoxelMaterial>(
+    mut paints: MessageReader<MaterialPaintVoxels>,
+    mut editable: EditableChunks<MaterialField<M>>,
+) {
+    for p in paints.read() {
+        let Some(mut field) = editable.get_mut(p.chunk) else {
+            continue;
+        };
+        let material = M::from_id(p.material);
+        for v in &p.voxels {
+            field.set(v.x, v.y, v.z, material);
+        }
+    }
+}
+
+/// Turns id-based `MaterialPaint`s into `MaterialField<M>` edits.
+pub fn forward_material_paint<M: VoxelMaterial>(
+    mut paints: MessageReader<MaterialPaint>,
+    mut editor: WorldEditor<MaterialField<M>, M>,
+) {
+    for p in paints.read() {
+        editor.fill_sphere(p.center, p.radius, M::from_id(p.material));
+    }
 }

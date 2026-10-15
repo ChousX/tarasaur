@@ -13,11 +13,12 @@ use bevy::{
 
 use crate::{
     chunk::ChunkSet,
+    field::FieldSet,
     voxel::{UploadSet, VoxelPrepareSet, mesh::dispatch_voxel_compute_passes_batched},
 };
 use cursor::{
-    CursorBrush, CursorHit, CursorQueryMode, cursor_brush, cycle_cursor_mode, resolve_cursor_hit,
-    update_cursor_focus,
+    CursorBrush, CursorHit, CursorQueryMode, cursor_brush, cycle_cursor_mode, draw_cursor_brush,
+    resolve_cursor_hit, update_cursor_focus,
 };
 use gpu::{
     ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries, VoxelQueryBuffers,
@@ -51,8 +52,9 @@ impl Plugin for RaycastPlugin {
                     update_cursor_focus
                         .after(resolve_cursor_hit)
                         .before(ChunkSet::Plan),
-                    cursor_brush
+                    (cursor_brush, draw_cursor_brush)
                         .after(resolve_cursor_hit)
+                        .in_set(FieldSet::Brush)
                         .run_if(|b: Res<CursorBrush>| b.enabled),
                 ),
             );

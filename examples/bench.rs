@@ -376,7 +376,10 @@ fn main() -> AppExit {
     }
 
     add_checked_phases(&mut app, out.small_arenas);
-    app.insert_resource(CursorBrush { enabled: false })
+    app.insert_resource(CursorBrush {
+        enabled: false,
+        ..default()
+    })
         .insert_resource(Bench {
             phase: Phase::Load,
             frame_in_phase: 0,
@@ -886,12 +889,16 @@ fn drive_reslots(
                 center,
                 radius: RESLOT_FILL_RADIUS,
                 subtract: false,
+                max_step: None,
+                paint: None,
             });
         } else if at == RESLOT_DIG_AT {
             csg.write(SdfCsgSphere {
                 center,
                 radius: RESLOT_DIG_RADIUS,
                 subtract: true,
+                max_step: None,
+                paint: None,
             });
         }
     }

@@ -3,13 +3,18 @@
 
 use std::{marker::PhantomData, path::PathBuf};
 
-use bevy::{prelude::*, render::RenderApp};
+use bevy::{prelude::*, render::RenderApp, shape::Sphere};
 
 use crate::{
     chunk::{ChunkPlugin, EditPinTimeout, MaxChunkOpsPerFrame},
     field::{
-        Field, FieldsPlugin, LOD, MaterialField, MaxEditLod, SDF, VisibilityField, VoxelField,
-        VoxelMaterial, register_edits, surface::SurfaceCullPlugin,
+        Field, FieldSet, FieldsPlugin, LOD, MaterialField, MaxEditLod, SDF, VisibilityField,
+        VoxelField, VoxelMaterial, register_edits,
+        surface::SurfaceCullPlugin,
+        systems::{
+            apply_material_paint_voxels, forward_material_paint, process_sdf_csg_spheres,
+            process_shape_edits,
+        },
     },
     raycast::RaycastPlugin,
     storage::{
@@ -166,7 +171,15 @@ impl<M: VoxelMaterial> Default for MaterialFieldPlugin<M> {
 
 impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
-        app.add_voxel_field::<MaterialField<M>>();
+        app.add_voxel_field::<MaterialField<M>>().add_systems(
+            Update,
+            (
+                forward_material_paint::<M>
+                    .before(process_shape_edits::<MaterialField<M>, Sphere, M>),
+                apply_material_paint_voxels::<M>.after(process_sdf_csg_spheres),
+            )
+                .in_set(FieldSet::Edit),
+        );
     }
 }
 
@@ -179,8 +192,8 @@ mod tests {
     use crate::{
         chunk::{Chunk, ChunkManager, ChunkPosition},
         field::{
-            DirtyField, FieldsPlugin, LOD, MaterialField, VoxelField, VoxelMaterial,
-            editor::{EditFieldMessage, EditMode},
+            DirtyField, Field, FieldsPlugin, LOD, MaterialField, VoxelField, VoxelMaterial,
+            editor::{EditFieldMessage, EditMode, MaterialPaint},
             ops::{AccumulateExt, BlendExt},
         },
         storage::persistence::ChunkPersistencePlugin,
@@ -258,5 +271,38 @@ mod tests {
                 .get::<DirtyField<MaterialField<Mat>, Mat>>(chunk)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn material_paint_reaches_the_field() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            ChunkPersistencePlugin,
+            FieldsPlugin,
+            MaterialFieldPlugin::<Mat>::new(),
+        ))
+        .init_resource::<ChunkManager>()
+        .init_resource::<ForceResident>();
+        let chunk = app
+            .world_mut()
+            .spawn((
+                Chunk,
+                ChunkPosition(IVec3::ZERO),
+                LOD::High,
+                MaterialField::<Mat>::new(LOD::High),
+            ))
+            .id();
+        app.world_mut().write_message(MaterialPaint {
+            center: Vec3::splat(5.0),
+            radius: 1.0,
+            material: 1,
+        });
+        app.update();
+
+        // World 5.0 is voxel 32 of a 10-unit, 64-voxel chunk.
+        let field = app.world().get::<MaterialField<Mat>>(chunk);
+        assert_eq!(field.map(|f| f.get(32, 32, 32)), Some(Mat::B));
+        assert_eq!(field.map(|f| f.get(0, 0, 0)), Some(Mat::A));
     }
 }

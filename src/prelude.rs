@@ -13,14 +13,17 @@ pub use crate::storage::generator::ChunkGeneratorRegistry;
 pub use crate::field::{
     Field, GpuChannel, LOD, MaterialField, MaxEditLod, SDF, TargetLOD, VisibilityField, VoxelField,
     VoxelMaterial,
-    editor::{EditMode, SdfCsgSphere, SdfSphereStamp, WorldEditor},
+    editor::{
+        EditMode, MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, SdfSphereStamp,
+        WorldEditor,
+    },
     ops::{AccumulateExt, BlendExt},
 };
 pub use crate::storage::persistence::{AutosaveIntervalSecs, SaveChunkMessage, SaveDirectory};
 
 // Rendering, palettes and ray casts
 pub use crate::raycast::{
-    cursor::{CursorBrush, CursorHit, CursorQueryMode},
+    cursor::{BrushTool, CursorBrush, CursorHit, CursorQueryMode, FlattenPlane},
     terrain_ray::TerrainRay,
 };
 pub use crate::texture_palette::{

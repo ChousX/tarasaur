@@ -93,6 +93,34 @@ fn grid_range(min: IVec3, max: IVec3) -> Option<(UVec3, UVec3)> {
     Some((min.as_uvec3(), max.as_uvec3()))
 }
 
+/// The voxels a sphere (grid space) can touch, one voxel of margin
+/// included, clamped to a grid of `size`.
+fn sphere_range(center: Vec3, radius: f32, size: UVec3) -> Option<(UVec3, UVec3)> {
+    let max_bound = size.as_vec3() - Vec3::ONE;
+    let min = (center - Vec3::splat(radius + 1.0))
+        .max(Vec3::ZERO)
+        .as_ivec3();
+    let max = (center + Vec3::splat(radius + 1.0))
+        .min(max_bound)
+        .as_ivec3();
+    grid_range(min, max)
+}
+
+/// The slowest a speed-limited CSG edit moves (as a fraction of its step),
+/// at its rim, so the rim still reaches the sphere.
+const MIN_STEP_WEIGHT: f32 = 0.15;
+
+/// Brush weight: 1 at the center, easing smoothly to 0 at `radius`.
+#[inline]
+fn brush_falloff(dist: f32, radius: f32) -> f32 {
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    let t = (dist / radius).clamp(0.0, 1.0);
+    let k = t.mul_add(-t, 1.0);
+    k * k
+}
+
 /// Extension trait for fields that support spherical operations.
 pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// Applies an operation to all voxels within a sphere.
@@ -105,20 +133,18 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     where
         F: FnMut(T, f32) -> T,
     {
-        let radius = shape.radius;
-        let size = self.size();
-        let max_bound = size.as_vec3() - Vec3::ONE;
+        self.apply_sphere_at(center, shape.radius, |current, _, dist| op(current, dist));
+    }
 
-        let min = (center - Vec3::splat(radius + 1.0))
-            .max(Vec3::ZERO)
-            .as_ivec3();
-        let max = (center + Vec3::splat(radius + 1.0))
-            .min(max_bound)
-            .as_ivec3();
-        let Some((min, max)) = grid_range(min, max) else {
+    /// Like `apply_sphere`, but `op` also gets the voxel's grid position:
+    /// (`current_value`, `position`, `distance_from_center`).
+    fn apply_sphere_at<F>(&mut self, center: Vec3, radius: f32, mut op: F)
+    where
+        F: FnMut(T, Vec3, f32) -> T,
+    {
+        let Some((min, max)) = sphere_range(center, radius, self.size()) else {
             return;
         };
-
         for z in min.z..=max.z {
             for y in min.y..=max.y {
                 for x in min.x..=max.x {
@@ -126,7 +152,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
                     let dist = pos.distance(center);
                     if dist <= radius {
                         let current = self.get(x, y, z);
-                        let new_value = op(current, dist);
+                        let new_value = op(current, pos, dist);
                         self.set(x, y, z, new_value);
                     }
                 }
@@ -184,25 +210,156 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         );
     }
 
-    /// Exact CSG against a sphere. Subtract = max(old, -s), add = min(old, s),
+    /// CSG against a sphere. Subtract = max(old, -s), add = min(old, s),
     /// with s = dist - radius. Keeps sub-voxel detail, needs no JFA, and is
     /// seamless across chunks because it depends only on world position.
     /// `reach` (voxels, >= 2) extends the write past the surface.
-    fn csg_sphere(&mut self, center: Vec3, radius: f32, reach: f32, subtract: bool)
+    ///
+    /// `max_step` (voxels) limits how far each value moves toward that
+    /// result per call: all of it at the center, fading to
+    /// `MIN_STEP_WEIGHT` of it at the rim and in the reach band. `None` is
+    /// the exact result at once.
+    ///
+    /// Returns the voxels this call turned from outside to inside.
+    fn csg_sphere(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        reach: f32,
+        subtract: bool,
+        max_step: Option<f32>,
+    ) -> Vec<UVec3>
     where
         T: SignedDistance,
     {
-        self.apply_sphere(
-            center,
-            Sphere {
-                radius: radius + reach,
-            },
-            |cur, dist| {
-                let s = dist - radius;
-                let c = cur.distance();
-                T::from_signed_distance(if subtract { c.max(-s) } else { c.min(s) })
-            },
-        );
+        let mut filled = Vec::new();
+        self.apply_sphere_at(center, radius + reach, |cur, pos, dist| {
+            let s = dist - radius;
+            let c = cur.distance();
+            let target = if subtract { c.max(-s) } else { c.min(s) };
+            let new = max_step.map_or(target, |step| {
+                let step = step * brush_falloff(dist, radius).max(MIN_STEP_WEIGHT);
+                // Toward the target, never past it.
+                c + (target - c).clamp(-step, step)
+            });
+            if c > 0.0 && new <= 0.0 {
+                filled.push(pos.as_uvec3());
+            }
+            T::from_signed_distance(new)
+        });
+        filled
+    }
+
+    /// `voxels` plus their face neighbours that are outside (air): what a
+    /// fragment on the surface around `voxels` blends its material from.
+    fn with_air_neighbours(&self, voxels: &[UVec3]) -> Vec<UVec3>
+    where
+        T: SignedDistance,
+    {
+        let size = self.size();
+        let mut out = Vec::with_capacity(voxels.len().saturating_mul(3));
+        for &v in voxels {
+            out.push(v);
+            for d in [
+                IVec3::X,
+                IVec3::NEG_X,
+                IVec3::Y,
+                IVec3::NEG_Y,
+                IVec3::Z,
+                IVec3::NEG_Z,
+            ] {
+                let Some(n) = v.checked_add_signed(d).filter(|n| n.cmplt(size).all()) else {
+                    continue;
+                };
+                if self.get(n.x, n.y, n.z).distance() > 0.0 {
+                    out.push(n);
+                }
+            }
+        }
+        out.sort_unstable_by_key(|v| (v.z, v.y, v.x));
+        out.dedup();
+        out
+    }
+
+    /// Relaxes the distances inside the sphere toward their 6-neighbour
+    /// average, which rounds off bumps and creases. `amount` (0..=1) is how
+    /// far each voxel moves at the center, fading to nothing at the edge.
+    ///
+    /// Reads every neighbour before writing any voxel, so the result doesn't
+    /// depend on iteration order. An axis whose neighbour lies outside the
+    /// chunk is left as is (as if the field continued linearly), so linear
+    /// fields — flat ground — never move, and chunk borders stay put.
+    fn smooth_sphere(&mut self, center: Vec3, radius: f32, amount: f32)
+    where
+        T: SignedDistance,
+    {
+        let size = self.size();
+        let Some((min, max)) = sphere_range(center, radius, size) else {
+            return;
+        };
+        let read = |x: u32, y: u32, z: u32| self.get(x, y, z).distance();
+        // Two neighbours along one axis, or twice the center if either is
+        // missing (a linear continuation adds no curvature there).
+        let pair = |c: f32, lo: Option<f32>, hi: Option<f32>| match (lo, hi) {
+            (Some(a), Some(b)) => a + b,
+            _ => 2.0 * c,
+        };
+        let below = |i: u32| i.checked_sub(1);
+        let above = |i: u32, n: u32| i.checked_add(1).filter(|&j| j < n);
+
+        let mut out = Vec::new();
+        for z in min.z..=max.z {
+            for y in min.y..=max.y {
+                for x in min.x..=max.x {
+                    let dist = UVec3::new(x, y, z).as_vec3().distance(center);
+                    if dist > radius {
+                        continue;
+                    }
+                    let c = read(x, y, z);
+                    let sum = pair(
+                        c,
+                        below(x).map(|i| read(i, y, z)),
+                        above(x, size.x).map(|i| read(i, y, z)),
+                    ) + pair(
+                        c,
+                        below(y).map(|i| read(x, i, z)),
+                        above(y, size.y).map(|i| read(x, i, z)),
+                    ) + pair(
+                        c,
+                        below(z).map(|i| read(x, y, i)),
+                        above(z, size.z).map(|i| read(x, y, i)),
+                    );
+                    let t = (amount * brush_falloff(dist, radius)).clamp(0.0, 1.0);
+                    out.push((x, y, z, (sum / 6.0 - c).mul_add(t, c)));
+                }
+            }
+        }
+        for (x, y, z, v) in out {
+            self.set(x, y, z, T::from_signed_distance(v));
+        }
+    }
+
+    /// Pulls the distances inside the sphere toward those of a plane
+    /// through `plane_point` with unit `plane_normal` (grid space, normal
+    /// pointing out of the terrain): fills dips below it and shaves bumps
+    /// above it. `amount` (0..=1) as in `smooth_sphere`. Depends only on
+    /// position and the current value, so it's seamless across chunks.
+    fn flatten_sphere(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        plane_point: Vec3,
+        plane_normal: Vec3,
+        amount: f32,
+    ) where
+        T: SignedDistance,
+    {
+        self.apply_sphere_at(center, radius, |cur, pos, dist| {
+            let c = cur.distance();
+            let plane = (pos - plane_point).dot(plane_normal);
+            let t = (amount * brush_falloff(dist, radius)).clamp(0.0, 1.0);
+            T::from_signed_distance((plane - c).mul_add(t, c))
+        });
     }
 }
 
@@ -369,11 +526,104 @@ impl SignedDistance for f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cuboid, FieldBoxOps, Vec3};
+    use super::{Cuboid, FieldBoxOps, FieldSphereOps, UVec3, Vec3};
     use crate::{
         field::Field,
-        field::{LOD, VisibilityField},
+        field::{LOD, SDF, VisibilityField},
+        num::f32_from_u32,
     };
+
+    /// An SDF holding `f(x, y, z)` at every voxel.
+    fn sdf_from(f: impl Fn(f32, f32, f32) -> f32) -> SDF {
+        let mut sdf = SDF::new(LOD::Lowest);
+        let n = sdf.size().x;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let p = (f32_from_u32(x), f32_from_u32(y), f32_from_u32(z));
+                    sdf.set(x, y, z, f(p.0, p.1, p.2));
+                }
+            }
+        }
+        sdf
+    }
+
+    #[test]
+    fn smoothing_leaves_flat_ground_alone() {
+        // A tilted plane, through the whole grid, borders included.
+        let plane = |x: f32, y: f32, z: f32| 0.2f32.mul_add(x, 0.1f32.mul_add(-z, y) - 2.0);
+        let mut sdf = sdf_from(plane);
+        let n = f32_from_u32(sdf.size().x);
+        sdf.smooth_sphere(Vec3::splat(n / 2.0), n, 1.0);
+        for (x, y, z) in [(0, 0, 0), (1, 2, 1), (2, 2, 2), (3, 1, 0)] {
+            let want = plane(f32_from_u32(x), f32_from_u32(y), f32_from_u32(z));
+            assert!(
+                (sdf.get(x, y, z) - want).abs() < 1e-5,
+                "({x}, {y}, {z}) moved"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_flattens_a_spike() {
+        let mut sdf = sdf_from(|_, y, _| y - 1.5);
+        sdf.set(2, 2, 2, -3.0); // a lone solid voxel above ground
+        sdf.smooth_sphere(Vec3::splat(2.0), 2.0, 1.0);
+        assert!(sdf.get(2, 2, 2) > -1.0, "spike kept {}", sdf.get(2, 2, 2));
+    }
+
+    #[test]
+    fn limited_dig_moves_gradually_then_matches_exact_csg() {
+        let ground = |_: f32, y: f32, _: f32| y - 2.5;
+        let center = Vec3::splat(2.0); // on voxel (2, 2, 2): full step there
+        let mut exact = sdf_from(ground);
+        exact.csg_sphere(center, 1.5, 2.0, true, None);
+
+        // One small step: the center voxel moves up from -0.5 by exactly 0.25.
+        let mut slow = sdf_from(ground);
+        slow.csg_sphere(center, 1.5, 2.0, true, Some(0.25));
+        assert!((slow.get(2, 2, 2) - -0.25).abs() < 1e-5);
+
+        // Held long enough, it lands on the exact result and stays there.
+        for _ in 0..200 {
+            slow.csg_sphere(center, 1.5, 2.0, true, Some(0.25));
+        }
+        for (x, y, z) in [(2, 2, 2), (2, 1, 2), (1, 2, 2), (3, 3, 3), (0, 0, 0)] {
+            let (got, want) = (slow.get(x, y, z), exact.get(x, y, z));
+            assert!(
+                (got - want).abs() < 1e-4,
+                "({x}, {y}, {z}): {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_reports_only_the_voxels_it_fills() {
+        let ground = |_: f32, y: f32, _: f32| y - 1.5; // y <= 1 solid
+        let mut sdf = sdf_from(ground);
+        // A small step: only air right at the sphere's core can cross.
+        let filled = sdf.csg_sphere(Vec3::new(2.0, 2.0, 2.0), 1.2, 2.0, false, Some(0.6));
+        assert_eq!(filled, vec![UVec3::new(2, 2, 2)]);
+
+        // Paint covers it and the air around it, never the ground below.
+        let painted = sdf.with_air_neighbours(&filled);
+        assert!(painted.contains(&UVec3::new(2, 3, 2)));
+        assert!(painted.contains(&UVec3::new(1, 2, 2)));
+        assert!(!painted.contains(&UVec3::new(2, 1, 2)));
+        assert_eq!(painted.len(), 6);
+    }
+
+    #[test]
+    fn flatten_pulls_toward_the_plane() {
+        // Ground at y = 1.5; flatten toward y = 2.5 at full strength.
+        let mut sdf = sdf_from(|_, y, _| y - 1.5);
+        let center = Vec3::new(2.0, 2.0, 2.0);
+        sdf.flatten_sphere(center, 1.5, Vec3::new(0.0, 2.5, 0.0), Vec3::Y, 1.0);
+        // The center gets the plane's distance exactly...
+        assert!((sdf.get(2, 2, 2) - -0.5).abs() < 1e-5);
+        // ...voxels outside the sphere keep the ground's.
+        assert!((sdf.get(0, 2, 0) - 0.5).abs() < 1e-5);
+    }
 
     fn hidden_count(field: &VisibilityField) -> usize {
         let n = field.size().x;

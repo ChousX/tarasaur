@@ -21,9 +21,11 @@ hardware such as a Steam Deck.
   - `SDF`: narrow-band signed distances that define the shape
   - `VisibilityField`: an optional per-voxel mask, discarded per pixel
   - `MaterialField<M>`: per-voxel ids from your own material enum
-- **Editing.** World-space sphere and box brushes (`WorldEditor`), and exact
-  CSG spheres (`SdfCsgSphere`). Edits that span chunks apply to every
-  chunk they touch.
+- **Editing.** World-space sphere and box brushes (`WorldEditor`), exact
+  CSG spheres (`SdfCsgSphere`), smooth and flatten sculpts
+  (`SdfSculptSphere`), and material painting by palette id
+  (`MaterialPaint`). Edits that span chunks apply to every chunk they
+  touch.
 - **Persistence.** Edited chunks autosave to `./saves/chunks/` (`SaveDirectory`). Saves load
   before generators, and lower LODs are downsampled from the save.
 - **Triplanar texturing with PBR lighting.** A `TexturePalette` albedo
@@ -75,9 +77,14 @@ fn setup(mut commands: Commands) {
 }
 ```
 
-The built-in cursor brush is on by default: left mouse digs, right mouse
-adds, and F8 cycles the ray backend (Auto / CPU / GPU). Turn it off with
-`CursorBrush { enabled: false }` and edit from `CursorHit` yourself.
+The built-in cursor brush is on by default: hold left mouse to apply
+`CursorBrush::tool` (`BrushTool::Dig`, `Build`, `Smooth`, `Flatten` or
+`Paint`), and hold Ctrl as well to swap dig and build. Set its `radius`,
+`strength`, `material` (a palette id, used by Paint and by Build) and
+`flatten` (`FlattenPlane::Level` or `Slope`) at runtime; the app binds
+the keys. F8 cycles the ray backend (Auto / CPU / GPU). Turn the brush off
+with `CursorBrush { enabled: false, ..default() }` and edit from
+`CursorHit` yourself.
 
 ### Materials and textures
 
@@ -192,7 +199,7 @@ cargo run --release --example sandbox
 
 | Example | What it shows |
 |---|---|
-| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse digs, Ctrl + left mouse builds, scroll resizes the brush |
+| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-5 pick dig, build, smooth, flatten or paint, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening |
 | `lod_streaming` | The smallest streaming setup |
 | `terrain_test` | Seam check and a valley carved across a chunk border |
 | `edit_sphere` | Hand-spawned chunks and a resizable SDF sphere |

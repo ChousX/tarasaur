@@ -6,15 +6,21 @@ use bevy::prelude::*;
 use bevy::shape::{Cuboid, Sphere};
 
 use crate::chunk::NewChunkSpawned;
-use crate::field::editor::{EditFieldMessage, SdfCsgSphere, SdfSphereStamp};
+use crate::field::editor::{
+    EditFieldMessage, MaterialPaint, MaterialPaintVoxels, SdfCsgSphere, SdfSculptSphere,
+    SdfSphereStamp,
+};
 use crate::field::systems::{
-    clear_dirty, process_sdf_csg_spheres, process_sdf_sphere_stamps, process_shape_edits,
-    resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
+    clear_dirty, process_sdf_csg_spheres, process_sdf_sculpts, process_sdf_sphere_stamps,
+    process_shape_edits, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
 use crate::field::{Field, LOD, TargetLOD, VoxelField};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldSet {
+    /// Systems that turn input into edit messages (the cursor brush), so the
+    /// edits land the same frame.
+    Brush,
     /// All edit-producing and edit-applying systems.
     Edit,
     /// Runs once per cycle, after every edit system has run.
@@ -32,7 +38,13 @@ impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(
             Update,
-            (FieldSet::Edit, FieldSet::Reinit, FieldSet::EndCycle).chain(),
+            (
+                FieldSet::Brush,
+                FieldSet::Edit,
+                FieldSet::Reinit,
+                FieldSet::EndCycle,
+            )
+                .chain(),
         );
         app.add_systems(
             Update,
@@ -53,7 +65,15 @@ impl Plugin for FieldsPlugin {
             .add_systems(Update, process_sdf_sphere_stamps.in_set(FieldSet::Edit));
 
         app.add_message::<SdfCsgSphere>()
-            .add_systems(Update, process_sdf_csg_spheres);
+            .add_message::<SdfSculptSphere>()
+            .add_systems(
+                Update,
+                (process_sdf_csg_spheres, process_sdf_sculpts).in_set(FieldSet::Edit),
+            );
+        // Applied by `MaterialFieldPlugin<M>`; registered here so writers
+        // work without one.
+        app.add_message::<MaterialPaint>()
+            .add_message::<MaterialPaintVoxels>();
     }
 }
 

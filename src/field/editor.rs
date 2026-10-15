@@ -141,11 +141,66 @@ pub struct SdfSphereStamp {
     pub sdf_radius: f32,
 }
 
-/// Exact CSG union/subtraction of a sphere; idempotent, no reinit needed.
-/// What the built-in cursor brush sends.
+/// CSG union/subtraction of a sphere; idempotent, no reinit needed. What
+/// the built-in brush's Dig and Build send.
 #[derive(Message, Clone, Copy)]
 pub struct SdfCsgSphere {
     pub center: Vec3,
     pub radius: f32,
     pub subtract: bool, // true = dig, false = add material
+    /// `None`: exact CSG at once. `Some(step)`: each voxel moves at most
+    /// `step` world units toward the CSG result, the full step at the
+    /// center and less toward the rim, so a held brush grows the shape
+    /// gradually (send one per frame, scaled by the frame time). Either way
+    /// it never goes past the sphere.
+    pub max_step: Option<f32>,
+    /// Build only: give every voxel this edit turns solid, and its air
+    /// neighbours, this palette id (needs a `MaterialFieldPlugin`). The
+    /// color follows the shape as it grows instead of landing all at once.
+    pub paint: Option<u8>,
+}
+
+/// What an `SdfSculptSphere` does to the distances inside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SdfSculptOp {
+    /// Relax toward the neighbour average: rounds off bumps and creases.
+    Smooth,
+    /// Pull toward the plane through `point` (world space) with unit
+    /// `normal` pointing out of the terrain.
+    Flatten { point: Vec3, normal: Vec3 },
+}
+
+/// A gradual SDF brush, applied without a jump-flood reinit.
+///
+/// Each message moves the voxels inside the sphere `amount` (0..=1) of the
+/// way at the center, fading to nothing at the edge, so send one per frame
+/// scaled by the frame time.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct SdfSculptSphere {
+    pub center: Vec3,
+    pub radius: f32,
+    pub amount: f32,
+    pub op: SdfSculptOp,
+}
+
+/// Sets the listed voxels (grid coordinates) of one chunk's material field
+/// to palette id `material`. Sent by the CSG system for a painting build;
+/// applied by `MaterialFieldPlugin<M>`.
+#[derive(Message, Clone, Debug)]
+pub struct MaterialPaintVoxels {
+    pub chunk: Entity,
+    pub voxels: Vec<UVec3>,
+    pub material: u8,
+}
+
+/// Sets every voxel within `radius` of `center` to palette id `material`.
+///
+/// For code that doesn't know the app's material enum (like the cursor
+/// brush); `MaterialFieldPlugin<M>` applies it to `MaterialField<M>`, and
+/// without one it's ignored.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct MaterialPaint {
+    pub center: Vec3,
+    pub radius: f32,
+    pub material: u8,
 }

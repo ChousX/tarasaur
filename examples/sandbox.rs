@@ -1,6 +1,9 @@
 //! Main playground: streamed, textured heightfield terrain around a fly
-//! camera. Left mouse digs, Ctrl + left mouse builds, scroll resizes the
-//! brush; hold right mouse to look.
+//! camera, edited with the library's `CursorBrush`. Hold right mouse to
+//! look, left mouse to apply the brush. 1-5 pick the tool (dig, build,
+//! smooth, flatten, paint), Q/E the material, scroll the radius and Ctrl +
+//! scroll the strength; Ctrl + left mouse swaps dig and build, and R toggles
+//! flatten between level and along the slope.
 
 mod common;
 
@@ -11,8 +14,8 @@ use common::{
 use tarasaur::{
     MaterialFieldPlugin, TarasaurPlugin,
     chunk::ChunkLoader,
-    field::{LOD, SDF, editor::WorldEditor},
-    raycast::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
+    field::{FieldSet, LOD, VoxelMaterial},
+    raycast::cursor::{BrushTool, CursorBrush},
 };
 
 fn main() {
@@ -25,18 +28,20 @@ fn main() {
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
     register_terrain(&mut app);
 
-    app.init_resource::<Brush>()
-        .insert_resource(CursorBrush { enabled: false })
-        .add_systems(Startup, (spawn_player, setup_terrain_palette))
-        .add_systems(
-            Update,
-            (
-                fly_cam_system,
-                resize_brush,
-                terrain_edit.after(resolve_cursor_hit).after(resize_brush),
-            ),
-        )
-        .run();
+    app.insert_resource(CursorBrush {
+        radius: 4.0,
+        ..default()
+    })
+    .add_systems(Startup, (spawn_player, spawn_hud, setup_terrain_palette))
+    .add_systems(
+        Update,
+        (
+            fly_cam_system,
+            brush_controls.before(FieldSet::Brush),
+            update_hud.after(brush_controls),
+        ),
+    )
+    .run();
 }
 
 // ---------------------------------------------------------------------------
@@ -82,57 +87,95 @@ fn spawn_player(mut commands: Commands) {
 // Terrain editing
 // ---------------------------------------------------------------------------
 
-#[derive(Resource)]
-struct Brush {
-    radius: f32,
-    /// SDF change per second while a button is held.
-    strength: f32,
-}
+const TOOL_KEYS: [KeyCode; 5] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+];
 
-impl Default for Brush {
-    fn default() -> Self {
-        Self {
-            radius: 4.0,
-            strength: 12.0,
+/// Number keys pick the tool, Q/E cycle the material, R toggles level
+/// flattening, scroll resizes the brush and Ctrl + scroll changes its
+/// strength.
+fn brush_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut brush: ResMut<CursorBrush>,
+) {
+    for (key, tool) in TOOL_KEYS.into_iter().zip(BrushTool::ALL) {
+        if keys.just_pressed(key) {
+            brush.tool = tool;
+        }
+    }
+
+    let count = TerrainMaterial::COUNT;
+    if keys.just_pressed(KeyCode::KeyE) {
+        brush.material = brush.material.saturating_add(1) % count;
+    }
+    if keys.just_pressed(KeyCode::KeyQ) {
+        brush.material = brush
+            .material
+            .checked_sub(1)
+            .unwrap_or_else(|| count.saturating_sub(1));
+    }
+
+    if keys.just_pressed(KeyCode::KeyR) {
+        brush.flatten = brush.flatten.toggled();
+    }
+
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    for ev in wheel.read() {
+        if ctrl {
+            brush.strength = f32::mul_add(ev.y, 0.5, brush.strength).clamp(0.5, 20.0);
+        } else {
+            brush.radius = f32::mul_add(ev.y, 0.5, brush.radius).clamp(1.0, 20.0);
         }
     }
 }
 
-/// Scroll resizes the brush.
-fn resize_brush(mut wheel: MessageReader<MouseWheel>, mut brush: ResMut<Brush>) {
-    for ev in wheel.read() {
-        brush.radius = f32::mul_add(ev.y, 0.5, brush.radius).clamp(1.0, 20.0);
-    }
+#[derive(Component)]
+struct Hud;
+
+fn spawn_hud(mut commands: Commands) {
+    commands.spawn((
+        Hud,
+        Text::default(),
+        TextFont {
+            font_size: FontSize::Px(16.0),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            left: px(8),
+            ..default()
+        },
+    ));
 }
 
-/// Brush on top of the library's resolved `CursorHit` (backend picked by
-/// `CursorQueryMode`, F8 cycles). The built-in CSG brush is disabled in
-/// `main` so a click only edits once. Right mouse is the fly cam's look, so
-/// building is Ctrl + left mouse.
-fn terrain_edit(
-    hit: Res<CursorHit>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    brush: Res<Brush>,
-    mut sdf: WorldEditor<SDF, f32>,
-    mut gizmos: Gizmos,
-) {
-    let Some(hit) = hit.0.map(|h| h.pos) else {
+fn update_hud(brush: Res<CursorBrush>, mut hud: Query<&mut Text, With<Hud>>) {
+    if !brush.is_changed() {
         return;
-    };
-
-    gizmos.sphere(
-        Isometry3d::from_translation(hit),
-        brush.radius,
-        Color::WHITE,
-    );
-
-    let amount = brush.strength * time.delta_secs();
-    if buttons.pressed(MouseButton::Left) {
-        let build = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-        // Dig raises the SDF, build lowers it.
-        let delta = if build { -amount } else { amount };
-        sdf.accumulate_sphere(hit, brush.radius, delta);
+    }
+    let tools: String = BrushTool::ALL
+        .iter()
+        .zip(1..)
+        .map(|(t, n)| {
+            if *t == brush.tool {
+                format!("[{n} {}] ", t.name())
+            } else {
+                format!(" {n} {}  ", t.name())
+            }
+        })
+        .collect();
+    let material = TerrainMaterial::from_id(brush.material);
+    for mut text in &mut hud {
+        text.0 = format!(
+            "{tools}\nmaterial {material:?} (Q/E)   radius {:.1} (scroll)   strength {:.1} (ctrl+scroll)   \
+             flatten {:?} (R)\n\
+             LMB apply, ctrl+LMB swaps dig/build, RMB look",
+            brush.radius, brush.strength, brush.flatten
+        );
     }
 }
