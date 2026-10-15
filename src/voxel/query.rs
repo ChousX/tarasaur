@@ -7,7 +7,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicU32, Ordering},
 };
 
 use bevy::{
@@ -128,6 +128,9 @@ pub struct VoxelQueryBuffers {
     pub readback_buffers: [Buffer; QUERY_BUFFER_SLOTS],
     pub query_uniform_buffer: Buffer,
     pub slot_state: [Arc<AtomicU8>; QUERY_BUFFER_SLOTS],
+    /// Queries dispatched into each slot; its readback holds that many
+    /// results, the rest of the buffer is left over from older dispatches.
+    pub slot_query_count: [AtomicU32; QUERY_BUFFER_SLOTS],
     pub active_count: u32,
     pub merged_lookup_buffer: Buffer,
     pub merged_lookup_capacity: u32,
@@ -215,6 +218,7 @@ impl FromWorld for VoxelQueryBuffers {
             readback_buffers,
             query_uniform_buffer,
             slot_state: std::array::from_fn(|_| Arc::new(AtomicU8::new(SLOT_FREE))),
+            slot_query_count: std::array::from_fn(|_| AtomicU32::new(0)),
             active_count: 0,
             merged_lookup_buffer,
             merged_lookup_capacity: initial_lookup_capacity,
@@ -410,8 +414,9 @@ pub fn dispatch_voxel_query_pass(
     next_slot.0 = slot.wrapping_add(1) % QUERY_BUFFER_SLOTS;
 
     let qb = &*query_buffers;
-    let (Some(state), Some(Some(bind_group)), Some(hit), Some(readback)) = (
+    let (Some(state), Some(slot_count), Some(Some(bind_group)), Some(hit), Some(readback)) = (
         qb.slot_state.get(slot),
+        qb.slot_query_count.get(slot),
         qb.bind_groups.get(slot),
         qb.hit_buffers.get(slot),
         qb.readback_buffers.get(slot),
@@ -437,6 +442,7 @@ pub fn dispatch_voxel_query_pass(
     encoder.copy_buffer_to_buffer(hit, 0, readback, 0, hit.size());
     render_queue.submit(std::iter::once(encoder.finish()));
 
+    slot_count.store(count, Ordering::Relaxed);
     state.store(SLOT_COPIED, Ordering::Release);
 }
 
@@ -454,8 +460,9 @@ pub fn map_voxel_query_results(
     let slots = query_buffers
         .slot_state
         .iter()
+        .zip(&query_buffers.slot_query_count)
         .zip(&query_buffers.readback_buffers);
-    for (state, buf) in slots {
+    for ((state, slot_count), buf) in slots {
         let state = state.clone();
         if state
             .compare_exchange(
@@ -468,6 +475,8 @@ pub fn map_voxel_query_results(
         {
             continue;
         }
+        // Set before the slot was marked copied; the Acquire above sees it.
+        let count = usize_from(slot_count.load(Ordering::Relaxed));
 
         let buf = buf.clone();
         let sender = channel.sender.clone();
@@ -485,7 +494,8 @@ pub fn map_voxel_query_results(
                     state.store(SLOT_FREE, Ordering::Release);
                     return;
                 };
-                bytemuck::cast_slice(&data).to_vec()
+                let hits: &[HitResult] = bytemuck::cast_slice(&data);
+                hits.iter().take(count).copied().collect()
             };
             buf.unmap();
             let _ = sender.send(out);
