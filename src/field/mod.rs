@@ -1,15 +1,18 @@
 //! Per-chunk voxel grids ("fields") and the traits that make them generic.
 //!
-//! A field is a component holding `LOD::size()`^3 values. The traits below
-//! let the same code edit (`Field`), version (`Versionable`), upload
-//! (`VoxelDataSlice`, `ApronSample`, `ExtractGate`), save and rebuild
-//! (`FieldFromRaw`, `FieldNew`) any field type. `EditableChunks` is the
-//! gate every mutation goes through.
+//! A field is a component holding `LOD::size()`^3 values. [`VoxelField`]
+//! describes how to build, version, save and upload one, and [`Field`] how
+//! to edit it; `app.add_voxel_field::<F>()` (see `AppVoxelFieldExt`) wires
+//! up everything else. `EditableChunks` is the gate every mutation goes
+//! through.
 
 use bevy::ecs::component::Mutable;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::marker::PhantomData;
+
+use crate::grid::nearest_neighbor_sample;
+use ops::{AccumulateExt, BlendExt};
 
 pub(crate) mod apron;
 pub mod editor;
@@ -26,7 +29,8 @@ pub(crate) mod systems;
 mod visibility;
 pub use lod::{LOD, MaxEditLod, TargetLOD};
 pub use material::{MaterialField, VoxelMaterial};
-pub use plugin::{AppFieldExt, FieldSet, FieldsPlugin, MaterialFieldPlugin};
+pub(crate) use plugin::register_edits;
+pub use plugin::{FieldSet, FieldsPlugin};
 pub use sdf::{SDF, SDF_BAND, quantize_sdf};
 pub use visibility::VisibilityField;
 
@@ -57,7 +61,51 @@ pub trait Field<T: Copy + Default>: Component {
     fn set(&mut self, x: u32, y: u32, z: u32, value: T);
 }
 
-pub trait Versionable: Component {
+/// Which GPU buffer a field's padded volume feeds. At most one field per
+/// channel: two would overwrite each other's slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuChannel {
+    /// The shape the mesher reads: `gpu_bytes` must be snorm16 signed
+    /// distances (see `quantize_sdf`). `SDF`.
+    Shape,
+    /// One `u8` palette id per voxel, blended into vertices and read per
+    /// fragment. `MaterialField<M>`.
+    Material,
+    /// One `u8` per voxel, 0 = hidden, discarded per fragment. Empty data
+    /// (no field, or `should_extract() == false`) means fully visible.
+    /// `VisibilityField`.
+    Mask,
+    /// Edited and saved on the CPU, never uploaded.
+    None,
+}
+
+/// A per-chunk voxel grid the engine can build, version, save and upload.
+///
+/// Register one with `app.add_voxel_field::<F>()`. Editing it also needs
+/// `Field<Self::Value>`.
+pub trait VoxelField: Component<Mutability = Mutable> + Sized {
+    /// The value edits read and write (`Field<Self::Value>`).
+    type Value: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt;
+    /// The stored element, as saved and uploaded: f32 distances for `SDF`,
+    /// u8 ids for materials.
+    type Elem: bytemuck::Pod + Default + Send + Sync;
+
+    /// The GPU buffer this field feeds.
+    const GPU: GpuChannel;
+    /// Removed (not defaulted) when a load has no data for it.
+    const OPTIONAL: bool = false;
+    /// Whether `DirtyField` is cleared at the end of every edit cycle.
+    /// `SDF` keeps it until its jump flood lands.
+    const CLEAR_DIRTY_EACH_CYCLE: bool = true;
+
+    /// A default field at `lod`, for new chunks and edits on absent fields.
+    fn new_for_lod(lod: LOD) -> Self;
+    /// A field at `lod` from saved or generated elements (version 0).
+    fn from_raw(lod: LOD, data: Vec<Self::Elem>) -> Self;
+    /// The LOD the data is stored at (may lag the chunk's `TargetLOD`).
+    fn lod(&self) -> LOD;
+    /// The stored elements, `lod().size()`^3 of them, x fastest.
+    fn data_slice(&self) -> &[Self::Elem];
     /// Bumped on every change; drives re-extraction and unsaved-edit detection.
     fn version(&self) -> u64;
     /// Version of only the voxels that `NEIGHBORS_MASK[neighbor]`'s chunk reads
@@ -66,16 +114,12 @@ pub trait Versionable: Component {
     fn border_version(&self, _neighbor: usize) -> u64 {
         self.version()
     }
-}
-
-/// A field whose backing storage can be uploaded to the GPU as a flat byte
-/// buffer. `Elem` is the raw stored type — f32 for SDF distances, u8 for
-/// packed material ids.
-pub trait VoxelDataSlice {
-    type Elem: bytemuck::Pod + Default;
-    fn data_slice(&self) -> &[Self::Elem];
-    /// The bytes uploaded to the GPU for a padded volume. Default: the raw
-    /// elements; SDF overrides it to pack 16-bit values.
+    /// Whether to build and upload a padded volume at all. `false` sends an
+    /// empty one (for the mask: "no mask needed").
+    fn should_extract(&self) -> bool {
+        true
+    }
+    /// The bytes uploaded for a padded volume. Default: the raw elements.
     fn gpu_bytes(vol: &[Self::Elem]) -> Vec<u8> {
         bytemuck::cast_slice(vol).to_vec()
     }
@@ -86,59 +130,12 @@ pub trait VoxelDataSlice {
     fn rescale(v: Self::Elem, _ratio: f32) -> Self::Elem {
         v
     }
-}
-
-/// How a field samples its own data at a non-integer (neighbor-chunk)
-/// coordinate when building the padding apron.
-///
-/// SDF distances interpolate
-/// meaningfully (trilinear); material ids are categorical and must never be
-/// blended, so they use nearest-neighbor instead.
-pub trait ApronSample: VoxelDataSlice {
-    fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem;
-}
-
-/// Optional opt-out checked by `extract_voxel_chunks<T>` before doing the
-/// padding/apron work for a chunk. Default: always extract. Implemented per
-/// type (not blanket) so `VisibilityField` can override it.
-pub trait ExtractGate {
-    fn should_extract(&self) -> bool {
-        true
+    /// Samples a neighbour's data at a non-integer coordinate for the apron.
+    /// Default: nearest voxel, as categorical data (ids, masks) must never
+    /// blend; `SDF` interpolates.
+    fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem {
+        nearest_neighbor_sample(data, size, x, y, z)
     }
-}
-
-/// The LOD a field's data is stored at (may lag the chunk's `TargetLOD`).
-pub trait FieldLOD {
-    fn lod(&self) -> LOD;
-}
-
-/// Reconstructs a field at a given LOD with default contents, so generic
-/// code (spawn observers, edits, save install) can create any field type.
-pub trait FieldNew {
-    fn new_for_lod(lod: LOD) -> Self;
-}
-
-impl FieldNew for SDF {
-    fn new_for_lod(lod: LOD) -> Self {
-        Self::new(lod)
-    }
-}
-impl FieldNew for VisibilityField {
-    fn new_for_lod(lod: LOD) -> Self {
-        Self::new(lod)
-    }
-}
-impl<M: VoxelMaterial> FieldNew for MaterialField<M> {
-    fn new_for_lod(lod: LOD) -> Self {
-        Self::new(lod)
-    }
-}
-
-/// Build a field directly from raw voxel data at `lod` (version 0).
-pub trait FieldFromRaw: VoxelDataSlice + Sized {
-    /// Optional fields are REMOVED (not defaulted) when the save has no payload.
-    const OPTIONAL: bool = false;
-    fn from_raw(lod: LOD, data: Vec<Self::Elem>) -> Self;
 }
 
 use crate::chunk::{Chunk, EditPin};
@@ -158,14 +155,14 @@ type EditableChunkState = (
 /// and absent, it is created at its "editable default" (for visibility:
 /// fully visible).
 #[derive(SystemParam)]
-pub struct EditableChunks<'w, 's, F: Component<Mutability = Mutable> + FieldNew> {
+pub struct EditableChunks<'w, 's, F: VoxelField> {
     max: Res<'w, MaxEditLod>,
     commands: Commands<'w, 's>,
     chunks: Query<'w, 's, EditableChunkState, With<Chunk>>,
     fields: Query<'w, 's, &'static mut F, With<Chunk>>,
 }
 
-impl<F: Component<Mutability = Mutable> + FieldNew> EditableChunks<'_, '_, F> {
+impl<F: VoxelField> EditableChunks<'_, '_, F> {
     pub fn get_mut(&mut self, e: Entity) -> Option<Mut<'_, F>> {
         let max = self.max.0;
         let (lod, loading, pin) = self.chunks.get_mut(e).ok()?;

@@ -46,7 +46,7 @@ use extract::{LiveOutbox, add_field_extraction, release_despawned_chunks, track_
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
-    field::{SDF, VisibilityField},
+    field::{GpuChannel, VoxelField},
     voxel::{
         arena::VoxelChunkArenaSet,
         cursor::CursorPlugin,
@@ -54,7 +54,7 @@ use crate::{
             DRAW_COMPACTION_SHADER_HANDLE, VoxelDrawPipeline, VoxelViewDraws,
             prepare_voxel_view_draws,
         },
-        extract::extract_visibility_removed,
+        extract::extract_removed,
         mesh::dispatch_voxel_compute_passes_batched,
         pipeline::{
             VoxelMaterialBindGroup, VoxelRasterPipeline, queue_voxel_raster_pipelines,
@@ -69,7 +69,7 @@ use crate::{
         raster::voxel_raster_pass,
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         telemetry::map_guard_readbacks,
-        upload::{prepare_visibility_for_arena, prepare_voxel_arena},
+        upload::{prepare_mask_upload, prepare_material_upload, prepare_shape_upload},
     },
 };
 
@@ -92,6 +92,62 @@ pub enum VoxelPrepareSet {
     Upload,
     /// Re-meshes what `Upload` dirtied, in the same frame.
     Dispatch,
+}
+
+/// Order inside `VoxelPrepareSet::Upload`: the shape upload places chunks,
+/// then the material and mask uploads follow them into their slots.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum UploadSet {
+    Shape,
+    Channels,
+}
+
+/// Marks that a `GpuChannel::Shape` field is registered (there can be one).
+#[derive(Resource)]
+struct ShapeFieldRegistered(&'static str);
+
+/// Hands `F` to the render world and uploads it into its `GpuChannel`.
+/// Nothing for `GpuChannel::None`.
+pub(crate) fn register_field_upload<F: VoxelField>(app: &mut App) {
+    if F::GPU == GpuChannel::None {
+        return;
+    }
+    if F::GPU == GpuChannel::Shape {
+        let name = std::any::type_name::<F>();
+        if let Some(existing) = app.world().get_resource::<ShapeFieldRegistered>() {
+            error!(
+                "{name} is a second GpuChannel::Shape field ({} is already registered); not uploading it",
+                existing.0
+            );
+            return;
+        }
+        app.insert_resource(ShapeFieldRegistered(name));
+    }
+    add_field_extraction::<F>(app);
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    if F::OPTIONAL {
+        render_app.add_systems(
+            ExtractSchedule,
+            extract_removed::<F>.after(release_despawned_chunks),
+        );
+    }
+    match F::GPU {
+        GpuChannel::Shape => {
+            render_app.add_systems(Render, prepare_shape_upload::<F>.in_set(UploadSet::Shape));
+        }
+        GpuChannel::Material => {
+            render_app.add_systems(
+                Render,
+                prepare_material_upload::<F>.in_set(UploadSet::Channels),
+            );
+        }
+        GpuChannel::Mask => {
+            render_app.add_systems(Render, prepare_mask_upload::<F>.in_set(UploadSet::Channels));
+        }
+        GpuChannel::None => {}
+    }
 }
 
 /// Extraction, arenas, meshing, drawing, ray queries and the cursor.
@@ -151,8 +207,6 @@ impl Plugin for VoxelRenderPlugin {
             .add_systems(Update, lease_chunks_near_camera)
             .init_resource::<LiveOutbox>()
             .add_systems(Last, track_live_chunks);
-        add_field_extraction::<SDF>(app);
-        add_field_extraction::<VisibilityField>(app);
 
         app.add_plugins(CursorPlugin);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -169,11 +223,7 @@ impl Plugin for VoxelRenderPlugin {
             .init_resource::<GuardTelemetry>()
             .add_systems(
                 ExtractSchedule,
-                (
-                    release_despawned_chunks,
-                    (extract_visibility_removed, extract_voxel_queries),
-                )
-                    .chain(),
+                (release_despawned_chunks, extract_voxel_queries).chain(),
             )
             .configure_sets(
                 Render,
@@ -181,12 +231,15 @@ impl Plugin for VoxelRenderPlugin {
                     .chain()
                     .in_set(RenderSystems::Prepare),
             )
+            .configure_sets(
+                Render,
+                (UploadSet::Shape, UploadSet::Channels)
+                    .chain()
+                    .in_set(VoxelPrepareSet::Upload),
+            )
             .add_systems(
                 Render,
                 (
-                    (prepare_voxel_arena, prepare_visibility_for_arena)
-                        .chain()
-                        .in_set(VoxelPrepareSet::Upload),
                     update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
                     queue_voxel_raster_pipelines
                         .in_set(RenderSystems::Prepare)
@@ -196,7 +249,7 @@ impl Plugin for VoxelRenderPlugin {
                         .after(VoxelPrepareSet::Upload),
                     prepare_voxel_queries
                         .in_set(VoxelPrepareSet::Upload)
-                        .after(prepare_visibility_for_arena),
+                        .after(UploadSet::Channels),
                     dispatch_voxel_compute_passes_batched.in_set(VoxelPrepareSet::Dispatch),
                     dispatch_voxel_query_pass
                         .in_set(VoxelPrepareSet::Dispatch)

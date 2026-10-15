@@ -24,7 +24,7 @@ use bevy::{
 
 use crate::{
     chunk::CHUNK_SIZE,
-    field::{LOD, MaterialField, SDF, VisibilityField, VoxelMaterial},
+    field::{LOD, VoxelField},
     voxel::extract::ExtractedChunkField,
     voxel::{
         arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
@@ -147,16 +147,17 @@ pub struct ArenaGpu<'w> {
     render_queue: Res<'w, RenderQueue>,
 }
 
-/// Uploads changed chunks' SDF and gives each an exact-size vertex range.
+/// The `GpuChannel::Shape` upload: changed chunks' SDF, each given a slot
+/// and an exact-size vertex range.
 ///
 /// Never drops one: past the per-frame budget, or with no room in any arena,
 /// the upload waits and the chunk keeps drawing its current mesh (an old
 /// LOD is only released once the new one is placed).
-pub fn prepare_voxel_arena(
+pub fn prepare_shape_upload<F: VoxelField>(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     gpu: ArenaGpu,
     budget: Res<RemeshBudget>,
-    extracted_chunks: Query<(Entity, &ExtractedChunkField<SDF>)>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<F>)>,
     mut commands: Commands,
     mut out_of_room: Local<bool>,
     stats: Option<ResMut<VoxelFrameStats>>,
@@ -266,11 +267,11 @@ pub fn prepare_voxel_arena(
 
 /// Writes a placed chunk's SDF, metadata, vertex range and draw args into
 /// its arena slot, and marks the slot for re-meshing.
-fn upload_chunk(
+fn upload_chunk<F: Send + Sync + 'static>(
     render_queue: &RenderQueue,
     arena: &mut VoxelChunkArena,
     slot: u32,
-    x: &ExtractedChunkField<SDF>,
+    x: &ExtractedChunkField<F>,
     count: u32,
 ) {
     let Some(&(base, _)) = arena.slot_range.get(usize_from(slot)) else {
@@ -401,13 +402,13 @@ fn count_refills(stats: Option<ResMut<VoxelFrameStats>>, uploads: &[SideUpload])
     }
 }
 
-/// Sibling to `prepare_voxel_arena`: uploads material ids into the slot it
-/// placed. Must run after it, so `deferred`, `reslotted` and new slots are
-/// current.
-pub fn prepare_material_for_arena<M: VoxelMaterial>(
+/// The `GpuChannel::Material` upload: material ids into the slot the shape
+/// upload placed. Runs after it (`UploadSet::Channels`), so `deferred`,
+/// `reslotted` and new slots are current.
+pub fn prepare_material_upload<F: VoxelField>(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     render_queue: Res<RenderQueue>,
-    extracted_chunks: Query<(Entity, &ExtractedChunkField<MaterialField<M>>)>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<F>)>,
     mut commands: Commands,
     stats: Option<ResMut<VoxelFrameStats>>,
 ) {
@@ -432,10 +433,12 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
     }
 }
 
-pub fn prepare_visibility_for_arena(
+/// The `GpuChannel::Mask` upload: each chunk's mask as one bit per voxel,
+/// plus the per-slot "has a mask" bits the raster pass checks first.
+pub fn prepare_mask_upload<F: VoxelField>(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     render_queue: Res<RenderQueue>,
-    extracted_chunks: Query<(Entity, &ExtractedChunkField<VisibilityField>)>,
+    extracted_chunks: Query<(Entity, &ExtractedChunkField<F>)>,
     mut commands: Commands,
     stats: Option<ResMut<VoxelFrameStats>>,
 ) {
@@ -494,7 +497,7 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::count_active_cells;
-    use crate::{field::SDF, field::VoxelDataSlice, grid::flatten_cube, num::usize_from};
+    use crate::{field::SDF, field::VoxelField, grid::flatten_cube, num::usize_from};
 
     fn volume(n: u32, inside: &[(u32, u32, u32)]) -> Vec<u8> {
         let mut v = vec![1.0f32; usize_from(n).pow(3)];

@@ -3,10 +3,10 @@
 
 use crate::{
     field::{
-        ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
+        GpuChannel, VoxelField,
         ops::{AccumulateExt, BlendExt},
     },
-    grid::{flatten_with_size, nearest_neighbor_sample},
+    grid::flatten_with_size,
 };
 
 use super::{Field, LOD};
@@ -77,14 +77,15 @@ pub trait VoxelMaterial:
     fn to_id(self) -> u8;
     fn from_id(id: u8) -> Self;
 }
-impl<M: VoxelMaterial> VoxelDataSlice for MaterialField<M> {
+impl<M: VoxelMaterial> VoxelField for MaterialField<M> {
+    type Value = M;
     type Elem = u8;
-    fn data_slice(&self) -> &[u8] {
-        &self.data
-    }
-}
+    const GPU: GpuChannel = GpuChannel::Material;
 
-impl<M: VoxelMaterial> FieldFromRaw for MaterialField<M> {
+    fn new_for_lod(lod: LOD) -> Self {
+        Self::new(lod)
+    }
+
     fn from_raw(lod: LOD, data: Vec<u8>) -> Self {
         debug_assert_eq!(data.len(), lod.volume());
         Self {
@@ -94,23 +95,16 @@ impl<M: VoxelMaterial> FieldFromRaw for MaterialField<M> {
             version: 0,
         }
     }
-}
 
-impl<M: VoxelMaterial> ExtractGate for MaterialField<M> {}
-
-impl<M: VoxelMaterial> ApronSample for MaterialField<M> {
-    fn sample_apron(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
-        nearest_neighbor_sample(data, size, x, y, z)
-    }
-}
-
-impl<M: VoxelMaterial> Versionable for MaterialField<M> {
-    fn version(&self) -> u64 {
-        self.version
-    }
-}
-impl<M: VoxelMaterial> FieldLOD for MaterialField<M> {
     fn lod(&self) -> LOD {
         self.lod
+    }
+
+    fn data_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn version(&self) -> u64 {
+        self.version
     }
 }

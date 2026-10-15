@@ -3,7 +3,7 @@
 //! Everything here also has one canonical path in its module; the prelude
 //! only gathers what most apps touch.
 
-pub use crate::plugin::TarasaurPlugin;
+pub use crate::plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin};
 
 // Chunks and streaming
 pub use crate::chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, ShowChunkBounds};
@@ -11,11 +11,11 @@ pub use crate::field::generator::ChunkGeneratorRegistry;
 
 // Fields and editing
 pub use crate::field::{
-    Field, LOD, MaterialField, MaterialFieldPlugin, MaxEditLod, SDF, TargetLOD, VisibilityField,
+    Field, GpuChannel, LOD, MaterialField, MaxEditLod, SDF, TargetLOD, VisibilityField, VoxelField,
     VoxelMaterial,
     editor::{EditMode, SdfCsgSphere, SdfSphereStamp, WorldEditor},
     ops::{AccumulateExt, BlendExt},
-    persistence::{AutosaveIntervalSecs, RegisterSaveableFieldExt, SaveChunkMessage},
+    persistence::{AutosaveIntervalSecs, SaveChunkMessage},
 };
 
 // Rendering, palettes and ray casts

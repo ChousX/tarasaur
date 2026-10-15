@@ -7,7 +7,7 @@
 //! distances and skip that.
 
 use super::{
-    EditableChunks, Field, FieldNew, SDF,
+    EditableChunks, Field, SDF, VoxelField,
     editor::{EditFieldMessage, EditMode},
     ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
 };
@@ -23,7 +23,7 @@ use crate::{
     voxel::resident::ForceResident,
 };
 use bevy::{
-    ecs::{component::Mutable, message::MessageReader},
+    ecs::message::MessageReader,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, block_on, poll_once},
 };
@@ -52,7 +52,7 @@ fn apply_edits<F, V, E: Copy>(
     mut apply: impl FnMut(Entity, &mut F, Vec3, f32, E),
     mut on_drop: impl FnMut(IVec3),
 ) where
-    F: Field<V> + Component<Mutability = Mutable> + FieldNew,
+    F: Field<V> + VoxelField,
     V: Copy + Default,
 {
     let mut work = std::mem::take(deferred);
@@ -98,7 +98,7 @@ pub fn process_shape_edits<F, S, V>(
     chunk_manager: Res<ChunkManager>,
     mut deferred: Local<Vec<DeferredEdit<ShapeEdit<S, V>>>>,
 ) where
-    F: Field<V> + Component<Mutability = Mutable> + ShapeEditOps<V, S> + FieldNew,
+    F: Field<V> + VoxelField + ShapeEditOps<V, S>,
     S: Primitive3d + Copy + Send + Sync + 'static + ShapeBounds + ShapeScale,
     V: Copy + Default + Send + Sync + 'static + AccumulateExt + BlendExt,
 {

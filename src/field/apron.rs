@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::{
     chunk::{ChunkManager, ChunkPosition},
-    field::{ApronSample, LOD, VoxelDataSlice},
+    field::{LOD, VoxelField},
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
     num::f32_from_u32,
 };
@@ -23,7 +23,7 @@ pub fn fill_apron<T>(
     chunk_manager: &ChunkManager,
     query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
 ) where
-    T: Component + ApronSample,
+    T: VoxelField,
 {
     let Some((_, lod)) = field_at(chunk_pos, chunk_manager, query) else {
         return;
@@ -45,7 +45,7 @@ fn field_at<'a, T: Component>(
 
 /// The neighbour at `pos` if the apron can read it: present, and its data
 /// matching its LOD (not mid-LOD-change).
-fn apron_source<'a, T: Component + VoxelDataSlice>(
+fn apron_source<'a, T: VoxelField>(
     pos: IVec3,
     chunk_manager: &ChunkManager,
     query: &'a Query<(Entity, &ChunkPosition, &T, &LOD)>,
@@ -65,7 +65,7 @@ fn apron_source<'a, T: Component + VoxelDataSlice>(
 /// Keep in sync with `fill_apron` (which neighbours it reads) and the
 /// decoding in `surface_nets_pass3.wgsl` and `cursor_query.wgsl`.
 #[must_use]
-pub fn seam_lod_ranks<T: Component + VoxelDataSlice>(
+pub fn seam_lod_ranks<T: VoxelField>(
     chunk_pos: IVec3,
     lod: LOD,
     chunk_manager: &ChunkManager,
@@ -98,7 +98,7 @@ pub fn fill_apron_with<'a, T>(
     size: u32,
     neighbor: impl Fn(IVec3) -> Option<(&'a [T::Elem], u32)>,
 ) where
-    T: ApronSample,
+    T: VoxelField,
     T::Elem: 'a,
 {
     let padded = size.wrapping_add(PADDING);
@@ -153,7 +153,7 @@ pub fn fill_apron_with<'a, T>(
 mod tests {
     use crate::{
         field::SDF,
-        field::VoxelDataSlice,
+        field::VoxelField,
         grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
         num::usize_from,
     };
@@ -162,7 +162,7 @@ mod tests {
     type Neighbors<E> = [Option<(Vec<E>, u32)>; 7];
 
     /// The original apron fill: always the interpolating `sample_apron`.
-    fn reference_apron<T: crate::field::ApronSample>(
+    fn reference_apron<T: VoxelField>(
         vol: &mut [T::Elem],
         size: u32,
         neighbors: &Neighbors<T::Elem>,
@@ -211,7 +211,7 @@ mod tests {
 
     /// Fills a `size`^3 interior and the 7 neighbours, then checks the fast
     /// apron fill against the reference, compared as uploaded bytes.
-    fn check_apron<T: crate::field::ApronSample>(
+    fn check_apron<T: VoxelField>(
         size: u32,
         neighbor_sizes: [Option<u32>; 7],
         value: impl Fn(&mut u64) -> T::Elem,

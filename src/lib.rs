@@ -33,4 +33,4 @@ pub mod prelude;
 pub mod texture_palette;
 pub mod voxel;
 
-pub use plugin::TarasaurPlugin;
+pub use plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin};

@@ -10,11 +10,10 @@ use bevy::{
 use tarasaur::field::editor::WorldEditor;
 use tarasaur::num::{f32_from_i32, f32_from_u32, i16_from_f32, i32_from_f32, usize_from};
 use tarasaur::{
-    TarasaurPlugin,
+    MaterialFieldPlugin, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
-    field::MaterialFieldPlugin,
     field::{
-        Field, LOD, MaterialField, SDF, VisibilityField, VoxelDataSlice, VoxelMaterial,
+        Field, LOD, MaterialField, SDF, VisibilityField, VoxelField, VoxelMaterial,
         ops::{AccumulateExt, BlendExt},
     },
     texture_palette::{

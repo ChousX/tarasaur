@@ -66,14 +66,13 @@ use common::{
 };
 use renderdoc::{RenderDoc, V141};
 use tarasaur::{
-    TarasaurPlugin,
+    MaterialFieldPlugin, TarasaurPlugin,
     chunk::{
         CHUNK_SIZE, ChunkLoader, ChunkManager, overlapping_chunks, update_cursor_focus,
         world_pos_to_chunk_pos,
     },
-    field::{Field, MaterialFieldPlugin},
     field::{
-        FieldLOD, LOD, MaterialField, SDF, VoxelDataSlice, VoxelMaterial,
+        Field, LOD, MaterialField, SDF, VoxelField, VoxelMaterial,
         editor::{SdfCsgSphere, WorldEditor},
         loading::MaxInFlightLoads,
         persistence::AutosaveIntervalSecs,

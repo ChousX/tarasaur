@@ -69,11 +69,17 @@ pub fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
 /// Nearest-neighbor apron sampling for categorical byte data — material
 /// ids, visibility bits.
 ///
-/// Shared by `MaterialField`'s and `VisibilityField`'s `ApronSample` impls
+/// The default `VoxelField::sample_apron`, used by materials and visibility
 /// rather than duplicated: unlike SDF distances, these values must never be
 /// blended across a chunk boundary. Reads 0 if `data` is shorter than `size^3`.
 #[must_use]
-pub fn nearest_neighbor_sample(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
+pub fn nearest_neighbor_sample<E: Copy + Default>(
+    data: &[E],
+    size: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> E {
     let max_coord = f32_from_u32(size.saturating_sub(1));
     let axis = |v: f32| u32_from_f32(v.round().clamp(0.0, max_coord));
     data.get(flatten_cube(axis(x), axis(y), axis(z), size))

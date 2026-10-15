@@ -3,8 +3,8 @@
 
 use super::Field;
 use crate::{
-    field::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, LOD, Versionable, VoxelDataSlice},
-    grid::{flatten_with_size, nearest_neighbor_sample},
+    field::{GpuChannel, LOD, VoxelField},
+    grid::flatten_with_size,
     num::usize_from,
 };
 use bevy::prelude::*;
@@ -98,16 +98,18 @@ impl Field<bool> for VisibilityField {
     }
 }
 
-impl VoxelDataSlice for VisibilityField {
+impl VoxelField for VisibilityField {
+    type Value = bool;
     type Elem = u8;
-    fn data_slice(&self) -> &[u8] {
-        &self.byte_mirror
-    }
-}
-
-impl FieldFromRaw for VisibilityField {
+    const GPU: GpuChannel = GpuChannel::Mask;
     const OPTIONAL: bool = true;
+
+    fn new_for_lod(lod: LOD) -> Self {
+        Self::new(lod)
+    }
+
     fn from_raw(lod: LOD, bytes: Vec<u8>) -> Self {
+        debug_assert_eq!(bytes.len(), lod.volume());
         let mut words = vec![0u64; words_for_lod(lod)];
         for (i, &b) in bytes.iter().enumerate() {
             if b != 0
@@ -126,21 +128,19 @@ impl FieldFromRaw for VisibilityField {
             version: 0,
         }
     }
-}
 
-impl ApronSample for VisibilityField {
-    fn sample_apron(data: &[u8], size: u32, x: f32, y: f32, z: f32) -> u8 {
-        nearest_neighbor_sample(data, size, x, y, z)
+    fn lod(&self) -> LOD {
+        self.lod
     }
-}
 
-impl Versionable for VisibilityField {
+    fn data_slice(&self) -> &[u8] {
+        &self.byte_mirror
+    }
+
     fn version(&self) -> u64 {
         self.version
     }
-}
 
-impl ExtractGate for VisibilityField {
     fn should_extract(&self) -> bool {
         !self.is_all_full() // mixed OR all-empty; all-full needs no mask
     }
@@ -148,10 +148,4 @@ impl ExtractGate for VisibilityField {
 
 const fn words_for_lod(lod: LOD) -> usize {
     lod.volume().div_ceil(64)
-}
-
-impl FieldLOD for VisibilityField {
-    fn lod(&self) -> LOD {
-        self.lod
-    }
 }

@@ -23,7 +23,7 @@ use bevy::{
 
 use crate::{
     chunk::{Chunk, ChunkManager, ChunkPosition},
-    field::{ApronSample, ExtractGate, LOD, Versionable, VisibilityField},
+    field::{LOD, VisibilityField, VoxelField},
     field::{
         apron::{fill_apron, seam_lod_ranks},
         surface::HasSurface,
@@ -57,7 +57,7 @@ fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
 /// the render-world extract system that forwards its output.
 pub fn add_field_extraction<T>(app: &mut App)
 where
-    T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
+    T: VoxelField,
 {
     app.init_resource::<PaddedOutbox<T>>()
         .add_systems(Last, pad_dirty_chunks::<T>);
@@ -190,7 +190,7 @@ impl ExtractState {
     }
 }
 
-fn extract_key<T: Component + Versionable + ApronSample>(
+fn extract_key<T: VoxelField>(
     field: &T,
     pos: IVec3,
     lod: LOD,
@@ -233,7 +233,7 @@ fn padded_bytes<T>(
     query: &FieldQuery<T>,
 ) -> Vec<u8>
 where
-    T: Component + ApronSample + ExtractGate,
+    T: VoxelField,
 {
     if !field.should_extract() {
         return Vec::new();
@@ -270,7 +270,7 @@ pub fn pad_dirty_chunks<T>(
     frame: Res<FrameCount>,
     mut outbox: ResMut<PaddedOutbox<T>>,
 ) where
-    T: Send + Sync + 'static + Component + Versionable + ApronSample + ExtractGate,
+    T: VoxelField,
 {
     outbox.chunks.clear();
     state.collect(&mut changes);
@@ -346,12 +346,12 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub _type: PhantomData<T>,
 }
 
-/// A chunk that lost its `VisibilityField`: sends an empty mask, which
-/// clears the slot's mask flag.
-pub fn extract_visibility_removed(
+/// A chunk that lost an optional field `T` (it's still loaded, the field is
+/// gone): sends an empty volume, which for the mask clears the slot's flag.
+pub fn extract_removed<T: VoxelField>(
     mut commands: Commands,
-    mut removed: Extract<RemovedComponents<VisibilityField>>,
-    chunks: Extract<Query<(&ChunkPosition, &LOD, Has<VisibilityField>)>>,
+    mut removed: Extract<RemovedComponents<T>>,
+    chunks: Extract<Query<(&ChunkPosition, &LOD, Has<T>)>>,
     frame: Extract<Res<FrameCount>>,
 ) {
     for entity in removed.read() {
@@ -361,7 +361,7 @@ pub fn extract_visibility_removed(
         if still_has {
             continue;
         }
-        commands.spawn(ExtractedChunkField::<VisibilityField> {
+        commands.spawn(ExtractedChunkField::<T> {
             main_entity: entity.into(),
             chunk_pos: pos.0,
             padded_data: Arc::from([]),
@@ -401,7 +401,7 @@ fn audit_extraction<T>(
     query: &FieldQuery<T>,
     filter: &ExtractFilter,
 ) where
-    T: Component + Versionable + ApronSample,
+    T: VoxelField,
 {
     let mut missed = Vec::new();
     for (entity, pos, field, lod) in query.iter() {

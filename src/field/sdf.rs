@@ -4,7 +4,7 @@
 //! Values are in voxels of the chunk's own LOD, negative inside, clamped to
 //! `±SDF_BAND`. The GPU copy is snorm16 (`quantize_sdf`).
 
-use crate::field::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice};
+use crate::field::{GpuChannel, VoxelField};
 use crate::num::{f32_from_i32, f32_from_u32, i16_from_f32};
 
 use super::{Field, LOD};
@@ -61,7 +61,7 @@ pub struct SDF {
     inside_count: usize, // voxels with value <= 0.0, same test as pass1
     pub version: u64,
     /// Per `NEIGHBORS_MASK` entry: bumped only when the low slab that
-    /// neighbour's apron reads changes. See `Versionable::border_version`.
+    /// neighbour's apron reads changes. See `VoxelField::border_version`.
     border_versions: [u64; 7],
 }
 
@@ -266,7 +266,33 @@ impl Field<f32> for SDF {
     }
 }
 
-impl Versionable for SDF {
+impl VoxelField for SDF {
+    type Value = f32;
+    type Elem = f32;
+    const GPU: GpuChannel = GpuChannel::Shape;
+    const CLEAR_DIRTY_EACH_CYCLE: bool = false;
+
+    fn new_for_lod(lod: LOD) -> Self {
+        Self::new(lod)
+    }
+
+    fn from_raw(lod: LOD, mut data: Vec<f32>) -> Self {
+        debug_assert_eq!(data.len(), lod.volume());
+        for v in &mut data {
+            *v = v.clamp(-SDF_BAND, SDF_BAND);
+        }
+        Self::with_data(lod, data.into_boxed_slice())
+    }
+
+    fn lod(&self) -> LOD {
+        self.lod
+    }
+
+    #[inline]
+    fn data_slice(&self) -> &[f32] {
+        &self.data
+    }
+
     #[inline]
     fn version(&self) -> u64 {
         self.version
@@ -277,14 +303,6 @@ impl Versionable for SDF {
             .get(neighbor)
             .copied()
             .unwrap_or(self.version)
-    }
-}
-
-impl VoxelDataSlice for SDF {
-    type Elem = f32;
-    #[inline]
-    fn data_slice(&self) -> &[f32] {
-        &self.data
     }
 
     fn gpu_bytes(vol: &[f32]) -> Vec<u8> {
@@ -297,6 +315,10 @@ impl VoxelDataSlice for SDF {
     #[inline]
     fn rescale(v: f32, ratio: f32) -> f32 {
         v / ratio
+    }
+
+    fn sample_apron(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
+        sample_neighbor(data, size, x, y, z)
     }
 }
 
@@ -312,30 +334,6 @@ pub fn quantize_sdf(v: f32) -> i16 {
     let q = (v / SDF_BAND).clamp(-1.0, 1.0) * f32::from(i16::MAX);
     let q = i16_from_f32(q.round());
     if v > 0.0 { q.max(1) } else { q }
-}
-
-impl FieldFromRaw for SDF {
-    fn from_raw(lod: LOD, mut data: Vec<f32>) -> Self {
-        debug_assert_eq!(data.len(), lod.volume());
-        for v in &mut data {
-            *v = v.clamp(-SDF_BAND, SDF_BAND);
-        }
-        Self::with_data(lod, data.into_boxed_slice())
-    }
-}
-
-impl ApronSample for SDF {
-    fn sample_apron(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
-        sample_neighbor(data, size, x, y, z)
-    }
-}
-
-impl ExtractGate for SDF {}
-
-impl FieldLOD for SDF {
-    fn lod(&self) -> LOD {
-        self.lod
-    }
 }
 
 type Coord = (u32, u32, u32);
@@ -593,7 +591,7 @@ mod band_tests {
     use super::{SDF, SDF_BAND};
     use crate::{
         field::Field,
-        field::{FieldFromRaw, LOD},
+        field::{LOD, VoxelField},
     };
 
     #[test]
@@ -624,7 +622,6 @@ mod band_tests {
 
     #[test]
     fn border_versions_only_bump_for_touched_faces() {
-        use crate::field::Versionable;
         let n = LOD::Lowest.volume();
         let mut sdf = SDF::from_raw(LOD::Lowest, vec![1.0; n]);
         sdf.set(3, 3, 3, -1.0); // interior of a 4^3 grid: no neighbour reads it

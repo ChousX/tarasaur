@@ -14,8 +14,10 @@ hardware such as a Steam Deck.
 - **Streaming LOD.** `ChunkLoader` bands (64³ / 32³ / 16³ / 4³ voxels per
   chunk) follow the camera, with hysteresis. Seams between LODs are
   stitched.
-- **Generic voxel fields.** One set of traits covers editing, versioning,
-  uploading and saving. Built-in fields:
+- **Generic voxel fields.** A field implements `VoxelField` (how to build,
+  version, save and upload it) and `Field<T>` (how to edit it), and
+  `app.add_voxel_field::<F>()` wires it into editing, saving and its GPU
+  channel (shape, material, mask, or CPU-only). Built-in fields:
   - `SDF`: narrow-band signed distances that define the shape
   - `VisibilityField`: an optional per-voxel mask, discarded per pixel
   - `MaterialField<M>`: per-voxel ids from your own material enum

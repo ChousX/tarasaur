@@ -13,15 +13,14 @@ use std::{
 };
 
 use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
+use crate::field::VoxelField;
 use crate::field::generator::ChunkGeneratorRegistry;
 use crate::field::loading::ChunkDataTask;
-use crate::field::{FieldFromRaw, FieldNew, Versionable, VoxelDataSlice};
 use crate::field::{LOD, MaxEditLod};
 use crate::grid::flatten_cube;
 use crate::num::{f32_from_u32, usize_from};
 use crate::{chunk::ReplanRequested, field::SDF};
 use crate::{field::DirtyField, field::systems::SdfReinitTask};
-use bevy::ecs::component::Mutable;
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::tasks::AsyncComputeTaskPool;
@@ -186,7 +185,7 @@ pub(crate) struct ChunkPersistenceRegistry {
 /// Power-of-two LOD sizes and voxel i sitting at i*`CHUNK_SIZE/size` make
 /// this an exact stride sample; no interpolation, no JFA.
 #[must_use]
-pub(crate) fn downsample_bytes<F: VoxelDataSlice>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
+pub(crate) fn downsample_bytes<F: VoxelField>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
     let src: Vec<F::Elem> = bytemuck::pod_collect_to_vec(bytes);
     let (fs, ts) = (from.size(), to.size());
     // Bad input: install falls back to a default field.
@@ -217,7 +216,7 @@ pub(crate) fn downsample_bytes<F: VoxelDataSlice>(bytes: &[u8], from: LOD, to: L
 impl ChunkPersistenceRegistry {
     pub fn register_field<F>(&mut self)
     where
-        F: Component<Mutability = Mutable> + VoxelDataSlice + FieldFromRaw + FieldNew + Versionable,
+        F: VoxelField,
     {
         self.fields.push(FieldVTable {
             type_id: std::any::type_name::<F>(),
@@ -225,7 +224,7 @@ impl ChunkPersistenceRegistry {
                 w.get::<F>(e)
                     .map(|f| bytemuck::cast_slice(f.data_slice()).to_vec())
             },
-            version: |w, e| w.get::<F>(e).map_or(0, |f| Versionable::version(f)),
+            version: |w, e| w.get::<F>(e).map_or(0, VoxelField::version),
             downsample: |b, from, to| downsample_bytes::<F>(b, from, to),
             prepare: |lod, bytes| {
                 if let Some(b) = bytes {
@@ -250,23 +249,12 @@ impl ChunkPersistenceRegistry {
     }
 }
 
-pub trait RegisterSaveableFieldExt {
-    fn register_saveable_field<F>(&mut self) -> &mut Self
-    where
-        F: Component<Mutability = Mutable> + VoxelDataSlice + FieldFromRaw + FieldNew + Versionable;
-}
-
-impl RegisterSaveableFieldExt for App {
-    fn register_saveable_field<F>(&mut self) -> &mut Self
-    where
-        F: Component<Mutability = Mutable> + VoxelDataSlice + FieldFromRaw + FieldNew + Versionable,
-    {
-        self.init_resource::<ChunkPersistenceRegistry>();
-        self.world_mut()
-            .resource_mut::<ChunkPersistenceRegistry>()
-            .register_field::<F>();
-        self
-    }
+/// Saves and loads `F` with every chunk (see `AppVoxelFieldExt`).
+pub(crate) fn register_saveable<F: VoxelField>(app: &mut App) {
+    app.init_resource::<ChunkPersistenceRegistry>();
+    app.world_mut()
+        .resource_mut::<ChunkPersistenceRegistry>()
+        .register_field::<F>();
 }
 
 // ---------------------------------------------------------------- saving ----
