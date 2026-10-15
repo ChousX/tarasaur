@@ -10,6 +10,7 @@ use crate::{
     field::{DirtyField, SDF, VisibilityField},
 };
 use bevy::{
+    platform::collections::HashSet,
     prelude::*,
     tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
 };
@@ -213,11 +214,12 @@ pub(crate) fn start_chunk_loads(
 
 pub(crate) fn resolve_chunk_data_tasks(
     mut commands: Commands,
-    mut tasks: Query<(Entity, &mut ChunkDataTask, &TargetLOD)>,
+    mut tasks: Query<(Entity, &mut ChunkDataTask, &TargetLOD, &ChunkPosition)>,
     registry: Res<ChunkPersistenceRegistry>,
+    mut warned: Local<HashSet<&'static str>>,
 ) {
     let mut done = Vec::new();
-    for (entity, mut t, target) in &mut tasks {
+    for (entity, mut t, target, pos) in &mut tasks {
         let Some(payloads) = block_on(poll_once(&mut t.task)) else {
             continue;
         };
@@ -226,6 +228,7 @@ pub(crate) fn resolve_chunk_data_tasks(
             commands.entity(entity).remove::<ChunkDataTask>();
             continue;
         }
+        warn_missing_data(&registry, &payloads, pos.0, t.lod, &mut warned);
         done.push((entity, t.lod, payloads));
     }
     if done.is_empty() {
@@ -252,6 +255,30 @@ pub(crate) fn resolve_chunk_data_tasks(
             continue;
         };
         commands.queue(move |world: &mut World| install_chunk(world, entity, lod, fields));
+    }
+}
+
+/// Warns (once per field type) when a load had neither a save nor a
+/// generator for a required field: it gets an empty default, so whatever
+/// the chunk held at its old LOD is gone. Typical cause: chunks filled by
+/// hand, then upgraded by an edit.
+fn warn_missing_data(
+    registry: &ChunkPersistenceRegistry,
+    payloads: &[FieldSavePayload],
+    pos: IVec3,
+    lod: LOD,
+    warned: &mut HashSet<&'static str>,
+) {
+    for field in registry.fields.iter().filter(|f| !f.optional) {
+        let has_data = payloads.iter().any(|p| p.field_type_id == field.type_id);
+        if !has_data && warned.insert(field.type_id) {
+            warn!(
+                "chunk {pos} loaded at {lod:?} with no save or generator data for {}: it gets \
+                 an empty default, and anything it held at its previous LOD is lost. Register a \
+                 generator in ChunkGeneratorRegistry for it. (Logged once per field type.)",
+                field.type_id
+            );
+        }
     }
 }
 

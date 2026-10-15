@@ -152,6 +152,8 @@ pub(crate) struct ChunkSaveState(pub u64);
 #[derive(Clone, Copy)]
 pub(crate) struct FieldVTable {
     pub type_id: &'static str,
+    /// `VoxelField::OPTIONAL`: removed, not defaulted, when a load has no data.
+    pub optional: bool,
     pub save: fn(&World, Entity) -> Option<Vec<u8>>,
     pub version: fn(&World, Entity) -> u64,
     /// Exact downsample of a serialized payload (`from >= to`).
@@ -234,6 +236,7 @@ impl ChunkPersistenceRegistry {
     {
         self.fields.push(FieldVTable {
             type_id: std::any::type_name::<F>(),
+            optional: F::OPTIONAL,
             save: |w, e| {
                 w.get::<F>(e)
                     .map(|f| bytemuck::cast_slice(f.data_slice()).to_vec())
