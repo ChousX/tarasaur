@@ -31,10 +31,11 @@ struct ChunkMeta {
     seam_ranks: vec2<u32>, // see seam_lod_ranks in field/apron.rs
 }
 
-// log2 of a LOD's voxels per chunk edge, by rank: 4, 16, 32, 64.
+// log2 of a LOD's voxels per chunk edge, by rank: 4, 16, 32, 64. No
+// lookup table: indexing a local array per texel read was slow.
 fn rank_log2_size(rank: u32) -> i32 {
-    let log2_sizes = array<i32, 4>(2, 4, 5, 6);
-    return log2_sizes[rank & 3u];
+    let r = i32(rank & 3u);
+    return select(r + 3, 2, r == 0);
 }
 
 // LOD rank of the chunk at `offset` (-1..1 per axis; 0 = this chunk).
@@ -46,6 +47,9 @@ fn seam_rank(seam_ranks: vec2<u32>, offset: vec3<i32>) -> u32 {
 // log2(own size / source size) for the values at texel `t` of an
 // `n`-voxel chunk: apron texels hold their source neighbour's voxel units.
 fn apron_unit_shift(seam_ranks: vec2<u32>, n: u32, t: vec3<u32>) -> i32 {
+    if (all(t < vec3<u32>(n))) {
+        return 0; // our own voxels: by far the most reads
+    }
     let source = seam_rank(seam_ranks, vec3<i32>(t >= vec3<u32>(n)));
     return rank_log2_size(seam_rank(seam_ranks, vec3<i32>(0))) - rank_log2_size(source);
 }

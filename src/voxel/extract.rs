@@ -23,7 +23,7 @@ use bevy::{
 
 use crate::{
     chunk::{Chunk, ChunkManager, ChunkPosition},
-    field::{LOD, VisibilityField, VoxelField},
+    field::{GpuChannel, LOD, VisibilityField, VoxelField},
     field::{
         apron::{fill_apron, seam_lod_ranks},
         surface::HasSurface,
@@ -135,6 +135,9 @@ pub struct PaddedChunk {
     pub lod: LOD,
     /// See `seam_lod_ranks`.
     pub seam_ranks: [u32; 2],
+    /// Only `seam_ranks` changed: `bytes` is empty and the slot keeps its
+    /// data (see `pad_dirty_chunks`).
+    pub meta_only: bool,
     /// Shared with the render world rather than copied.
     pub bytes: Arc<[u8]>,
     /// Main-world frame it was built in.
@@ -300,6 +303,7 @@ pub fn pad_dirty_chunks<T>(
     // Which chunks need a new volume: cheap, sequential.
     let ExtractState { last, dirty, .. } = &mut *state;
     let mut jobs = Vec::new();
+    let mut meta_only = Vec::new();
     for pos in dirty.iter() {
         let Some(entity) = chunk_manager.get_chunk(pos) else {
             continue;
@@ -320,12 +324,24 @@ pub fn pad_dirty_chunks<T>(
         // the same spot comes back at version 0 with unchanged neighbours, so a
         // position key matched and the new entity never got an arena slot.
         let key = extract_key(field, *pos, *lod, &chunk_manager, &query);
-        if last.get(&entity) == Some(&key) {
+        let Some(old) = last.insert(entity, key) else {
+            jobs.push((entity, *pos, field, *lod, key.2));
+            continue;
+        };
+        if old == key {
             continue;
         }
-        let seam_ranks = key.2;
-        last.insert(entity, key);
-        jobs.push((entity, *pos, field, *lod, seam_ranks));
+        // Same LOD and versions: the padded volume would come out the same
+        // (it depends on the neighbours' LODs only through the versions, which
+        // fold them in). Only the seam ranks moved, as they do for every chunk
+        // around one that changed LOD, and only the mesher reads those.
+        if (old.0, old.1) == (key.0, key.1) {
+            if T::GPU == GpuChannel::Shape {
+                meta_only.push((entity, *pos, *lod, key.2));
+            }
+            continue;
+        }
+        jobs.push((entity, *pos, field, *lod, key.2));
     }
 
     // Building the volumes: the expensive part, one task per chunk.
@@ -342,10 +358,24 @@ pub fn pad_dirty_chunks<T>(
             pos,
             lod,
             seam_ranks,
+            meta_only: false,
             bytes: bytes.into(),
             seq: frame.0,
         },
     ));
+    outbox.chunks.extend(
+        meta_only
+            .into_iter()
+            .map(|(entity, pos, lod, seam_ranks)| PaddedChunk {
+                entity,
+                pos,
+                lod,
+                seam_ranks,
+                meta_only: true,
+                bytes: Arc::from([]),
+                seq: frame.0,
+            }),
+    );
 }
 
 /// A chunk's padded volume of field `T` in the render world, waiting to be
@@ -359,6 +389,8 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub lod: LOD,
     /// See [`seam_lod_ranks`]; only the SDF upload uses it.
     pub seam_ranks: [u32; 2],
+    /// See [`PaddedChunk::meta_only`].
+    pub meta_only: bool,
     /// Main-world frame it was extracted in. An upload can wait several
     /// frames; when a newer one for the same chunk arrives, the newest wins.
     pub seq: u32,
@@ -387,6 +419,7 @@ pub fn extract_removed<T: VoxelField>(
             size: lod.size().wrapping_add(PADDING),
             lod: *lod,
             seam_ranks: [0; 2],
+            meta_only: false,
             seq: frame.0,
             _type: PhantomData,
         });
@@ -406,6 +439,7 @@ where
             size: c.lod.size().wrapping_add(PADDING),
             lod: c.lod,
             seam_ranks: c.seam_ranks,
+            meta_only: c.meta_only,
             seq: c.seq,
             _type: PhantomData,
         });

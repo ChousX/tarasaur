@@ -71,14 +71,32 @@ var<private> seam_ranks: vec2<u32>;
 var<private> own_log2: i32;
 // Per axis, log2 of this chunk's voxels per apron step.
 var<private> face_shift: vec3<i32>;
+// Cells with every coordinate in [seam_reach, n) can't be shared across a
+// seam (see seam_cell); 0 when all 27 chunks around share one LOD.
+var<private> seam_reach: u32;
 
 fn init_seams(ranks: vec2<u32>) {
     seam_ranks = ranks;
-    own_log2 = seam_log2(vec3<i32>(0));
+    let own = seam_rank(ranks, vec3<i32>(0));
+    own_log2 = rank_log2_size(own);
     let axes = array<vec3<i32>, 3>(vec3<i32>(1, 0, 0), vec3<i32>(0, 1, 0), vec3<i32>(0, 0, 1));
     for (var a = 0u; a < 3u; a++) {
         face_shift[a] = max(own_log2 - seam_log2(axes[a]), 0);
     }
+    // All 27 the same rank: 2 bits per entry, 16 in the first word, 11 in
+    // the second.
+    if (all(ranks == own * vec2<u32>(0x55555555u, 0x155555u))) {
+        seam_reach = 0u;
+        return;
+    }
+    // A shared cell starts at 0 on some axis and spans one lattice step of
+    // the coarsest chunk around, at most.
+    var coarsest = own_log2;
+    for (var i = 0u; i < 27u; i++) {
+        let r = (ranks[i / 16u] >> (2u * (i % 16u))) & 3u;
+        coarsest = min(coarsest, rank_log2_size(r));
+    }
+    seam_reach = 1u << u32(own_log2 - coarsest);
 }
 
 // log2 of the voxels per edge of the chunk at `offset` (-1..1 per axis).
@@ -320,6 +338,24 @@ fn seam_shift(o: vec3<i32>, o_log2: i32, zero: vec3<bool>) -> i32 {
     return s;
 }
 
+// The coarsest below-neighbour, as log2(O size / its size), whose first
+// lattice cell holds the O voxel `id_o`; 0 if none is coarser.
+fn seam_depth_shift(o: vec3<i32>, o_log2: i32, id_o: vec3<u32>) -> i32 {
+    var s = 0;
+    for (var i = 1u; i < 8u; i++) {
+        let d = below_offset(i);
+        let sd = o_log2 - seam_log2(o + d);
+        if (sd <= 0) {
+            continue;
+        }
+        let inside = id_o < vec3<u32>(1u << u32(sd));
+        if (all(inside | (d == vec3<i32>(0)))) {
+            s = max(s, sd);
+        }
+    }
+    return s;
+}
+
 // Axes the shared cell (lattice 2^s, starting at 0 on `zero`) is flattened
 // on: onto its low face along b when a touching below-neighbour across b
 // can't see one lattice step past that face. Its apron along b steps by
@@ -359,6 +395,9 @@ struct SeamCell {
 fn seam_cell(sdf_base: u32, id: vec3<u32>) -> SeamCell {
     var out = SeamCell(id, vec3<u32>(1u), vec4<f32>(0.0));
     let n = uniforms.cell_count - 1u;
+    if (all((id >= vec3<u32>(seam_reach)) & (id < vec3<u32>(n)))) {
+        return out;
+    }
     let o = vec3<i32>(id >= vec3<u32>(n));
     let o_log2 = seam_log2(o);
     // > 0: O is coarser than this chunk.
@@ -369,8 +408,13 @@ fn seam_cell(sdf_base: u32, id: vec3<u32>) -> SeamCell {
     var id_o = (id >> vec3<u32>(up_u)) << vec3<u32>(down_u);
     id_o = select(id_o, vec3<u32>(0u), o == vec3<i32>(1));
 
-    // The lattice: grows until the cell it starts touches no coarser chunk.
-    var s = seam_shift(o, o_log2, id_o == vec3<u32>(0u));
+    // The lattice: the coarsest below-neighbour whose first lattice cell
+    // holds this one, grown until the cell touches no coarser chunk. Every
+    // cell inside that first lattice cell snaps, not just the row against
+    // the neighbour: a coarse vertex can sit up to a whole coarse cell deep,
+    // past the next row's fine vertices, and the strip between them folded
+    // back over itself and z-fought.
+    var s = seam_depth_shift(o, o_log2, id_o);
     var lo = (id_o >> vec3<u32>(u32(s))) << vec3<u32>(u32(s));
     for (var k = 0u; k < 3u; k++) {
         let s2 = seam_shift(o, o_log2, lo == vec3<u32>(0u));
@@ -389,35 +433,66 @@ fn seam_cell(sdf_base: u32, id: vec3<u32>) -> SeamCell {
     // and one of our apron steps past it, which must be the lattice step
     // unless flattened.
     var lo_t = vec3<u32>(0u);
-    var full = vec3<u32>(0u);
-    var full_fits = true;
+    var step = vec3<u32>(0u);
     let r = 1u << u32(s);
     for (var a = 0u; a < 3u; a++) {
         if (o[a] == 1) {
             lo_t[a] = n;
-            full[a] = 1u;
-            if (face_shift[a] - own_log2 != s - o_log2) {
-                if (!collapse[a]) {
-                    return out;
-                }
-                full_fits = false;
+            step[a] = 1u;
+            if (face_shift[a] - own_log2 != s - o_log2 && !collapse[a]) {
+                return out;
             }
         } else {
             lo_t[a] = (lo[a] << up_u) >> down_u;
-            full[a] = (r << up_u) >> down_u;
+            step[a] = (r << up_u) >> down_u;
         }
     }
-    let step = select(full, vec3<u32>(0u), collapse);
-    out.vert = cell_surface_vertex(sdf_base, lo_t, step);
+    step = select(step, vec3<u32>(0u), collapse);
     out.lo = lo_t;
     out.step = step;
-    // Flattened onto a face the surface doesn't cross: the whole cell, if
-    // we can see it.
-    if (out.vert.w == 0.0 && any(collapse) && full_fits) {
-        out.vert = cell_surface_vertex(sdf_base, lo_t, full);
-        out.step = full;
+    out.vert = cell_surface_vertex(sdf_base, lo_t, step);
+    // The surface misses the shared cell (a feature finer than it, or
+    // flattened away): every chunk sharing it still needs one vertex, so
+    // not our own cell's but a point near the surface from its corners.
+    if (out.vert.w == 0.0) {
+        out.vert = vec4<f32>(relaxed_vertex(sdf_base, lo_t, step), 1.0);
     }
     return out;
+}
+
+// One Newton step from the centre of the cell whose corner i is texel
+// `lo + corners[i] * step` toward the surface, along the cell's trilinear
+// gradient there, clamped to the cell. Flat (step 0) axes stay put.
+fn relaxed_vertex(sdf_base: u32, lo: vec3<u32>, step: vec3<u32>) -> vec3<f32> {
+    var p_lo = vec3<f32>(0.0);
+    var p_hi = vec3<f32>(0.0);
+    var f_lo = vec3<f32>(0.0);
+    var f_hi = vec3<f32>(0.0);
+    var f_sum = 0.0;
+    for (var i = 0u; i < 8u; i++) {
+        let c = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
+        let t = lo + c * step;
+        let f = sdf_at(sdf_base, t);
+        let p = texel_pos(t);
+        let hi = c == vec3<u32>(1u);
+        p_hi += select(vec3<f32>(0.0), p, hi);
+        p_lo += select(p, vec3<f32>(0.0), hi);
+        f_hi += select(vec3<f32>(0.0), vec3<f32>(f), hi);
+        f_lo += select(vec3<f32>(f), vec3<f32>(0.0), hi);
+        f_sum += f;
+    }
+    // Four corners on each side per axis.
+    let lo_face = p_lo * 0.25;
+    let hi_face = p_hi * 0.25;
+    let span = hi_face - lo_face;
+    let grad = select(vec3<f32>(0.0), (f_hi - f_lo) * 0.25 / span, span > vec3<f32>(0.0));
+    let centre = (lo_face + hi_face) * 0.5;
+    let g2 = dot(grad, grad);
+    var p = centre;
+    if (g2 > 1e-12) {
+        p = centre - grad * (f_sum * 0.125 / g2);
+    }
+    return clamp(p, lo_face, hi_face);
 }
 
 // An `axis` edge at id[axis] == n runs from the +axis neighbour's first

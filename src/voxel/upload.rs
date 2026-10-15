@@ -51,41 +51,103 @@ impl Default for RemeshBudget {
     }
 }
 
+/// One chunk's upload to make this frame.
+struct Pending {
+    /// Main-world frame of the oldest extraction it replaces.
+    since: u32,
+    /// The newest extraction with data (or, if none is pending, the newest).
+    entity: Entity,
+    /// The newest seam ranks, which a newer metadata-only extraction may
+    /// have updated (see `PaddedChunk::meta_only`).
+    seam_ranks: [u32; 2],
+    /// That newer metadata-only extraction, folded into `entity`: despawn it
+    /// along with `entity` once uploaded.
+    folded: Option<Entity>,
+}
+
+impl Pending {
+    /// Done with it: despawns it and anything folded into it.
+    fn despawn(&self, commands: &mut Commands) {
+        commands.entity(self.entity).despawn();
+        if let Some(folded) = self.folded {
+            commands.entity(folded).despawn();
+        }
+    }
+}
+
 /// Keeps the newest extraction per chunk, despawning older ones and any for
-/// chunks that are no longer live. Returns `(waiting_since, entity)`, oldest
-/// wait first. The newest data inherits the oldest wait, so a chunk that is
-/// re-extracted every frame (e.g. under a held brush) can't starve behind
-/// the budget. Anything not despawned stays in the render world and is
-/// retried next frame.
+/// chunks that are no longer live, oldest wait first. The newest data
+/// inherits the oldest wait, so a chunk that is re-extracted every frame
+/// (e.g. under a held brush) can't starve behind the budget. Anything not
+/// despawned stays in the render world and is retried next frame.
+///
+/// A metadata-only extraction newer than one with data doesn't replace it
+/// (the data is still current): it lends it its seam ranks.
 fn newest_pending<T: Send + Sync + 'static>(
     arena_set: &VoxelChunkArenaSet,
     extracted: &Query<(Entity, &ExtractedChunkField<T>)>,
     commands: &mut Commands,
-) -> Vec<(u32, Entity)> {
-    // main entity -> (oldest seq, newest seq, newest entity)
-    let mut newest: HashMap<MainEntity, (u32, u32, Entity)> = HashMap::new();
+) -> Vec<Pending> {
+    #[derive(Clone, Copy)]
+    struct Newest {
+        since: u32,
+        /// Newest with data, and newest metadata-only: (seq, entity).
+        data: Option<(u32, Entity)>,
+        meta: Option<(u32, Entity)>,
+    }
+    let mut newest: HashMap<MainEntity, Newest> = HashMap::new();
     for (e, x) in extracted.iter() {
         if !arena_set.live.contains(&x.main_entity) {
             commands.entity(e).despawn();
             continue;
         }
-        let Some(entry) = newest.get_mut(&x.main_entity) else {
-            newest.insert(x.main_entity, (x.seq, x.seq, e));
-            continue;
-        };
-        entry.0 = entry.0.min(x.seq);
-        if x.seq > entry.1 {
-            commands.entity(entry.2).despawn();
-            (entry.1, entry.2) = (x.seq, e);
+        let entry = newest.entry(x.main_entity).or_insert(Newest {
+            since: x.seq,
+            data: None,
+            meta: None,
+        });
+        entry.since = entry.since.min(x.seq);
+        let slot = if x.meta_only {
+            &mut entry.meta
         } else {
-            commands.entity(e).despawn();
+            &mut entry.data
+        };
+        match *slot {
+            Some((seq, _)) if seq >= x.seq => {
+                commands.entity(e).despawn();
+            }
+            old => {
+                if let Some((_, old_e)) = old {
+                    commands.entity(old_e).despawn();
+                }
+                *slot = Some((x.seq, e));
+            }
         }
     }
-    let mut pending: Vec<_> = newest
+    let mut pending: Vec<Pending> = newest
         .into_values()
-        .map(|(since, _, e)| (since, e))
+        .filter_map(|n| {
+            // Data newer than the metadata already carries newer ranks.
+            let (meta, folded) = match (n.data, n.meta) {
+                (Some((d, _)), Some((m, me))) if m <= d => {
+                    commands.entity(me).despawn();
+                    (None, None)
+                }
+                (Some(_), Some((_, me))) => (Some(me), Some(me)),
+                (_, meta) => (meta.map(|m| m.1), None),
+            };
+            let entity = n.data.map(|d| d.1).or(meta)?;
+            let ranks_from = meta.unwrap_or(entity);
+            let seam_ranks = extracted.get(ranks_from).map_or([0; 2], |(_, x)| x.seam_ranks);
+            Some(Pending {
+                since: n.since,
+                entity,
+                seam_ranks,
+                folded,
+            })
+        })
         .collect();
-    pending.sort_unstable_by_key(|p| p.0);
+    pending.sort_unstable_by_key(|p| p.since);
     pending
 }
 
@@ -173,10 +235,16 @@ pub fn prepare_shape_upload<F: VoxelField>(
     let mut cells_left = budget.cells_per_frame;
     let mut placed_new = false;
     let mut batch = Vec::new();
-    for (_, e) in pending {
-        let Ok((_, x)) = extracted_chunks.get(e) else {
+    for p in pending {
+        let Ok((_, x)) = extracted_chunks.get(p.entity) else {
             continue;
         };
+        if x.meta_only {
+            if restitch(&mut arena_set, &gpu.render_queue, x, p.seam_ranks) {
+                commands.entity(p.entity).despawn();
+            }
+            continue;
+        }
         if arena_set.find_slot(x.lod, x.main_entity).is_none() {
             let cells = x.size.saturating_sub(1).saturating_pow(3);
             if placed_new && cells > cells_left {
@@ -186,7 +254,7 @@ pub fn prepare_shape_upload<F: VoxelField>(
             placed_new = true;
             cells_left = cells_left.saturating_sub(cells);
         }
-        batch.push((e, x));
+        batch.push((p, x));
     }
 
     let mut counts: Vec<(usize, u32)> = ComputeTaskPool::get().scope(|s| {
@@ -197,14 +265,14 @@ pub fn prepare_shape_upload<F: VoxelField>(
     counts.sort_unstable_by_key(|c| c.0);
 
     let mut any_out_of_room = false;
-    for ((extracted_entity, x), (_, count)) in batch.into_iter().zip(counts) {
+    for ((p, x), (_, count)) in batch.into_iter().zip(counts) {
         let (lod, size) = (x.lod, x.size);
         if count == 0 {
             // No geometry: holding a slot (575 KB of SDF at High) would draw
             // nothing. Any old slot drew nothing for this data either.
             arena_set.release(x.main_entity);
             arena_set.empty.insert(x.main_entity);
-            commands.entity(extracted_entity).despawn();
+            p.despawn(&mut commands);
             continue;
         }
         arena_set.empty.remove(&x.main_entity);
@@ -255,8 +323,8 @@ pub fn prepare_shape_upload<F: VoxelField>(
             size, arena.texture_size,
             "mixed LOD in one arena — bucket by LOD"
         );
-        upload_chunk(&gpu.render_queue, arena, slot, x, count);
-        commands.entity(extracted_entity).despawn();
+        upload_chunk(&gpu.render_queue, arena, slot, x, p.seam_ranks, count);
+        p.despawn(&mut commands);
     }
     *out_of_room = any_out_of_room;
     if let Some(mut stats) = stats {
@@ -272,6 +340,7 @@ fn upload_chunk<F: Send + Sync + 'static>(
     arena: &mut VoxelChunkArena,
     slot: u32,
     x: &ExtractedChunkField<F>,
+    seam_ranks: [u32; 2],
     count: u32,
 ) {
     let Some(&(base, _)) = arena.slot_range.get(usize_from(slot)) else {
@@ -284,16 +353,7 @@ fn upload_chunk<F: Send + Sync + 'static>(
         .wrapping_mul(2);
     render_queue.write_buffer(&arena.sdf_buffer, sdf_offset_bytes, &x.padded_data);
 
-    let meta = ChunkMeta {
-        chunk_world_origin: (x.chunk_pos.as_vec3() * CHUNK_SIZE).into(),
-        seam_ranks: x.seam_ranks,
-        ..ChunkMeta::default()
-    };
-    render_queue.write_buffer(
-        &arena.chunk_meta_buffer,
-        slot64.wrapping_mul(u64_from_usize(std::mem::size_of::<ChunkMeta>())),
-        bytemuck::bytes_of(&meta),
-    );
+    write_chunk_meta(render_queue, arena, slot, x.chunk_pos, seam_ranks);
 
     let slot_word = slot64.wrapping_mul(4);
     render_queue.write_buffer(
@@ -322,6 +382,50 @@ fn upload_chunk<F: Send + Sync + 'static>(
     arena.mark_dirty(slot);
 }
 
+/// Applies a metadata-only extraction: the chunk's data is unchanged, its
+/// seam ranks aren't, so rewrite its slot's metadata and re-mesh it. No slot
+/// means it meshed to nothing, which the ranks can't change. `false`: out of
+/// re-mesh scratch this frame, retry next.
+fn restitch<F: Send + Sync + 'static>(
+    arena_set: &mut VoxelChunkArenaSet,
+    render_queue: &RenderQueue,
+    x: &ExtractedChunkField<F>,
+    seam_ranks: [u32; 2],
+) -> bool {
+    let Some(ArenaSlot { arena_idx, slot }) = arena_set.find_slot(x.lod, x.main_entity) else {
+        return true;
+    };
+    let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
+        return true;
+    };
+    if !arena.can_mark_dirty(slot) {
+        return false;
+    }
+    write_chunk_meta(render_queue, arena, slot, x.chunk_pos, seam_ranks);
+    arena.mark_dirty(slot);
+    true
+}
+
+/// Writes a slot's `ChunkMeta`.
+fn write_chunk_meta(
+    render_queue: &RenderQueue,
+    arena: &VoxelChunkArena,
+    slot: u32,
+    chunk_pos: IVec3,
+    seam_ranks: [u32; 2],
+) {
+    let meta = ChunkMeta {
+        chunk_world_origin: (chunk_pos.as_vec3() * CHUNK_SIZE).into(),
+        seam_ranks,
+        ..ChunkMeta::default()
+    };
+    render_queue.write_buffer(
+        &arena.chunk_meta_buffer,
+        u64::from(slot).wrapping_mul(u64_from_usize(std::mem::size_of::<ChunkMeta>())),
+        bytemuck::bytes_of(&meta),
+    );
+}
+
 /// One side-channel write into a chunk's slot. `extracted` is the upload it
 /// came from, despawned once written; `None` when refilled from the cache.
 struct SideUpload {
@@ -346,7 +450,8 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
     commands: &mut Commands,
 ) -> Vec<SideUpload> {
     let mut fresh = Vec::new();
-    for (_, e) in newest_pending(arena_set, extracted, commands) {
+    for p in newest_pending(arena_set, extracted, commands) {
+        let e = p.entity;
         let Ok((_, x)) = extracted.get(e) else {
             continue;
         };
