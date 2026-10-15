@@ -213,8 +213,9 @@ pub trait FieldBoxOps<T: Copy + Default>: Field<T> {
     where
         F: FnMut(T) -> T,
     {
-        let min_bound = (center - shape.half_size).as_ivec3();
-        let max_bound = (center + shape.half_size).as_ivec3();
+        // Only voxels inside the box: round the min corner up, the max down.
+        let min_bound = (center - shape.half_size).ceil().as_ivec3();
+        let max_bound = (center + shape.half_size).floor().as_ivec3();
 
         let size = self.size();
         let limit = size.as_ivec3().saturating_sub(IVec3::ONE);
@@ -363,5 +364,41 @@ impl SignedDistance for f32 {
     #[inline]
     fn distance(self) -> f32 {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cuboid, FieldBoxOps, Vec3};
+    use crate::{LOD, VisibilityField, field::Field};
+
+    fn hidden_count(field: &VisibilityField) -> usize {
+        let n = field.size().x;
+        (0..n)
+            .flat_map(|z| (0..n).flat_map(move |y| (0..n).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| !field.get(x, y, z))
+            .count()
+    }
+
+    #[test]
+    fn box_edits_only_voxels_inside_it() {
+        let mut field = VisibilityField::new(LOD::Lowest);
+        // Spans x, y, z in [1.6, 2.4]: only voxel (2, 2, 2) is inside.
+        let shape = Cuboid {
+            half_size: Vec3::splat(0.4),
+        };
+        field.fill_box(Vec3::splat(2.0), shape, false);
+        assert_eq!(hidden_count(&field), 1);
+        assert!(!field.get(2, 2, 2));
+
+        // Spans [2.1, 2.9]: holds no voxel at all.
+        let mut field = VisibilityField::new(LOD::Lowest);
+        field.fill_box(Vec3::splat(2.5), shape, false);
+        assert_eq!(hidden_count(&field), 0);
+
+        // Straddles the grid's low edge: [-0.9, -0.1] is outside the grid.
+        let mut field = VisibilityField::new(LOD::Lowest);
+        field.fill_box(Vec3::splat(-0.5), shape, false);
+        assert_eq!(hidden_count(&field), 0);
     }
 }
