@@ -41,6 +41,12 @@ hardware such as a Steam Deck.
 
 ## Quick start
 
+```toml
+[dependencies]
+bevy = "0.20"
+tarasaur = "0.1"
+```
+
 ```rust
 use bevy::prelude::*;
 use tarasaur::prelude::*;
@@ -201,9 +207,7 @@ cargo run --release --example sandbox
 |---|---|
 | `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-5 pick dig, build, smooth, flatten or paint, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening |
 | `lod_streaming` | The smallest streaming setup |
-| `terrain_test` | Seam check and a valley carved across a chunk border |
 | `edit_sphere` | Hand-spawned chunks and a resizable SDF sphere |
-| `cursor_collision_test` | GPU ray-query hits on a sphere |
 | `normal_check` | Headless comparison of normal-estimation methods |
 | `bench` | A repeatable benchmark (see below) |
 
@@ -272,3 +276,17 @@ RDC=bench_results/rdc_frameN.rdc RDC_OUT=summary.txt qrenderdoc --python tools/r
 On tiling GPUs (Adreno, Mali), RenderDoc times each draw by replaying it on
 its own. Use its timings for proportions, and the bench's per-pass times
 for totals.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.

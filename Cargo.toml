@@ -2,9 +2,43 @@
 name = "tarasaur"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
+description = "Smooth, editable, GPU-meshed voxel terrain for Bevy, with streaming LOD and persistence"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ChousX/tarasaur"
+readme = "README.md"
+keywords = ["bevy", "voxel", "terrain", "gamedev", "surface-nets"]
+categories = ["game-development", "rendering"]
+# Dev tooling, bench output and the unused source textures stay out of the
+# published crate (crates.io caps packages at 10 MB).
+exclude = [
+    "/assets",
+    "/bench_results",
+    "/saves",
+    "/tools",
+    "/nix",
+    "/flake.nix",
+    "/flake.lock",
+    "/clippy.toml",
+    "/.gitignore",
+]
 
 [dependencies]
-bevy = "0.20"
+# Only the parts the library uses; the app's own `bevy` dependency picks
+# the platform features (windowing, audio, UI, ...).
+bevy = { version = "0.20", default-features = false, features = [
+    "std",
+    "multi_threaded",
+    "async_executor",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_window",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+] }
 bytemuck = "1.25.2"
 crossbeam-channel = "0.5.16"
 postcard = { version = "1.1.3", features = ["alloc"] }
@@ -15,6 +49,8 @@ thiserror = "2.0.20"
 tracy-client = { version = "0.19", optional = true, features = ["ondemand"] }
 
 [dev-dependencies]
+# Examples open windows and take input, so they need Bevy's default features.
+bevy = "0.20"
 # The bench's `--renderdoc` frame capture.
 renderdoc = "0.12.1"
 
@@ -44,6 +80,9 @@ panic_in_result_fn = "deny"
 panic = "deny"
 exit = "deny"
 as_conversions = "deny"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # Profile with Tracy: `cargo run --release --features tracy --example bench`
