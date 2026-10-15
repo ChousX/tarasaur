@@ -244,9 +244,9 @@ cargo run --release --example bench -- --compare bench_results/A.summary.csv ben
 ```
 
 On a Steam Deck, run `tools/bench-deck.sh [label] [-- bench args]` from a
-checkout on the Deck. It works over ssh too (it draws on the Deck's
-screen), uses the nix dev shell if nix is installed, and labels results
-`deck-<label>` (default: the commit hash).
+checkout on the Deck. It builds in a distrobox (created on first run, with
+Rust and Bevy's deps), works over ssh too (it draws on the Deck's screen),
+and labels results `deck-<label>` (default: the commit hash).
 
 CPU profiling uses [Tracy](https://github.com/wolfpld/tracy). The dev shell
 pins Tracy 0.14.1, the protocol version Bevy 0.20's client speaks
