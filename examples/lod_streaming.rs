@@ -3,8 +3,6 @@
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
-use bevy::render::RenderPlugin;
-use bevy::render::settings::{RenderCreation, WgpuLimits, WgpuSettings};
 
 use tarasaur::loading::ChunkDataTask;
 use tarasaur::{Chunk, SDF};
@@ -18,18 +16,7 @@ use tarasaur::{
 fn main() {
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins.set(RenderPlugin {
-        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-            limits: WgpuLimits {
-                max_buffer_size: 1024 * 1024 * 1024,
-                max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                ..default()
-            },
-            ..default()
-        })),
-        ..default()
-    }))
-    .add_plugins(TarasaurPlugin);
+    app.add_plugins(DefaultPlugins).add_plugins(TarasaurPlugin);
 
     app.add_systems(Update, debug_stages);
     // Registered once, up front. Every chunk the ChunkLoader spawns or

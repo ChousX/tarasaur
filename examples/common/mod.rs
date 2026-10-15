@@ -10,7 +10,7 @@ use bevy::{
     render::{
         RenderPlugin,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
-        settings::{RenderCreation, WgpuFeatures, WgpuLimits, WgpuSettings},
+        settings::{RenderCreation, WgpuFeatures, WgpuSettings},
     },
 };
 use tarasaur::{
@@ -28,11 +28,6 @@ pub fn render_plugin() -> RenderPlugin {
     RenderPlugin {
         render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
             features: WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT,
-            limits: WgpuLimits {
-                max_buffer_size: 1024 * 1024 * 1024,
-                max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                ..default()
-            },
             ..default()
         })),
         ..default()

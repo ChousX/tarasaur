@@ -3,8 +3,7 @@
 //! follows the (2-3 frame late) hit under the cursor.
 
 use bevy::prelude::*;
-use bevy::render::settings::{RenderCreation, WgpuLimits, WgpuSettings};
-use bevy::render::{RenderApp, RenderPlugin};
+use bevy::render::RenderApp;
 use tarasaur::DirtyField;
 use tarasaur::{
     Field, LOD, SDF, TarasaurPlugin,
@@ -18,17 +17,7 @@ const SPHERE_RADIUS: f32 = 7.0;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                limits: WgpuLimits {
-                    max_buffer_size: 1024 * 1024 * 1024,
-                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                    ..default()
-                },
-                ..default()
-            })),
-            ..default()
-        }))
+        .add_plugins(DefaultPlugins)
         .add_plugins(TarasaurPlugin)
         .add_plugins(CursorCollisionSetupPlugin) // pins CollisionLOD to Medium
         // Test the GPU path only; the built-in brush would carve the test sphere.

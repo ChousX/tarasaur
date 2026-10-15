@@ -162,9 +162,10 @@ Every module starts with a `//!` summary. `cargo doc --open` shows them all.
 | `VoxelDepthPrepass` | `false` | Draw terrain depth before shading, so each pixel is shaded once. Slower on tile-based GPUs (+3.4 ms on Adreno); bench it on yours |
 
 The arenas size themselves from the device's
-`max_storage_buffer_binding_size`. The examples raise that limit (see
-`render_plugin()` in `examples/common/mod.rs`) to get fewer, larger
-arenas.
+`max_storage_buffer_binding_size` and `max_buffer_size`, capped by
+`ArenaConfig::max_buffer_bytes` (256 MiB by default; each arena takes about
+3x that). Bevy requests the adapter's own limits, so `WgpuSettings::limits`
+doesn't change them.
 
 ## Examples
 

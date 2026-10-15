@@ -5,11 +5,7 @@ use bevy::{
     asset::RenderAssetUsages,
     input::mouse::MouseMotion,
     prelude::*,
-    render::{
-        RenderPlugin,
-        render_resource::{Extent3d, TextureDimension, TextureFormat},
-        settings::{RenderCreation, WgpuLimits, WgpuSettings},
-    },
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use tarasaur::editor::WorldEditor;
 use tarasaur::num::{f32_from_i32, f32_from_u32, i16_from_f32, i32_from_f32, usize_from};
@@ -114,17 +110,7 @@ struct FlyCam {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                limits: WgpuLimits {
-                    max_buffer_size: 1024 * 1024 * 1024,
-                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                    ..default()
-                },
-                ..default()
-            })),
-            ..default()
-        }))
+        .add_plugins(DefaultPlugins)
         .add_plugins(TarasaurPlugin)
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new())
         .init_resource::<TerrainReady>()

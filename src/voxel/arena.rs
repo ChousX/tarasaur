@@ -53,17 +53,24 @@ const STORAGE_DST: BufferUsages = BufferUsages::STORAGE.union(BufferUsages::COPY
 const STORAGE_SRC: BufferUsages = BufferUsages::STORAGE.union(BufferUsages::COPY_SRC);
 
 /// Largest chunk count that keeps every per-slot buffer (the SDF dominates)
-/// under the device's actual `max_storage_buffer_binding_size`, with a 10%
-/// safety margin.
+/// under the device's `max_storage_buffer_binding_size` and `max_buffer_size`
+/// and under `max_buffer_bytes` (`ArenaConfig`), with a 10% safety margin.
+///
+/// Bevy requests the adapter's own limits, which on desktop GPUs can be
+/// several GiB per binding; without the cap one arena would try to allocate
+/// a few times that.
 fn max_chunks(
     render_device: &RenderDevice,
+    max_buffer_bytes: u64,
     total_cells: u32,
     sdf_elems_per_chunk: u32,
     budget_cells_per_chunk: u32,
 ) -> u32 {
-    let limit = render_device
-        .limits()
+    let limits = render_device.limits();
+    let limit = limits
         .max_storage_buffer_binding_size
+        .min(limits.max_buffer_size)
+        .min(max_buffer_bytes)
         .saturating_mul(9)
         / 10;
 
@@ -240,7 +247,12 @@ struct ArenaSizes {
 }
 
 impl ArenaSizes {
-    fn new(render_device: &RenderDevice, cell_count: u32, texture_size: u32) -> Self {
+    fn new(
+        render_device: &RenderDevice,
+        max_buffer_bytes: u64,
+        cell_count: u32,
+        texture_size: u32,
+    ) -> Self {
         let total_cells = cell_count.saturating_pow(3);
         let sdf_elems_per_chunk = texture_size.saturating_pow(3);
         // snorm16 packs 2 voxels per word: an even count keeps every slot word-aligned.
@@ -249,6 +261,7 @@ impl ArenaSizes {
             u32_from_f32((f32_from_u32(total_cells) * ACTIVE_FRACTION_ESTIMATE).ceil());
         let max_chunks = max_chunks(
             render_device,
+            max_buffer_bytes,
             total_cells,
             sdf_elems_per_chunk,
             budget_cells_per_chunk,
@@ -500,10 +513,11 @@ impl VoxelChunkArena {
     pub fn new(
         render_device: &RenderDevice,
         layouts: &super::pipeline::VoxelPipelineLayouts,
+        max_buffer_bytes: u64,
         cell_count: u32,
         texture_size: u32,
     ) -> Self {
-        let sizes = ArenaSizes::new(render_device, cell_count, texture_size);
+        let sizes = ArenaSizes::new(render_device, max_buffer_bytes, cell_count, texture_size);
         let buffers = ArenaBuffers::new(render_device, &sizes);
         let [pass1_bind_group, pass3_bind_group, raster_chunk_bind_group] =
             arena_bind_groups(render_device, layouts, &buffers);
@@ -681,18 +695,24 @@ impl VoxelChunkArena {
     }
 }
 
-/// Max arenas per LOD, indexed by `LOD::rank()` (Lowest, Low, Medium, High).
-/// Each arena is ~one device storage-binding-limit in size, so the real
-/// capacity is arenas * `max_chunks`. Give the LODs that hold many chunks more.
+/// How big the arenas get and how many each LOD may have.
 #[derive(Clone, Debug)]
 pub struct ArenaConfig {
+    /// Max arenas per LOD, indexed by `LOD::rank()` (Lowest, Low, Medium,
+    /// High). The real capacity is arenas * `max_chunks`. Give the LODs that
+    /// hold many chunks more.
     pub max_arenas: [usize; LOD::COUNT],
+    /// Largest single per-slot buffer an arena may allocate, on top of the
+    /// device's binding and buffer limits. An arena's buffers add up to about
+    /// 3x this, so it bounds the memory each arena takes.
+    pub max_buffer_bytes: u64,
 }
 
 impl Default for ArenaConfig {
     fn default() -> Self {
         Self {
             max_arenas: [1, 1, 2, 4],
+            max_buffer_bytes: 256 * 1024 * 1024,
         }
     }
 }

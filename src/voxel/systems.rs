@@ -238,13 +238,20 @@ pub fn prepare_voxel_arena(
         arena_set.empty.remove(&x.main_entity);
         let cell_count = size.saturating_sub(1);
         let before = arena_set.find_slot(lod, x.main_entity);
+        let max_buffer_bytes = arena_set.config.max_buffer_bytes;
         let Some(placed @ ArenaSlot { arena_idx, slot }) =
             arena_set.place(lod, x.main_entity, count, || {
                 info!(
                     "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
                     lod, cell_count, size
                 );
-                VoxelChunkArena::new(&gpu.render_device, &gpu.layouts, cell_count, size)
+                VoxelChunkArena::new(
+                    &gpu.render_device,
+                    &gpu.layouts,
+                    max_buffer_bytes,
+                    cell_count,
+                    size,
+                )
             })
         else {
             arena_set.deferred.insert(x.main_entity);

@@ -1,14 +1,7 @@
 //! A fixed, one-chunk-tall grid of generated terrain; checks the seam
 //! between chunks and carves a valley across it.
 
-use bevy::{
-    input::mouse::MouseMotion,
-    prelude::*,
-    render::{
-        RenderPlugin,
-        settings::{RenderCreation, WgpuLimits, WgpuSettings},
-    },
-};
+use bevy::{input::mouse::MouseMotion, prelude::*};
 use tarasaur::{
     Field, LOD, SDF, TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
@@ -35,17 +28,7 @@ struct FlyCam {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                limits: WgpuLimits {
-                    max_buffer_size: 1024 * 1024 * 1024,
-                    max_storage_buffer_binding_size: 512 * 1024 * 1024,
-                    ..default()
-                },
-                ..default()
-            })),
-            ..default()
-        }))
+        .add_plugins(DefaultPlugins)
         .add_plugins(TarasaurPlugin)
         .init_resource::<TerrainReady>()
         .add_systems(Startup, (spawn_camera_and_light, spawn_terrain_chunks))
