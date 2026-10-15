@@ -25,6 +25,10 @@
 //! - `visibility`: a hidden box across a chunk boundary, a sphere toggled
 //!   hidden and visible, and one chunk's mask removed. Checks every touched
 //!   chunk's mask on the GPU against the main world.
+//! - `dig`: the cursor brush's gradual dig, held at a slant and re-centered
+//!   on the surface every frame, like a player holding the mouse. Checks
+//!   the surface keeps a real distance field (no terraced, black crater)
+//!   and that the dig doesn't punch through.
 //!
 //! A failed check is printed, written to the summary as `check:<name>` = 0,
 //! and makes the bench exit with an error.
@@ -142,6 +146,17 @@ const VIS_SPHERE_RADIUS: f32 = 1.5;
 const VIS_REMOVE_AT: u32 = 120;
 /// When the masks are read back (well after the last edit has landed).
 const VIS_PROBE_AT: u32 = 260;
+const DIG_FRAMES: u32 = 540;
+/// The brush is held this long (8 s at 60 fps), then the edits settle. Deep
+/// enough (~24 units) to cross at least two chunk borders.
+const DIG_HELD: u32 = 480;
+/// The sandbox's 10-unit brush: ~64 High voxels, far wider than the SDF band.
+const DIG_RADIUS: f32 = 10.0;
+/// World units per frame: the cursor brush's default strength (3/s) at a
+/// fixed 60 fps, so every run digs the same.
+const DIG_STEP: f32 = 3.0 / 60.0;
+/// A surface voxel with a gradient under this has lost its distance field.
+const DIG_WEAK_GRADIENT: f32 = 0.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
@@ -154,6 +169,7 @@ enum Phase {
     Query,
     Reslot,
     Visibility,
+    Dig,
     Done,
 }
 
@@ -169,6 +185,7 @@ impl Phase {
             Self::Query => "query",
             Self::Reslot => "reslot",
             Self::Visibility => "visibility",
+            Self::Dig => "dig",
             Self::Done => "done",
         }
     }
@@ -183,7 +200,8 @@ impl Phase {
             Self::BoxEdit => Self::Query,
             Self::Query => Self::Reslot,
             Self::Reslot => Self::Visibility,
-            Self::Visibility | Self::Done => Self::Done,
+            Self::Visibility => Self::Dig,
+            Self::Dig | Self::Done => Self::Done,
         }
     }
 
@@ -199,6 +217,7 @@ impl Phase {
             Self::Query => Some(QUERY_FRAMES),
             Self::Reslot => Some(RESLOT_FRAMES),
             Self::Visibility => Some(VIS_FRAMES),
+            Self::Dig => Some(DIG_FRAMES),
             Self::Done => Some(0),
         }
     }
@@ -212,7 +231,7 @@ impl Phase {
     }
 }
 
-const PHASES: [Phase; 9] = [
+const PHASES: [Phase; 10] = [
     Phase::Load,
     Phase::Hold,
     Phase::Spin,
@@ -222,6 +241,7 @@ const PHASES: [Phase; 9] = [
     Phase::Query,
     Phase::Reslot,
     Phase::Visibility,
+    Phase::Dig,
 ];
 
 // ---------------------------------------------------------------------------
@@ -431,11 +451,13 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
                 drive_queries,
                 drive_reslots,
                 drive_visibility,
+                drive_dig,
                 watch_queries,
                 check_material_box,
                 check_queries,
                 check_reslots,
                 check_visibility,
+                check_dig,
             ),
         );
 }
@@ -487,6 +509,7 @@ fn drive_camera(bench: Res<Bench>, mut cams: Query<&mut Transform, With<BenchCam
             | Phase::Query
             | Phase::Reslot
             | Phase::Visibility
+            | Phase::Dig
             | Phase::Done => {
                 let pos = fly_end();
                 Transform::from_translation(pos).looking_at(edit_target(), Vec3::Y)
@@ -1356,6 +1379,138 @@ fn check_visibility(
         "visibility_removed",
         field_gone && gpu_cleared,
         format!("chunk {removed}: field removed {field_gone}, GPU mask cleared {gpu_cleared}"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// dig: the cursor brush's held dig
+// ---------------------------------------------------------------------------
+
+/// Where `dig` starts: untouched ground past the `edit` spot, clear of the
+/// other phases' chunks.
+fn dig_target() -> Vec3 {
+    surface(fly_end().x + 27.0, START.z)
+}
+
+/// The camera ray the brush follows, as the cursor's would.
+fn dig_ray() -> (Vec3, Vec3) {
+    let origin = fly_end();
+    (origin, (dig_target() - origin).normalize())
+}
+
+fn drive_dig(bench: Res<Bench>, terrain: TerrainRay, mut csg: MessageWriter<SdfCsgSphere>) {
+    if bench.phase != Phase::Dig || bench.frame_in_phase >= DIG_HELD {
+        return;
+    }
+    let (origin, dir) = dig_ray();
+    let Some(hit) = terrain.cast(origin, dir, QUERY_MAX_DISTANCE) else {
+        return;
+    };
+    csg.write(SdfCsgSphere {
+        center: hit.pos,
+        radius: DIG_RADIUS,
+        subtract: true,
+        max_step: Some(DIG_STEP),
+        paint: None,
+    });
+}
+
+/// Surface voxels (a sign change to a +x, +y or +z neighbour) whose
+/// central-difference gradient is under `DIG_WEAK_GRADIENT`, and all
+/// surface voxels. Chunk-border voxels are skipped.
+fn weak_surface_voxels(sdf: &SDF) -> (usize, usize) {
+    let inner = 1..sdf.size().x.saturating_sub(1);
+    let (mut weak, mut total) = (0usize, 0usize);
+    for z in inner.clone() {
+        for y in inner.clone() {
+            for x in inner.clone() {
+                let get = |dx: i32, dy: i32, dz: i32| {
+                    sdf.get(
+                        x.saturating_add_signed(dx),
+                        y.saturating_add_signed(dy),
+                        z.saturating_add_signed(dz),
+                    )
+                };
+                let v = get(0, 0, 0);
+                let next = [get(1, 0, 0), get(0, 1, 0), get(0, 0, 1)];
+                if next.iter().all(|&o| (o > 0.0) == (v > 0.0)) {
+                    continue;
+                }
+                let g = Vec3::new(
+                    get(1, 0, 0) - get(-1, 0, 0),
+                    get(0, 1, 0) - get(0, -1, 0),
+                    get(0, 0, 1) - get(0, 0, -1),
+                ) / 2.0;
+                total = total.saturating_add(1);
+                weak = weak.saturating_add(usize::from(g.length() < DIG_WEAK_GRADIENT));
+            }
+        }
+    }
+    (weak, total)
+}
+
+/// The dug surface is still a distance field: under 1% of the surface
+/// voxels around the dig have a weak gradient (a distance field's is 1;
+/// where it goes flat the crater terraces and its normals turn black). The
+/// ray still hits ground, about as deep as the brush moved it.
+fn check_dig(
+    mut bench: ResMut<Bench>,
+    terrain: TerrainRay,
+    chunks: Res<ChunkManager>,
+    sdfs: Query<&SDF>,
+) {
+    if !Phase::Dig.last_frame(&bench) {
+        return;
+    }
+    let (origin, dir) = dig_ray();
+    let Some(hit) = terrain.cast(origin, dir, QUERY_MAX_DISTANCE) else {
+        bench.checks.record(
+            Phase::Dig,
+            "dig_depth",
+            false,
+            "the ray no longer hits ground: the dig punched through".into(),
+        );
+        return;
+    };
+    // The surface moves `DIG_STEP` a frame under the brush's center (this
+    // dig lands at ~1.07x that along the slanted ray). Much further means a
+    // flat field flipped all at once; less, that the dig stalled at chunk
+    // borders, where it couldn't see its neighbours (~0.67x).
+    let dug = hit.pos.distance(dig_target());
+    let nominal = DIG_STEP * f32_from_u32(DIG_HELD);
+    let (min, max) = (nominal * 0.8, nominal * 1.25);
+    bench.checks.record(
+        Phase::Dig,
+        "dig_depth",
+        (min..=max).contains(&dug),
+        format!("dug {dug:.2} units along the ray ({min:.1} to {max:.1} expected)"),
+    );
+
+    // Every chunk the dig could have reached, from the start to the end of
+    // the ray it re-centered along.
+    let (mut weak, mut total, mut checked) = (0usize, 0usize, 0usize);
+    let mid = (dig_target() + hit.pos) * 0.5;
+    let half = Vec3::splat(DIG_RADIUS + 1.0) + (hit.pos - dig_target()).abs() * 0.5;
+    for pos in overlapping_chunks(mid, half) {
+        let Some(sdf) = chunks.get_chunk(&pos).and_then(|e| sdfs.get(e).ok()) else {
+            continue;
+        };
+        if sdf.lod != LOD::High {
+            continue;
+        }
+        let (w, t) = weak_surface_voxels(sdf);
+        weak = weak.saturating_add(w);
+        total = total.saturating_add(t);
+        checked = checked.saturating_add(1);
+    }
+    let pass = total > 0 && weak.saturating_mul(100) < total;
+    bench.checks.record(
+        Phase::Dig,
+        "dig_distance_field",
+        pass,
+        format!(
+            "{weak}/{total} surface voxels under gradient {DIG_WEAK_GRADIENT} in {checked} High chunks"
+        ),
     );
 }
 

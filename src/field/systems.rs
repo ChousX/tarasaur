@@ -6,6 +6,8 @@
 //! rebuild real distances with an async jump flood; CSG edits write exact
 //! distances and skip that.
 
+use std::collections::{HashMap, hash_map::Entry};
+
 use super::{
     EditableChunks, Field, SDF, VoxelField,
     editor::{EditFieldMessage, EditMode},
@@ -22,7 +24,7 @@ use crate::{
         },
         ops::{FieldSphereOps, ShapeEditOps},
     },
-    num::f32_from_u32,
+    num::{f32_from_u32, usize_from},
     voxel::resident::ForceResident,
 };
 use bevy::{
@@ -284,6 +286,83 @@ where
 
 const SDF_CSG_REACH_VOXELS: f32 = 4.0;
 
+/// A chunk's faces as (axis, positive): -x, +x, -y, +y, -z, +z.
+const FACES: [(usize, bool); 6] = [
+    (0, false),
+    (0, true),
+    (1, false),
+    (1, true),
+    (2, false),
+    (2, true),
+];
+
+/// A face's voxel at `layer` along `axis` and (a, b) along the other two
+/// axes, lower axis first.
+const fn face_voxel(axis: usize, layer: u32, a: u32, b: u32) -> UVec3 {
+    match axis {
+        0 => UVec3::new(layer, a, b),
+        1 => UVec3::new(a, layer, b),
+        _ => UVec3::new(a, b, layer),
+    }
+}
+
+/// The voxel layer just past each face of a chunk, copied from its face
+/// neighbours: what a gradient on the chunk's border reads (see
+/// `FieldSphereOps::csg_sphere`). Gathered for every chunk before any is
+/// edited, so they all step from the same state. A face whose neighbour
+/// isn't loaded at the same LOD is `None`.
+struct Halo {
+    size: u32,
+    /// In `FACES` order, each indexed (a, b) with a fastest.
+    faces: [Option<Vec<f32>>; 6],
+}
+
+impl Halo {
+    fn gather(pos: IVec3, chunks: &ChunkManager, editable: &EditableChunks<SDF>) -> Option<Self> {
+        let size = chunks
+            .get_chunk(&pos)
+            .and_then(|e| editable.get(e))?
+            .size()
+            .x;
+        let last = size.saturating_sub(1);
+        let faces = FACES.map(|(axis, positive)| {
+            let step = IVec3::AXES.get(axis).copied().unwrap_or(IVec3::X);
+            let neighbour = if positive {
+                pos.saturating_add(step)
+            } else {
+                pos.saturating_sub(step)
+            };
+            let sdf = chunks
+                .get_chunk(&neighbour)
+                .and_then(|e| editable.get(e))
+                .filter(|sdf| sdf.size().x == size)?;
+            // The neighbour's layer that touches this chunk.
+            let layer = if positive { 0 } else { last };
+            Some(
+                (0..size)
+                    .flat_map(|b| (0..size).map(move |a| face_voxel(axis, layer, a, b)))
+                    .map(|v| sdf.get(v.x, v.y, v.z))
+                    .collect(),
+            )
+        });
+        Some(Self { size, faces })
+    }
+
+    /// The value one voxel past this chunk's face from `v`, on it.
+    fn get(&self, v: UVec3, axis: usize, positive: bool) -> Option<f32> {
+        let face = FACES.iter().position(|&f| f == (axis, positive))?;
+        let (a, b) = match axis {
+            0 => (v.y, v.z),
+            1 => (v.x, v.z),
+            _ => (v.x, v.y),
+        };
+        let i = usize_from(b)
+            .checked_mul(usize_from(self.size))?
+            .checked_add(usize_from(a))?;
+        self.faces.get(face)?.as_ref()?.get(i).copied()
+    }
+}
+
 pub fn process_sdf_csg_spheres(
     mut events: MessageReader<SdfCsgSphere>,
     mut editable: EditableChunks<SDF>,
@@ -294,10 +373,35 @@ pub fn process_sdf_csg_spheres(
     mut paint: MessageWriter<MaterialPaintVoxels>,
 ) {
     let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
-    let new = events.read().map(|&op| {
-        resident.touch_sphere(op.center, op.radius + reach_world);
-        (op.center, Vec3::splat(op.radius + reach_world), op)
-    });
+    let new: Vec<_> = events
+        .read()
+        .map(|&op| {
+            resident.touch_sphere(op.center, op.radius + reach_world);
+            (op.center, Vec3::splat(op.radius + reach_world), op)
+        })
+        .collect();
+    // Gradual edits read their neighbours' borders (see `Halo`).
+    let mut halos = HashMap::new();
+    let gradual = new
+        .iter()
+        .filter(|(_, _, op)| op.max_step.is_some())
+        .flat_map(|&(center, half, _)| overlapping_chunks(center, half))
+        .chain(
+            deferred
+                .iter()
+                .filter(|d| d.edit.max_step.is_some())
+                .map(|d| d.chunk_pos),
+        );
+    for pos in gradual {
+        let Some(entity) = chunk_manager.get_chunk(&pos) else {
+            continue;
+        };
+        if let Entry::Vacant(slot) = halos.entry(entity)
+            && let Some(halo) = Halo::gather(pos, &chunk_manager, &editable)
+        {
+            slot.insert(halo);
+        }
+    }
     apply_edits(
         &mut deferred,
         new,
@@ -312,6 +416,7 @@ pub fn process_sdf_csg_spheres(
                 SDF_CSG_REACH_VOXELS,
                 op.subtract,
                 op.max_step.map(|s| s / voxel_size),
+                |v, axis, positive| halos.get(&chunk)?.get(v, axis, positive),
             );
             if let Some(material) = op.paint
                 && !filled.is_empty()

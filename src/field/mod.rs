@@ -160,6 +160,12 @@ pub struct EditableChunks<'w, 's, F: VoxelField> {
 }
 
 impl<F: VoxelField> EditableChunks<'_, '_, F> {
+    /// A loaded chunk's field to read, at whatever LOD, without pinning it.
+    #[must_use]
+    pub fn get(&self, e: Entity) -> Option<&F> {
+        self.fields.get(e).ok()
+    }
+
     pub fn get_mut(&mut self, e: Entity) -> Option<Mut<'_, F>> {
         let max = self.max.0;
         let (lod, loading, pin) = self.chunks.get_mut(e).ok()?;

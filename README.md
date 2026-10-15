@@ -229,12 +229,12 @@ cargo test -j 2      # full parallelism can run out of memory
 ## Benchmarking and profiling
 
 The bench runs repeatable phases (load, hold, spin, fly, edit, box, query,
-reslot, visibility) and writes its results to `bench_results/`. The last four also
-check correctness: box brushes stay inside the box, GPU ray queries return
-one result per ray and agree with the CPU ray, and chunks that lose and
-regain their arena slot get their materials back, and visibility masks on
-the GPU match the edited and removed `VisibilityField`s (both read back from
-the GPU).
+reslot, visibility, dig) and writes its results to `bench_results/`. The last
+five also check correctness: box brushes stay inside the box, GPU ray queries
+return one result per ray and agree with the CPU ray, chunks that lose and
+regain their arena slot get their materials back (read back from the GPU),
+visibility masks on the GPU match the edited and removed `VisibilityField`s,
+and a held, slanted dig keeps a real distance field instead of terracing.
 A failed check makes the bench exit with an error.
 
 `--small-arenas` shrinks the GPU arenas so High terrain spans several, and

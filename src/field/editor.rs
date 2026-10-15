@@ -148,7 +148,7 @@ pub struct SdfCsgSphere {
     pub center: Vec3,
     pub radius: f32,
     pub subtract: bool, // true = dig, false = add material
-    /// `None`: exact CSG at once. `Some(step)`: each voxel moves at most
+    /// `None`: exact CSG at once. `Some(step)`: the surface moves at most
     /// `step` world units toward the CSG result, the full step at the
     /// center and less toward the rim, so a held brush grows the shape
     /// gradually (send one per frame, scaled by the frame time). Either way

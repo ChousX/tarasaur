@@ -215,10 +215,24 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// seamless across chunks because it depends only on world position.
     /// `reach` (voxels, >= 2) extends the write past the surface.
     ///
-    /// `max_step` (voxels) limits how far each value moves toward that
+    /// `max_step` (voxels) limits how far the surface moves toward that
     /// result per call: all of it at the center, fading to
     /// `MIN_STEP_WEIGHT` of it at the rim and in the reach band. `None` is
     /// the exact result at once.
+    ///
+    /// A limited step is a level-set step: ahead of the surface each value
+    /// moves by the step times its upwind gradient, so the surface moves the
+    /// step and the field stays a distance field. Moving values by the bare step instead
+    /// let the falloff's slope pile up stroke after stroke, flattening the
+    /// field until the surface terraced, and flipped the clamped band's flat
+    /// interior all at once. Reads every value before writing any, like
+    /// `smooth_sphere`.
+    ///
+    /// `beyond(voxel, axis, positive)` gives the value one voxel past the
+    /// grid's face from a voxel on it (axis 0 = x), so the gradient reads
+    /// across a chunk border: a chunk the surface digs into is still flat
+    /// rock at its border, and can only see the surface coming in its
+    /// neighbour. `None` mirrors the inside neighbour instead.
     ///
     /// Returns the voxels this call turned from outside to inside.
     fn csg_sphere(
@@ -228,25 +242,92 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         reach: f32,
         subtract: bool,
         max_step: Option<f32>,
+        beyond: impl Fn(UVec3, usize, bool) -> Option<f32>,
     ) -> Vec<UVec3>
     where
         T: SignedDistance,
     {
-        let mut filled = Vec::new();
-        self.apply_sphere_at(center, radius + reach, |cur, pos, dist| {
-            let s = dist - radius;
-            let c = cur.distance();
-            let target = if subtract { c.max(-s) } else { c.min(s) };
-            let new = max_step.map_or(target, |step| {
-                let step = step * brush_falloff(dist, radius).max(MIN_STEP_WEIGHT);
-                // Toward the target, never past it.
-                c + (target - c).clamp(-step, step)
-            });
-            if c > 0.0 && new <= 0.0 {
-                filled.push(pos.as_uvec3());
+        let outer = radius + reach;
+        let size = self.size();
+        let Some((min, max)) = sphere_range(center, outer, size) else {
+            return Vec::new();
+        };
+        let read = |v: UVec3| self.get(v.x, v.y, v.z).distance();
+        // The two neighbours of `v` along `axis`, from `beyond` past a face.
+        let neighbours = |v: UVec3, axis: usize| {
+            let step = UVec3::AXES.get(axis).copied().unwrap_or(UVec3::X);
+            let lo = v
+                .checked_sub(step)
+                .map(read)
+                .or_else(|| beyond(v, axis, false));
+            let hi = v
+                .checked_add(step)
+                .filter(|n| n.cmplt(size).all())
+                .map(read)
+                .or_else(|| beyond(v, axis, true));
+            (lo, hi)
+        };
+        // Squared upwind difference along one axis, for a value moving up
+        // (`rising`, a dig) or down: the side the surface comes from. A
+        // missing neighbour mirrors the other one (the field continuing
+        // linearly).
+        let axis = |c: f32, (lo, hi): (Option<f32>, Option<f32>), rising: bool| {
+            let (dm, dp) = match (lo, hi) {
+                (Some(a), Some(b)) => (c - a, b - c),
+                (Some(a), None) => (c - a, c - a),
+                (None, Some(b)) => (b - c, b - c),
+                (None, None) => (0.0, 0.0),
+            };
+            if rising {
+                dp.max(0.0).powi(2).max(dm.min(0.0).powi(2))
+            } else {
+                dp.min(0.0).powi(2).max(dm.max(0.0).powi(2))
             }
-            T::from_signed_distance(new)
-        });
+        };
+
+        let mut filled = Vec::new();
+        let mut out = Vec::new();
+        for z in min.z..=max.z {
+            for y in min.y..=max.y {
+                for x in min.x..=max.x {
+                    let dist = UVec3::new(x, y, z).as_vec3().distance(center);
+                    if dist > outer {
+                        continue;
+                    }
+                    let s = dist - radius;
+                    let v = UVec3::new(x, y, z);
+                    let c = read(v);
+                    let target = if subtract { c.max(-s) } else { c.min(s) };
+                    let new = max_step.map_or(target, |step| {
+                        let rising = target >= c;
+                        // Behind the surface (air in a dig, rock in a
+                        // build) values only tidy up toward the target, at
+                        // the full step: there the upwind gradient can be 0
+                        // (a peak of the target) and would never get there.
+                        let behind = if rising { c > 0.0 } else { c < 0.0 };
+                        let grad = if behind {
+                            1.0
+                        } else {
+                            (0..3)
+                                .map(|a| axis(c, neighbours(v, a), rising))
+                                .sum::<f32>()
+                                .sqrt()
+                                .min(1.0)
+                        };
+                        let step = step * brush_falloff(dist, radius).max(MIN_STEP_WEIGHT) * grad;
+                        // Toward the target, never past it.
+                        c + (target - c).clamp(-step, step)
+                    });
+                    if c > 0.0 && new <= 0.0 {
+                        filled.push(v);
+                    }
+                    out.push((v, new));
+                }
+            }
+        }
+        for (v, value) in out {
+            self.set(v.x, v.y, v.z, T::from_signed_distance(value));
+        }
         filled
     }
 
@@ -530,7 +611,7 @@ mod tests {
     use crate::{
         field::Field,
         field::{LOD, SDF, VisibilityField},
-        num::f32_from_u32,
+        num::{f32_from_u32, usize_from},
     };
 
     /// An SDF holding `f(x, y, z)` at every voxel.
@@ -577,16 +658,16 @@ mod tests {
         let ground = |_: f32, y: f32, _: f32| y - 2.5;
         let center = Vec3::splat(2.0); // on voxel (2, 2, 2): full step there
         let mut exact = sdf_from(ground);
-        exact.csg_sphere(center, 1.5, 2.0, true, None);
+        exact.csg_sphere(center, 1.5, 2.0, true, None, no_halo);
 
         // One small step: the center voxel moves up from -0.5 by exactly 0.25.
         let mut slow = sdf_from(ground);
-        slow.csg_sphere(center, 1.5, 2.0, true, Some(0.25));
+        slow.csg_sphere(center, 1.5, 2.0, true, Some(0.25), no_halo);
         assert!((slow.get(2, 2, 2) - -0.25).abs() < 1e-5);
 
         // Held long enough, it lands on the exact result and stays there.
         for _ in 0..200 {
-            slow.csg_sphere(center, 1.5, 2.0, true, Some(0.25));
+            slow.csg_sphere(center, 1.5, 2.0, true, Some(0.25), no_halo);
         }
         for (x, y, z) in [(2, 2, 2), (2, 1, 2), (1, 2, 2), (3, 3, 3), (0, 0, 0)] {
             let (got, want) = (slow.get(x, y, z), exact.get(x, y, z));
@@ -597,12 +678,197 @@ mod tests {
         }
     }
 
+    /// The trilinear SDF at grid point `p`, which lies inside the grid.
+    fn trilinear(sdf: &SDF, p: Vec3) -> f32 {
+        let lo = p.floor().as_uvec3();
+        let f = p - p.floor();
+        let max = sdf.size().saturating_sub(UVec3::ONE);
+        let hi = lo.saturating_add(UVec3::ONE).min(max);
+        let at = |x: bool, y: bool, z: bool| {
+            let q = UVec3::select(bevy::math::BVec3::new(x, y, z), hi, lo);
+            sdf.get(q.x, q.y, q.z)
+        };
+        let lerp = |a: f32, b: f32, t: f32| (b - a).mul_add(t, a);
+        let face = |z: bool| {
+            lerp(
+                lerp(at(false, false, z), at(true, false, z), f.x),
+                lerp(at(false, true, z), at(true, true, z), f.x),
+                f.y,
+            )
+        };
+        lerp(face(false), face(true), f.z)
+    }
+
+    /// The first surface crossing along a ray, in quarter-voxel steps: the
+    /// hit the cursor brush re-centers on.
+    fn ray_hit(sdf: &SDF, origin: Vec3, dir: Vec3) -> Option<Vec3> {
+        let end = sdf.size().as_vec3() - Vec3::ONE;
+        (1..400u16)
+            .map(|i| origin + dir * f32::from(i) * 0.25)
+            .take_while(|p| p.cmpge(Vec3::ZERO).all() && p.cmple(end).all())
+            .find(|&p| trilinear(sdf, p) <= 0.0)
+    }
+
+    /// Surface voxels (a sign change to a +x, +y or +z neighbour) whose
+    /// central-difference gradient is under 0.5, and all surface voxels.
+    fn weak_surface_voxels(sdf: &SDF) -> (usize, usize) {
+        let inner = 1..sdf.size().x.saturating_sub(1);
+        let (mut weak, mut total) = (0usize, 0usize);
+        for z in inner.clone() {
+            for y in inner.clone() {
+                for x in inner.clone() {
+                    let get = |dx: i32, dy: i32, dz: i32| {
+                        sdf.get(
+                            x.saturating_add_signed(dx),
+                            y.saturating_add_signed(dy),
+                            z.saturating_add_signed(dz),
+                        )
+                    };
+                    let v = get(0, 0, 0);
+                    let next = [get(1, 0, 0), get(0, 1, 0), get(0, 0, 1)];
+                    if next.iter().all(|&o| (o > 0.0) == (v > 0.0)) {
+                        continue;
+                    }
+                    let g = Vec3::new(
+                        get(1, 0, 0) - get(-1, 0, 0),
+                        get(0, 1, 0) - get(0, -1, 0),
+                        get(0, 0, 1) - get(0, 0, -1),
+                    ) / 2.0;
+                    total = total.saturating_add(1);
+                    if g.length() < 0.5 {
+                        weak = weak.saturating_add(1);
+                    }
+                }
+            }
+        }
+        (weak, total)
+    }
+
+    /// No neighbouring chunks: mirror at every face.
+    fn no_halo(_: UVec3, _: usize, _: bool) -> Option<f32> {
+        None
+    }
+
+    /// One y layer of `sdf`, x fastest: the face a neighbour reads.
+    fn y_layer(sdf: &SDF, y: u32) -> Vec<f32> {
+        let n = sdf.size().x;
+        (0..n)
+            .flat_map(|z| (0..n).map(move |x| (x, z)))
+            .map(|(x, z)| sdf.get(x, y, z))
+            .collect()
+    }
+
+    #[test]
+    fn held_dig_crosses_chunk_borders() {
+        // Two chunks stacked in y, ground 8.5 voxels into the upper one.
+        // Each step snapshots the layer either side of the border first,
+        // like the edit system, then digs both chunks.
+        let mut lower = SDF::new(LOD::Medium);
+        let mut upper = SDF::new(LOD::Medium);
+        let n = lower.size().x;
+        let top = f32_from_u32(n);
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let h = f32_from_u32(y);
+                    lower.set(x, y, z, h - (top + 8.5));
+                    upper.set(x, y, z, h - 8.5);
+                }
+            }
+        }
+        let mid = f32_from_u32(n / 2);
+        let face = |layer: &[f32], v: UVec3| {
+            let i = usize_from(v.z).saturating_mul(usize_from(n));
+            layer.get(i.saturating_add(usize_from(v.x))).copied()
+        };
+        // The surface's height above the lower chunk's origin, down the
+        // middle column.
+        let surface = |lower: &SDF, upper: &SDF| {
+            let m = n / 2;
+            (0..n.saturating_mul(2)).rev().find_map(|y| {
+                let get = |y: u32| {
+                    y.checked_sub(n)
+                        .map_or_else(|| lower.get(m, y, m), |u| upper.get(m, u, m))
+                };
+                let (a, b) = (get(y.checked_sub(1)?), get(y));
+                (a <= 0.0 && b > 0.0).then(|| f32_from_u32(y) - 1.0 + a / (a - b))
+            })
+        };
+        for _ in 0..150 {
+            let Some(h) = surface(&lower, &upper) else {
+                break;
+            };
+            let (up_bottom, low_top) = (y_layer(&upper, 0), y_layer(&lower, n.saturating_sub(1)));
+            let center = Vec3::new(mid, h, mid);
+            lower.csg_sphere(center, 12.0, 4.0, true, Some(0.3), |v, axis, pos| {
+                (axis == 1 && pos).then(|| face(&up_bottom, v)).flatten()
+            });
+            let up_center = center - Vec3::Y * top;
+            upper.csg_sphere(up_center, 12.0, 4.0, true, Some(0.3), |v, axis, pos| {
+                (axis == 1 && !pos).then(|| face(&low_top, v)).flatten()
+            });
+        }
+        // It started 8.5 above the border; the band is 8 voxels, so a dig
+        // stuck at the border can't get further than that below it.
+        let depth = top - surface(&lower, &upper).unwrap_or(top);
+        assert!(
+            depth > 12.0,
+            "the dig stopped {depth} voxels below the border"
+        );
+    }
+
+    #[test]
+    fn held_dig_keeps_a_distance_field() {
+        // A brush far wider than the band, held at a slant like the cursor
+        // brush from a fixed camera: each step re-centers on the surface
+        // the last one dug.
+        let mut sdf = SDF::new(LOD::High);
+        let n = sdf.size().x;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    sdf.set(x, y, z, f32_from_u32(y) - 40.5);
+                }
+            }
+        }
+        let origin = Vec3::new(32.0, 62.0, 56.0);
+        let dir = Vec3::new(0.0, -1.0, -0.6).normalize();
+        let first = ray_hit(&sdf, origin, dir);
+        for _ in 0..120 {
+            let Some(hit) = ray_hit(&sdf, origin, dir) else {
+                break;
+            };
+            sdf.csg_sphere(hit, 20.0, 4.0, true, Some(0.3), no_halo);
+        }
+        let last = ray_hit(&sdf, origin, dir);
+        // A flat field flips all at once, which drills straight through.
+        assert!(last.is_some(), "the dig punched through the grid");
+        let dug = first.zip(last).map_or(0.0, |(a, b)| a.distance(b));
+        assert!(dug > 10.0, "only dug {dug} voxels");
+
+        // A distance field's gradient is 1. Where it goes flat, the surface
+        // (and its normals) lands wherever the falloff crosses zero: the
+        // crater terraces.
+        let (weak, total) = weak_surface_voxels(&sdf);
+        assert!(
+            weak.saturating_mul(100) < total,
+            "{weak} of {total} surface voxels have a gradient under 0.5"
+        );
+    }
+
     #[test]
     fn build_reports_only_the_voxels_it_fills() {
         let ground = |_: f32, y: f32, _: f32| y - 1.5; // y <= 1 solid
         let mut sdf = sdf_from(ground);
         // A small step: only air right at the sphere's core can cross.
-        let filled = sdf.csg_sphere(Vec3::new(2.0, 2.0, 2.0), 1.2, 2.0, false, Some(0.6));
+        let filled = sdf.csg_sphere(
+            Vec3::new(2.0, 2.0, 2.0),
+            1.2,
+            2.0,
+            false,
+            Some(0.6),
+            no_halo,
+        );
         assert_eq!(filled, vec![UVec3::new(2, 2, 2)]);
 
         // Paint covers it and the air around it, never the ground below.
