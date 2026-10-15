@@ -32,6 +32,14 @@ pub struct MeshArena {
     pub indirect_args_buffer: Buffer,
     /// `[slot] -> vertex count`, a `u32` per slot (`COPY_SRC`).
     pub vertex_count_buffer: Buffer,
+    /// Padded SDF volumes, `padded_size`^3 snorm16 values (over
+    /// +/-`SDF_BAND`) per slot, x fastest (`COPY_SRC`).
+    pub sdf_buffer: Buffer,
+    /// `ChunkMeta` per slot, 32 bytes: world origin, then the seam ranks at
+    /// byte 16 (`COPY_SRC`).
+    pub chunk_meta_buffer: Buffer,
+    /// Edge of the padded volume: the chunk's voxels plus the apron.
+    pub padded_size: u32,
     /// Every chunk holding a slot here: (chunk position, slot, first vertex).
     /// Its indices start at `first vertex * INDICES_PER_CELL`.
     pub slots: Vec<(IVec3, u32, u32)>,
@@ -97,6 +105,9 @@ impl ArenaInspector<'_> {
                     index_buffer: arena.index_buffer.clone(),
                     indirect_args_buffer: arena.indirect_args_buffer.clone(),
                     vertex_count_buffer: arena.slot_vertex_count_buffer.clone(),
+                    sdf_buffer: arena.sdf_buffer.clone(),
+                    chunk_meta_buffer: arena.chunk_meta_buffer.clone(),
+                    padded_size: arena.texture_size,
                     slots: arena
                         .slot_of_chunk_pos
                         .iter()

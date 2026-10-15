@@ -75,7 +75,7 @@ use tarasaur::{
     MaterialFieldPlugin, TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, overlapping_chunks, world_pos_to_chunk_pos},
     field::{
-        Field, LOD, MaterialField, SDF, VisibilityField, VoxelField, VoxelMaterial,
+        Field, LOD, MaterialField, SDF, SDF_BAND, VisibilityField, VoxelField, VoxelMaterial,
         editor::{SdfCsgSphere, WorldEditor},
     },
     grid::flatten_cube,
@@ -1147,6 +1147,8 @@ const MESH_MAX_OFF_SURFACE: f32 = 2.0;
 const MESH_MAX_EDGE: f32 = 6.0;
 /// A vertex normal further than this from the heightfield's, in degrees.
 const MESH_MAX_NORMAL_DEG: f32 = 30.0;
+/// Triangles smaller than this, in square voxels, aren't checked for facing.
+const MESH_MIN_FOLD_AREA: f32 = 0.01;
 /// Bytes per vertex: two `vec4<f32>`.
 const MESH_VERTEX_BYTES: u64 = 32;
 /// Bytes per slot of `DrawIndexedIndirectArgs`.
@@ -1165,7 +1167,29 @@ struct MeshProbeState {
     exclude: Vec<IVec3>,
     report: MeshReport,
     done: Vec<(Phase, MeshReport)>,
+    /// The apron audit of `hold`'s flagged chunks: started, readbacks still
+    /// pending, and the error per texel class.
+    apron_started: bool,
+    apron_pending: usize,
+    apron: HashMap<String, ApronClass>,
 }
+
+/// Apron texels of one kind (region and source LOD): how far their SDF is
+/// from the heightfield's, in this chunk's voxels.
+#[derive(Default)]
+struct ApronClass {
+    texels: usize,
+    sum_error: f64,
+    max_error: f32,
+    /// The worst few: (error, chunk, texel, value, expected).
+    worst: Vec<(f32, IVec3, UVec3, f32, f32)>,
+}
+
+/// Flagged chunks whose padded SDF the audit reads back.
+const APRON_AUDIT_CHUNKS: usize = 24;
+/// Only texels this close to the surface, in their source's voxels, are
+/// compared: further out the narrow band clamps them.
+const APRON_AUDIT_RANGE: f32 = 4.0;
 
 /// One flagged spot: how bad, and where (local is in the chunk's voxels).
 #[derive(Clone, Copy)]
@@ -1191,7 +1215,7 @@ struct MeshReport {
     /// heightfield has no overhangs, so a correct triangle faces up.
     folds: Vec<MeshFlag>,
     /// Vertex normals more than `MESH_MAX_NORMAL_DEG` degrees off the
-    /// heightfield's.
+    /// heightfield's: what showed as dark streaks along LOD seams.
     bad_normals: Vec<MeshFlag>,
     /// Largest off-surface distance per LOD rank, in that LOD's voxels.
     max_off: [f32; LOD::COUNT],
@@ -1227,7 +1251,7 @@ fn drive_mesh_probe(bench: Res<Bench>, probe: Res<MeshProbe>) {
         s.requested = Some(bench.phase);
         s.exclude = if bench.phase == Phase::Edit {
             let margin = Vec3::splat(EDIT_RADIUS + CHUNK_SIZE);
-            overlapping_chunks(edit_target() - margin, edit_target() + margin).collect()
+            overlapping_chunks(edit_target(), margin).collect()
         } else {
             Vec::new()
         };
@@ -1264,6 +1288,7 @@ fn read_back_meshes(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
 ) {
+    audit_aprons(&probe, &arenas, &device, &queue);
     let (mesh_arenas, exclude) = {
         let Ok(mut s) = probe.0.lock() else {
             return;
@@ -1353,6 +1378,229 @@ fn read_back_meshes(
                     }
                 }
             });
+    }
+}
+
+/// Once `hold`'s mesh report is in, reads back the padded SDF and seam ranks
+/// of the chunks it flagged, and compares every texel with the heightfield
+/// at the position, and in the units, pass3 reads it at.
+fn audit_aprons(
+    probe: &MeshProbe,
+    arenas: &ArenaInspector,
+    device: &RenderDevice,
+    queue: &RenderQueue,
+) {
+    let chunks: Vec<IVec3> = {
+        let Ok(mut s) = probe.0.lock() else {
+            return;
+        };
+        if s.apron_started {
+            return;
+        }
+        let Some((_, r)) = s.done.iter().find(|(p, _)| *p == Phase::Hold) else {
+            return;
+        };
+        let mut chunks: Vec<IVec3> = r
+            .bad_normals
+            .iter()
+            .chain(&r.folds)
+            .map(|f| f.pos)
+            .collect();
+        chunks.sort_by_key(IVec3::to_array);
+        chunks.dedup();
+        chunks.truncate(APRON_AUDIT_CHUNKS);
+        s.apron_started = true;
+        s.apron_pending = chunks.len();
+        chunks
+    };
+    let mesh_arenas = arenas.mesh_arenas();
+    for pos in chunks {
+        let found = mesh_arenas.iter().find_map(|a| {
+            a.slots
+                .iter()
+                .find(|(p, _, _)| *p == pos)
+                .map(|&(_, slot, _)| (a, slot))
+        });
+        let Some((arena, slot)) = found else {
+            if let Ok(mut s) = probe.0.lock() {
+                s.apron_pending = s.apron_pending.saturating_sub(1);
+            }
+            continue;
+        };
+        let padded = arena.padded_size;
+        let sdf_bytes = u64::from(padded).pow(3).saturating_mul(2);
+        let meta_bytes = 32;
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("bench_apron_readback"),
+            size: sdf_bytes.saturating_add(meta_bytes),
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("bench_apron_readback"),
+        });
+        let slot64 = u64::from(slot);
+        encoder.copy_buffer_to_buffer(
+            &arena.sdf_buffer,
+            slot64.saturating_mul(sdf_bytes),
+            &readback,
+            0,
+            sdf_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &arena.chunk_meta_buffer,
+            slot64.saturating_mul(meta_bytes),
+            &readback,
+            sdf_bytes,
+            meta_bytes,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let lod = arena.lod;
+        let state = probe.0.clone();
+        readback
+            .clone()
+            .slice(..)
+            .map_async(MapMode::Read, move |result| {
+                let mut classes = HashMap::new();
+                if result.is_ok() {
+                    if let Ok(bytes) = readback.slice(..).get_mapped_range() {
+                        let split = usize::try_from(sdf_bytes).unwrap_or(usize::MAX);
+                        let (sdf, meta) = bytes.split_at(split.min(bytes.len()));
+                        let ranks = [read_u32(meta, 4), read_u32(meta, 5)];
+                        if let [Some(r0), Some(r1)] = ranks {
+                            let chunk = ApronChunk::new(pos, lod, padded, [r0, r1]);
+                            chunk.audit(sdf, &mut classes);
+                        }
+                    }
+                    readback.unmap();
+                }
+                if let Ok(mut s) = state.lock() {
+                    for (key, c) in classes {
+                        let into: &mut ApronClass = s.apron.entry(key).or_default();
+                        into.texels = into.texels.saturating_add(c.texels);
+                        into.sum_error += c.sum_error;
+                        into.max_error = into.max_error.max(c.max_error);
+                        into.worst.extend(c.worst);
+                        into.worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+                        into.worst.truncate(4);
+                    }
+                    s.apron_pending = s.apron_pending.saturating_sub(1);
+                }
+            });
+    }
+}
+
+/// A chunk's padded volume as pass3 reads it.
+struct ApronChunk {
+    pos: IVec3,
+    lod: LOD,
+    padded: u32,
+    ranks: [u32; 2],
+}
+
+impl ApronChunk {
+    const fn new(pos: IVec3, lod: LOD, padded: u32, ranks: [u32; 2]) -> Self {
+        Self {
+            pos,
+            lod,
+            padded,
+            ranks,
+        }
+    }
+
+    /// LOD rank of the chunk at `offset` (`seam_rank` in `voxel_common.wesl`).
+    fn rank(&self, offset: IVec3) -> u32 {
+        let k = offset
+            .saturating_add(IVec3::ONE)
+            .dot(IVec3::new(1, 3, 9))
+            .unsigned_abs();
+        let word = self.ranks.get(usize_from(k / 16)).copied().unwrap_or(0);
+        word.wrapping_shr((k % 16).wrapping_mul(2)) & 3
+    }
+
+    /// log2 of a rank's voxels per edge (`rank_log2_size`).
+    const fn log2_size(rank: u32) -> i32 {
+        match rank & 3 {
+            0 => 2,
+            r => r.cast_signed().saturating_add(3),
+        }
+    }
+
+    /// The SDF at padded index `index`, in its source's voxels.
+    fn decode(sdf: &[u8], index: usize) -> Option<f32> {
+        let at = index.checked_mul(2)?;
+        let bytes = sdf.get(at..at.checked_add(2)?)?;
+        let snorm = i16::from_le_bytes(bytes.try_into().ok()?);
+        Some((f32::from(snorm) / f32::from(i16::MAX)).max(-1.0) * SDF_BAND)
+    }
+
+    /// The class of texel `texel`: its LOD, apron region and source LOD.
+    fn class(&self, apron: BVec3, shift: i32, coarse_steps: bool) -> String {
+        let region = match apron.bitmask().count_ones() {
+            0 => "interior",
+            1 => "face",
+            2 => "edge",
+            _ => "corner",
+        };
+        let from = match shift.signum() {
+            1 => "coarser",
+            -1 => "finer",
+            _ => "same",
+        };
+        let steps = if apron.any() && coarse_steps {
+            " coarse-step"
+        } else {
+            ""
+        };
+        format!("{:?} {region} from {from}{steps}", self.lod)
+    }
+
+    /// Checks every texel near the surface against the heightfield.
+    fn audit(&self, sdf: &[u8], classes: &mut HashMap<String, ApronClass>) {
+        let edge = self.padded.saturating_sub(2);
+        let own = Self::log2_size(self.rank(IVec3::ZERO));
+        // pass3's face_shift: per axis, this chunk's voxels per apron step.
+        let face = [IVec3::X, IVec3::Y, IVec3::Z]
+            .map(|a| own.saturating_sub(Self::log2_size(self.rank(a))).max(0));
+        let coarse_steps = face.iter().any(|&f| f > 0);
+        // pass3's texel_pos: the second apron layer sits one step past.
+        let far = Vec3::from_array(face.map(|f| f32_from_u32(edge) + 2f32.powi(f)));
+        let voxel = self.lod.voxel_size();
+        let origin = self.pos.as_vec3() * CHUNK_SIZE;
+        for z in 0..self.padded {
+            for y in 0..self.padded {
+                for x in 0..self.padded {
+                    let texel = UVec3::new(x, y, z);
+                    let Some(raw) = Self::decode(sdf, flatten_cube(x, y, z, self.padded)) else {
+                        continue;
+                    };
+                    let apron = texel.cmpge(UVec3::splat(edge));
+                    let source = self.rank(IVec3::select(apron, IVec3::ONE, IVec3::ZERO));
+                    let shift = if apron.any() {
+                        own.saturating_sub(Self::log2_size(source))
+                    } else {
+                        0
+                    };
+                    let scale = 2f32.powi(shift);
+                    let p = Vec3::select(texel.cmpgt(UVec3::splat(edge)), far, texel.as_vec3());
+                    let expected = heightfield_distance(origin + p * voxel) / voxel;
+                    if expected.abs() > APRON_AUDIT_RANGE * scale {
+                        continue; // the narrow band clamps it
+                    }
+                    let value = raw * scale;
+                    let error = (value - expected).abs();
+                    let c = classes
+                        .entry(self.class(apron, shift, coarse_steps))
+                        .or_default();
+                    c.texels = c.texels.saturating_add(1);
+                    c.sum_error += f64::from(error);
+                    c.max_error = c.max_error.max(error);
+                    c.worst.push((error, self.pos, texel, value, expected));
+                    c.worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    c.worst.truncate(4);
+                }
+            }
+        }
     }
 }
 
@@ -1502,10 +1750,14 @@ fn check_triangles(
         if exceeds(longest, MESH_MAX_EDGE) {
             report.long_edges.push(chunk.flag(longest, centroid));
         }
-        // Counter-clockwise front faces.
-        let face = (b - a).cross(c - a).normalize_or_zero();
-        if face != Vec3::ZERO && face.y <= 0.0 {
-            report.folds.push(chunk.flag(face.y, centroid));
+        // Counter-clockwise front faces. A sliver too thin to see has no
+        // meaningful facing, so it doesn't count.
+        let cross = (b - a).cross(c - a);
+        let area = cross.length() / 2.0 / (voxel * voxel);
+        if area > MESH_MIN_FOLD_AREA && cross.y <= 0.0 {
+            report
+                .folds
+                .push(chunk.flag(cross.normalize_or_zero().y, centroid));
         }
     }
 }
@@ -1564,10 +1816,9 @@ fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
             r.bad_indices
         ),
         format!(
-            "  known at LOD seams, not failed: {} downward triangles, {} vertex normals > {MESH_MAX_NORMAL_DEG} degrees off ({} > 90)",
-            r.folds.len(),
+            "  {} vertex normals > {MESH_MAX_NORMAL_DEG} degrees off; known at LOD seam corners, not failed: {} downward triangles",
             r.bad_normals.len(),
-            r.bad_normals.iter().filter(|f| f.value > 90.0).count()
+            r.folds.len()
         ),
         format!(
             "  worst off-surface per LOD (voxels): {}",
@@ -1640,17 +1891,50 @@ fn check_meshes(mut bench: ResMut<Bench>, probe: Res<MeshProbe>) {
             None => (false, "readback unfinished".to_string()),
             Some((_, r)) => {
                 write_mesh_csv(phase, r);
-                // Folds and bent normals are still known at LOD seams, so
-                // they're reported (and in the CSV) without failing the run.
+                // A few folds are still known at LOD seam corners, so they're
+                // reported (and in the CSV) without failing the run.
                 let pass = r.chunks > 0
                     && r.off_surface.is_empty()
                     && r.long_edges.is_empty()
+                    && r.bad_normals.is_empty()
                     && r.bad_indices == 0;
                 (pass, mesh_report_lines(r).join("\n"))
             }
         }
     };
     bench.checks.record(phase, "mesh_on_surface", pass, detail);
+    if phase == Phase::Hold {
+        let lines = apron_report_lines(&probe);
+        bench
+            .checks
+            .record(phase, "apron_audit", true, lines.join("\n"));
+    }
+}
+
+/// The apron audit's classes, worst first.
+fn apron_report_lines(probe: &MeshProbe) -> Vec<String> {
+    let Ok(s) = probe.0.lock() else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "{} chunks still pending; error in voxels, texels within {APRON_AUDIT_RANGE} source voxels of the surface",
+        s.apron_pending
+    )];
+    let mut classes: Vec<_> = s.apron.iter().collect();
+    classes.sort_by(|a, b| b.1.max_error.total_cmp(&a.1.max_error));
+    for (key, c) in classes {
+        let mean = c.sum_error / f64::from(u32::try_from(c.texels.max(1)).unwrap_or(u32::MAX));
+        lines.push(format!(
+            "  {key}: {} texels, mean {mean:.3}, max {:.3}",
+            c.texels, c.max_error
+        ));
+        for (e, pos, t, v, x) in &c.worst {
+            lines.push(format!(
+                "    {e:.2}: chunk {pos} texel {t} value {v:.2} expected {x:.2}"
+            ));
+        }
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------

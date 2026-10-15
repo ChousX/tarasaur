@@ -354,7 +354,7 @@ impl ArenaBuffers {
             sdf: dev.storage(
                 "arena_sdf_buffer",
                 per_chunk(sdf_elems.saturating_mul(2)),
-                STORAGE_DST,
+                STORAGE_DST | BufferUsages::COPY_SRC,
             ),
             material: dev.storage(
                 "arena_material_buffer",
@@ -402,7 +402,7 @@ impl ArenaBuffers {
             chunk_meta: dev.storage(
                 "arena_chunk_meta_buffer",
                 per_chunk(meta_bytes),
-                STORAGE_DST,
+                STORAGE_DST | BufferUsages::COPY_SRC,
             ),
             batch_uniform: batch_uniform_buffer(
                 dev,
