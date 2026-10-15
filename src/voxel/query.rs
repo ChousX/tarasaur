@@ -110,7 +110,7 @@ pub struct VoxelQueryResultReceiver {
     pub receiver: crossbeam_channel::Receiver<Vec<HitResult>>,
 }
 
-/// Static buffers + double-buffered bind groups for the cursor/raycast
+/// Static buffers + triple-buffered bind groups for the cursor/raycast
 /// query pass.
 ///
 /// Buffers themselves don't depend on any arena and are built
@@ -118,9 +118,9 @@ pub struct VoxelQueryResultReceiver {
 /// each LOD's first arena (`sdf_buffer`/`chunk_meta_buffer`), which
 /// don't exist yet at `finish()` time (arenas
 /// are created lazily on first chunk extraction) — so bind group creation
-/// is deferred to `prepare_voxel_queries`, the first frame the collision
-/// arena shows up, and cached forever after since arena buffers never
-/// change identity once created.
+/// is deferred to `prepare_voxel_queries`, and rebuilt only when a LOD gains
+/// its first arena or the lookup table grows (arena buffers never change
+/// identity once created).
 #[derive(Resource)]
 pub struct VoxelQueryBuffers {
     pub bind_groups: [Option<BindGroup>; QUERY_BUFFER_SLOTS],
@@ -391,9 +391,10 @@ pub fn prepare_voxel_queries(
     }
 }
 
-/// Runs in `RenderSystems::Queue`, after `dispatch_voxel_compute_passes_batched`
-/// so this frame's `sdf_buffer`/`chunk_meta_buffer` writes are already queued
-/// ahead of the query dispatch on the same command stream.
+/// Runs in `VoxelPrepareSet::Dispatch`, after the meshing dispatch.
+///
+/// So this frame's `sdf_buffer`/`chunk_meta_buffer` writes are already
+/// queued ahead of the query dispatch on the same command stream.
 pub fn dispatch_voxel_query_pass(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,

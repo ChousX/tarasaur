@@ -11,8 +11,8 @@ use crate::persistence::FieldSavePayload;
 
 /// A registered generator: pure function of chunk position + LOD, no ECS
 /// access. That purity is what makes it safe to clone into and run inside
-/// an `AsyncComputeTaskPool` task — see `ChunkPersistencePlugin`'s
-/// `spawn_chunk_data_task` observer.
+/// an `AsyncComputeTaskPool` task — see `start_chunk_loads` in
+/// `field::loading`.
 type GenerateFn = Arc<dyn Fn(IVec3, LOD) -> FieldSavePayload + Send + Sync>;
 
 #[derive(Resource, Default, Clone)]
@@ -23,7 +23,7 @@ pub struct ChunkGeneratorRegistry {
 impl ChunkGeneratorRegistry {
     /// Registers a raw-buffer generator for field type `field_type_id`.
     /// `generate` must produce exactly `lod.volume()` elements in
-    /// x/y/z-flattened order — the same layout `RestorableField` impls
+    /// x/y/z-flattened order — the same layout `FieldFromRaw` impls
     /// expect when they later deserialize this payload's bytes.
     pub fn register<V: bytemuck::Pod>(
         &mut self,

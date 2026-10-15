@@ -343,7 +343,7 @@ impl Columns {
     }
 }
 
-/// Sign volume; `register_sdf` turns it into real distances with a jump flood.
+/// World-space signed distances (slope-corrected), for `register_sdf_distance`.
 pub fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     Columns::new(pos, lod).fill(|y, h, k| (y - h) * k)
 }

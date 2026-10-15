@@ -141,7 +141,7 @@ impl SDF {
             self.scratch.resize(volume, PackedCoord::EMPTY);
         }
 
-        // 2. Identify and seed the initial zero-crossing boundary layer
+        // Seed the zero-crossing boundary, flood, and resolve distances
         jump_flood_distance_field(
             &mut self.data,
             &mut self.seeds,
@@ -366,9 +366,9 @@ fn inside_at(data: &[f32], size: u32, c: Coord) -> Option<bool> {
 
 /// The Jump Flood Algorithm.
 ///
-/// Four stages (seed the boundary, flood outward at halving strides,
-/// resolve ping-pong buffer, compute final signed distances), just
-/// operating on borrowed buffers instead of `&mut self` so it can run
+/// Three stages (seed the boundary, flood outward at halving strides,
+/// compute final signed distances from each voxel's nearest seed), operating
+/// on borrowed buffers instead of `&mut self` so it can run
 /// inside an async task with no live ECS component in scope.
 ///
 /// `data` holds signs on entry (negative = inside) and signed distances on

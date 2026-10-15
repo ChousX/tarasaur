@@ -34,8 +34,8 @@ use crate::{
 // Average fraction of cells per chunk provisioned for vertex/index output.
 // Each chunk gets an exact-size range from a shared heap (see `RangeHeap`),
 // so this only has to cover the arena-wide average. Sandbox terrain
-// peaked at ~1.3% average in sandbox runs. A full heap never drops terrain: uploads wait and the
-// chunk keeps its current mesh.
+// peaked at ~1.3% average. A full heap never drops terrain: uploads wait
+// and the chunk keeps its current mesh.
 const ACTIVE_FRACTION_ESTIMATE: f32 = 0.03;
 
 /// Cells of per-dispatch scratch (flags + compacted offsets, 8 bytes/cell)

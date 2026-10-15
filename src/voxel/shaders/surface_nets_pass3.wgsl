@@ -249,7 +249,7 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
         }
     }
 
-     let id_a = uniq_ids[best_idx];
+    let id_a = uniq_ids[best_idx];
     var id_b = id_a;
     var weight_u8 = 255u;
     if (second_w >= 0.0 && (best_w + second_w) > 0.00001) {

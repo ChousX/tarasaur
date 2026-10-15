@@ -32,7 +32,7 @@ impl Plugin for ChunkPlugin {
             .add_systems(
                 Update,
                 (
-                    chunk_loader_boundry_checker,
+                    chunk_loader_boundary_checker,
                     expire_edit_pins,
                     update_cursor_focus, // must run before plan_chunk_ops
                     plan_chunk_ops.run_if(loaders_dirty),
@@ -42,7 +42,7 @@ impl Plugin for ChunkPlugin {
             )
             .add_systems(
                 Update,
-                chunk_boundry_visualizer.run_if(resource_exists::<ShowChunkBounds>),
+                chunk_boundary_visualizer.run_if(resource_exists::<ShowChunkBounds>),
             );
     }
 }
@@ -200,8 +200,8 @@ pub struct CurrentChunk(pub IVec3);
 
 /// `lod_bands`: finest first; each width is ADDITIVE.
 ///
-/// Distance is Chebyshev, in chunks.`[(High,1),(Medium,1)]` => High for d<=1, Medium for d==2,
-/// nothing beyond. `hysteresis` extends both LOD downgrades and despawn: an
+/// Distance is Chebyshev, in chunks. `[(High,1),(Medium,1)]` => High for
+/// d<=1, Medium for d==2, nothing beyond. `hysteresis` extends both LOD downgrades and despawn: an
 /// existing chunk keeps its finer LOD until d > `band_edge` + hysteresis, and
 /// is despawned only when d > total + hysteresis. Upgrades and new spawns
 /// use the plain edges.
@@ -297,7 +297,7 @@ fn on_add_chunk_loader(mut world: DeferredWorld, HookContext { entity, .. }: Hoo
     }
 }
 
-fn chunk_loader_boundry_checker(
+fn chunk_loader_boundary_checker(
     mut q: Query<(&GlobalTransform, &mut CurrentChunk), Changed<GlobalTransform>>,
 ) {
     for (transform, mut current) in q.iter_mut() {
@@ -478,7 +478,7 @@ fn configure_gizmo_depth_bias(mut config_store: ResMut<GizmoConfigStore>) {
     config.depth_bias = -1.0;
 }
 
-fn chunk_boundry_visualizer(
+fn chunk_boundary_visualizer(
     chunk_q: Query<(&Transform, &TargetLOD), With<Chunk>>,
     mut gizmos: Gizmos,
 ) {

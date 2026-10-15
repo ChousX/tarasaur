@@ -65,9 +65,10 @@ fn terrain_height(x: f32, z: f32) -> f32 {
 
 /// Runs off the main thread inside a load task — no ECS access, pure
 /// function of `chunk_pos` + lod, exactly what `ChunkGeneratorRegistry`
-/// requires. Produces a sign volume: negative below the terrain surface,
-/// positive above, in x/y/z-flattened order. `register_sdf` turns it into
-/// real distances with a jump-flood pass.
+/// requires. Produces world-space signed distances (height above the
+/// terrain): negative below the surface, positive above, in x/y/z-flattened
+/// order. `register_sdf_distance` converts them to voxel units; no jump
+/// flood runs.
 ///
 /// Resolution-independent: voxel `i` samples world position
 /// `origin + i * voxel_size`, so the same chunk generated at two LODs

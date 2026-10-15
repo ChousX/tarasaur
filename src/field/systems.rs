@@ -158,7 +158,7 @@ pub fn process_sdf_sphere_stamps(
 
 /// In-flight async JFA recompute for one chunk's SDF.
 ///
-/// `started_version` is the `SDFField::version` this task's input was cloned at — used by
+/// `started_version` is the `SDF::version` this task's input was cloned at — used by
 /// `resolve_sdf_reinit_tasks` to detect whether a newer edit landed while
 /// the task was running.
 #[derive(Component)]
@@ -247,7 +247,7 @@ pub fn detect_topology_desync(
         if sdf_dirty != vis_dirty {
             let pos = positions.get(entity).map(|p| p.0);
             warn!(
-                "[topology_desync] chunk {:?} (entity {:?}): SDFField edited={}, VisibilityField edited={} — \
+                "[topology_desync] chunk {:?} (entity {:?}): SDF edited={}, VisibilityField edited={} — \
                  these usually need to change together (a solid-sphere edit that only touched one field \
                  will render geometry that doesn't match its visibility mask, or vice versa)",
                 pos, entity, sdf_dirty, vis_dirty

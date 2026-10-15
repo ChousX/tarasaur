@@ -56,7 +56,7 @@ fn spawn_player(mut commands: Commands) {
             yaw,
         },
         // Band widths are additive, finest first (Chebyshev distance in chunks):
-        //   d <= 1 High, d <= 3 Medium, d <= 5 Low, d <= 8 Lowest.
+        //   d <= 4 High, d <= 7 Medium, d <= 15 Low.
         // `hysteresis` delays LOD downgrades and despawn by that many chunks.
         ChunkLoader {
             lod_bands: vec![

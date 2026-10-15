@@ -63,10 +63,9 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
     ]
 }
 
-/// Binding layout for `surface_nets_pass3`. Back to 12 entries — visibility
-/// is no longer sampled here. Pass3 only needs to know *which slot* each
-/// vertex belongs to (packed into the vertex itself, see `pack_material_b` in
-/// the shader); the actual visibility test now happens per-fragment in
+/// Binding layout for `surface_nets_pass3`. Visibility isn't sampled here:
+/// pass3 only packs each vertex's slot into the vertex (`pack_material_b`
+/// in the shader), and the visibility test happens per fragment in
 /// `voxel_raster.wesl` against `raster_chunk_visibility_entries()` below.
 pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
     vec![
@@ -82,19 +81,18 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(9, ShaderStages::COMPUTE, true), // slot_vertex_count
         storage_buffer_entry(10, ShaderStages::COMPUTE, true), // active_slot_map: dispatch-order pos -> real arena slot
         // material_buffer: packed as array<u32>, 4 material-id bytes per
-        // word — WGSL storage buffers have no array<u8>. Only pass3 reads
-        // it (material tallying happens per-vertex, not per-cell), so no
-        // change needed to pass1_surface_entries().
+        // word — WGSL storage buffers have no array<u8>. Pass1 doesn't
+        // read it; the raster pass does (binding 4 of its group 3).
         storage_buffer_entry(11, ShaderStages::COMPUTE, true),
         storage_buffer_entry(12, ShaderStages::COMPUTE, false), // guard_debug: range-guard telemetry
         storage_buffer_entry(13, ShaderStages::COMPUTE, true),  // chunk_counts from pass1
     ]
 }
 
-/// Binding layout for group 2 of the raster pipeline — per-fragment
-/// visibility sampling. Bound once per arena (all buffers here are
-/// per-arena, not per-material), alongside group 0 (view) and group 1
-/// (material). All FRAGMENT-only: the vertex stage doesn't need any of
+/// Binding layout for group 3 of the raster pipeline — per-fragment
+/// visibility and material sampling. Bound once per arena (all buffers here
+/// are per-arena, not per-palette), alongside groups 0 and 1 (Bevy's mesh
+/// view) and group 2 (the palette). All FRAGMENT-only: the vertex stage doesn't need any of
 /// this, it only carries `real_slot` through as a packed flat attribute.
 ///
 /// Binding 3 reuses the same `BatchUniforms` layout as pass3's own uniform

@@ -53,15 +53,14 @@ impl<F: Field<V>, S: Primitive3d + Send + Sync + 'static, V: Copy + Default + Se
 /// Take a `WorldEditor<F, V>` as a system parameter and call `sphere`/
 /// `cuboid` (or the `fill_*`/`accumulate_*`/`blend_*` shortcuts) with plain
 /// world-space coordinates. You never see a chunk position, a chunk entity,
-/// or a local coordinate — under the hood this just writes the same
-/// `EditFieldMessage`s as before, and `process_sphere_edits`/
-/// `process_box_edits` resolve *every* chunk whose bounds overlap the shape,
+/// or a local coordinate — under the hood this writes `EditFieldMessage`s,
+/// and `process_shape_edits` resolves *every* chunk whose bounds overlap the shape,
 /// so a brush that straddles a chunk boundary edits both sides seamlessly.
 /// Chunks that don't exist yet are simply skipped by those systems.
 ///
 /// ```ignore
-/// fn dig_pit(mut sdf: WorldEditor<SDFField, f32>) {
-///     sdf.accumulate_sphere(Vec3::new(9.5, 5.0, 5.0), 4.0, -0.5);
+/// fn dig_pit(mut sdf: WorldEditor<SDF, f32>) {
+///     sdf.accumulate_sphere(Vec3::new(9.5, 5.0, 5.0), 4.0, 0.5); // + = remove
 /// }
 /// ```
 #[derive(SystemParam)]

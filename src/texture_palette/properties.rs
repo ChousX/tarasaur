@@ -94,7 +94,7 @@ impl PaletteMaterial {
 
 /// GPU-side representation of material properties.
 ///
-/// This is stored in a uniform buffer and indexed by material ID in the shader.
+/// Stored in a storage buffer and indexed by material ID in the shader.
 #[derive(Clone, Copy, Debug, Default, ShaderType, Pod, Zeroable)]
 #[repr(C)]
 pub struct MaterialPropertiesGpu {
@@ -124,13 +124,12 @@ impl From<&PaletteMaterial> for MaterialPropertiesGpu {
 
 /// Maximum number of materials supported in a single palette.
 ///
-/// This limit exists because we use a uniform buffer for material properties.
 /// Equal to `u8::MAX`: material ids are stored as `u8`.
 pub const MAX_MATERIALS: usize = 255;
 
 /// GPU-side array of all material properties.
 ///
-/// Padded to `MAX_MATERIALS` for uniform buffer alignment.
+/// Runtime-sized: one entry per palette material.
 #[derive(Clone, Debug, ShaderType)]
 pub struct MaterialPropertiesArray {
     #[shader(size(runtime))]

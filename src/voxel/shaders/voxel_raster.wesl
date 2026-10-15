@@ -130,7 +130,7 @@ struct VertexOutput {
     @location(2) @interpolate(flat) material_id_a: u32,
     @location(3) @interpolate(flat) material_id_b: u32,
     @location(4) blend_weight: f32,
-    // NEW — flat-interpolated (every vertex in a triangle is from the same
+    // Flat-interpolated (every vertex in a triangle is from the same
     // chunk, so this is constant across the triangle regardless of
     // interpolation mode; flat avoids any float-precision surprises).
     @location(5) @interpolate(flat) real_slot: u32,
@@ -180,7 +180,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return out;
 }
 
-// --- Visibility sampling, ported from pass1/pass3's identical logic ---
+// --- Visibility sampling ---
 fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
     return coord.z * texture_size * texture_size + coord.y * texture_size + coord.x;
 }
@@ -208,7 +208,7 @@ fn sample_visibility(slot: u32, coord: vec3<u32>) -> bool {
 // per-pixel resolution instead of being frozen per-triangle at vertex time.
 fn fragment_is_visible(slot: u32, world_pos: vec3<f32>) -> bool {
     if (!chunk_has_mask(slot)) {
-        return true; // uniformly-visible chunk — see pass1's identical comment
+        return true; // uniformly visible chunk: no mask uploaded
     }
     let origin = chunk_meta[slot].chunk_world_origin;
     let local = (world_pos - origin) / vis_uniforms.voxel_size;

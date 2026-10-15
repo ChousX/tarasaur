@@ -445,9 +445,10 @@ fn generate_terrain(
         sdf.reinit();
     }
 
-    // Both edits use fill_box — same message type (EditFieldMessage
+    // Both edits use fill_box — same message type (EditFieldMessage<
     // VisibilityField, Cuboid, bool>), same processing system
-    // (process_box_edits), which drains its MessageReader in write order.
+    // (process_shape_edits for Cuboid), which drains its MessageReader in
+    // write order.
     // That guarantees "mark everything visible" applies before "hide this
     // region" within this one frame — no race, no delay needed. Mixing
     // box + sphere would put the two edits in different systems with no
