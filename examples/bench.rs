@@ -4,7 +4,7 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass]
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! ```
 //!
@@ -17,15 +17,18 @@
 //! - `box`:   box brushes: an SDF box sculpted every frame, plus one material
 //!   box off the voxel grid. Checks that only voxels inside it changed.
 //! - `query`: GPU ray queries every frame. Checks each result batch holds
-//!   exactly the queries sent, and that the hits match the CPU ray, also on
-//!   chunks stored past a LOD's first arena (the bench uses small arenas so
-//!   High terrain spans several).
+//!   exactly the queries sent, and that the hits match the CPU ray. With
+//!   `--small-arenas`, also on chunks stored past a LOD's first arena.
 //! - `reslot`: chunks filled solid (no mesh, slot released) and dug out again
 //!   (a new slot), every 60 frames. Checks their material slots are
 //!   refilled, by reading them back from the GPU.
 //!
 //! A failed check is printed, written to the summary as `check:<name>` = 0,
 //! and makes the bench exit with an error.
+//!
+//! `--small-arenas` shrinks the GPU arenas so High terrain spans several,
+//! which the `query` phase then checks. More arenas cost frame time (~7-11%
+//! in hold/spin/fly), so compare only runs made with the same setting.
 //!
 //! Camera motion is per frame, not per second, so every run does the same
 //! work whatever its frame rate. Vsync is off. The world is generated into a
@@ -118,8 +121,8 @@ const QUERY_TOLERANCE: f32 = 0.5;
 /// When the render world reports which arena holds each chunk.
 const ARENA_REPORT_AT: u32 = QUERY_FRAMES - 30;
 const RESLOT_FRAMES: u32 = 300;
-/// Arenas small enough that High terrain spans several, with enough of them
-/// that no LOD has less room than with the defaults.
+/// `--small-arenas`: arenas small enough that High terrain spans several,
+/// with enough of them that no LOD has less room than with the defaults.
 const BENCH_ARENAS: ArenaConfig = ArenaConfig {
     max_arenas: [1, 4, 4, 8],
     max_buffer_bytes: 32 * 1024 * 1024,
@@ -276,6 +279,8 @@ struct Output {
     label: String,
     /// `--depth-prepass`: draw voxel depth before shading.
     depth_prepass: bool,
+    /// `--small-arenas`: see `BENCH_ARENAS`.
+    small_arenas: bool,
 }
 
 #[derive(Component)]
@@ -298,6 +303,7 @@ fn main() -> AppExit {
         dir: flag("--out").map_or_else(|| manifest.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
         depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
+        small_arenas: args.iter().any(|a| a == "--small-arenas"),
     };
     let out = Output {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
@@ -356,7 +362,7 @@ fn main() -> AppExit {
             .add_systems(Update, trigger_frame_capture);
     }
 
-    add_checked_phases(&mut app);
+    add_checked_phases(&mut app, out.small_arenas);
     app.insert_resource(CursorBrush { enabled: false })
         // Disk writes would only add noise; nothing here needs to persist.
         .insert_resource(AutosaveIntervalSecs(f32::INFINITY))
@@ -387,21 +393,28 @@ fn main() -> AppExit {
         .run()
 }
 
+/// Whether the run uses `BENCH_ARENAS` (`--small-arenas`).
+#[derive(Resource, Clone, Copy)]
+struct SmallArenas(bool);
+
 /// The `box`, `query` and `reslot` phases: their drivers, checks, and the
-/// render-world slot readback.
-fn add_checked_phases(app: &mut App) {
+/// render-world readbacks.
+fn add_checked_phases(app: &mut App, small_arenas: bool) {
     let probe = SlotProbe::default();
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        render_app
-            .world_mut()
-            .resource_mut::<VoxelChunkArenaSet>()
-            .config = BENCH_ARENAS;
+        if small_arenas {
+            render_app
+                .world_mut()
+                .resource_mut::<VoxelChunkArenaSet>()
+                .config = BENCH_ARENAS;
+        }
         render_app.insert_resource(probe.clone()).add_systems(
             Render,
             (read_back_slots, report_arenas).in_set(RenderSystems::Cleanup),
         );
     }
     app.insert_resource(probe)
+        .insert_resource(SmallArenas(small_arenas))
         .init_resource::<QueryWatch>()
         .add_systems(
             Update,
@@ -681,11 +694,13 @@ fn drive_queries(
     bench: Res<Bench>,
     mut pending: ResMut<PendingVoxelQueries>,
     probe: Res<SlotProbe>,
+    small_arenas: Res<SmallArenas>,
 ) {
     if bench.phase != Phase::Query {
         return;
     }
-    if bench.frame_in_phase == ARENA_REPORT_AT
+    if small_arenas.0
+        && bench.frame_in_phase == ARENA_REPORT_AT
         && let Ok(mut state) = probe.0.lock()
     {
         state.arena_request = true;
@@ -731,6 +746,7 @@ fn check_queries(
     watch: Res<QueryWatch>,
     terrain: TerrainRay,
     probe: Res<SlotProbe>,
+    small_arenas: Res<SmallArenas>,
 ) {
     if !Phase::Query.last_frame(&bench) {
         return;
@@ -778,7 +794,12 @@ fn check_queries(
     );
 
     // The rays whose terrain lives past its LOD's first arena: only a pass
-    // per arena finds those.
+    // per arena finds those. Default-sized arenas rarely spill, so this
+    // needs `--small-arenas`.
+    if !small_arenas.0 {
+        info!("[bench] query_overflow_arenas skipped: run with --small-arenas");
+        return;
+    }
     let report = probe.0.lock().ok().and_then(|mut s| s.arena_report.take());
     let Some(report) = report else {
         bench.checks.record(
@@ -1263,7 +1284,7 @@ fn write_results(bench: &Bench, adapter: &str) {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map_or_else(|| "unknown".into(), |s| s.trim().to_string());
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
@@ -1271,6 +1292,7 @@ fn write_results(bench: &Bench, adapter: &str) {
             "release"
         },
         bench.out.depth_prepass,
+        bench.out.small_arenas,
     );
 
     let mut frames = header.clone();

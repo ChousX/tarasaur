@@ -203,14 +203,17 @@ cargo test -j 2      # full parallelism can run out of memory
 The bench runs repeatable phases (load, hold, spin, fly, edit, box, query,
 reslot) and writes its results to `bench_results/`. The last three also
 check correctness: box brushes stay inside the box, GPU ray queries return
-one result per ray and agree with the CPU ray (also on terrain past a LOD's
-first arena: the bench uses small arenas, so High terrain spans several,
-which costs some frame time against the defaults), and chunks that lose and
+one result per ray and agree with the CPU ray, and chunks that lose and
 regain their arena slot get their materials back (read back from the GPU).
 A failed check makes the bench exit with an error.
 
+`--small-arenas` shrinks the GPU arenas so High terrain spans several, and
+also checks GPU queries against terrain past a LOD's first arena. More
+arenas cost frame time (~7-11% in hold, spin and fly), so only compare runs
+made with the same setting.
+
 ```sh
-cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass]
+cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas]
 cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 ```
 
