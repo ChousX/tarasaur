@@ -16,12 +16,9 @@ use ops::{AccumulateExt, BlendExt};
 
 pub(crate) mod apron;
 pub mod editor;
-pub mod generator;
-pub mod loading;
 mod lod;
 mod material;
 pub mod ops;
-pub mod persistence;
 mod plugin;
 pub(crate) mod sdf;
 pub(crate) mod surface;
@@ -143,7 +140,7 @@ use crate::chunk::{Chunk, EditPin};
 /// Per-chunk state `EditableChunks` checks before handing out a field.
 type EditableChunkState = (
     Option<&'static LOD>,
-    Has<loading::ChunkDataTask>,
+    Has<crate::storage::loading::ChunkDataTask>,
     Option<&'static mut EditPin>,
 );
 

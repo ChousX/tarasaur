@@ -7,7 +7,7 @@ pub use crate::plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin};
 
 // Chunks and streaming
 pub use crate::chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, ShowChunkBounds};
-pub use crate::field::generator::ChunkGeneratorRegistry;
+pub use crate::storage::generator::ChunkGeneratorRegistry;
 
 // Fields and editing
 pub use crate::field::{
@@ -15,8 +15,8 @@ pub use crate::field::{
     VoxelMaterial,
     editor::{EditMode, SdfCsgSphere, SdfSphereStamp, WorldEditor},
     ops::{AccumulateExt, BlendExt},
-    persistence::{AutosaveIntervalSecs, SaveChunkMessage},
 };
+pub use crate::storage::persistence::{AutosaveIntervalSecs, SaveChunkMessage, SaveDirectory};
 
 // Rendering, palettes and ray casts
 pub use crate::texture_palette::{

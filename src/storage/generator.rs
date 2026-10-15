@@ -7,12 +7,12 @@ use bevy::prelude::*;
 
 use crate::field::LOD;
 use crate::field::SDF;
-use crate::field::persistence::FieldSavePayload;
+use crate::storage::persistence::FieldSavePayload;
 
 /// A registered generator: pure function of chunk position + LOD, no ECS
 /// access. That purity is what makes it safe to clone into and run inside
 /// an `AsyncComputeTaskPool` task — see `start_chunk_loads` in
-/// `field::loading`.
+/// `storage::loading`.
 type GenerateFn = Arc<dyn Fn(IVec3, LOD) -> FieldSavePayload + Send + Sync>;
 
 #[derive(Resource, Default, Clone)]

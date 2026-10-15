@@ -4,12 +4,12 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use tarasaur::field::loading::ChunkDataTask;
+use tarasaur::storage::loading::ChunkDataTask;
 use tarasaur::{
     TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ShowChunkBounds},
     field::LOD,
-    field::generator::ChunkGeneratorRegistry,
+    storage::generator::ChunkGeneratorRegistry,
     voxel::cursor::{CursorHit, resolve_cursor_hit},
 };
 use tarasaur::{chunk::Chunk, field::SDF};

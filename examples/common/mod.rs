@@ -15,12 +15,12 @@ use bevy::{
 };
 use tarasaur::{
     chunk::CHUNK_SIZE,
-    field::generator::ChunkGeneratorRegistry,
     field::{
         LOD, MaterialField, VoxelMaterial,
         ops::{AccumulateExt, BlendExt},
     },
     num::{f32_from_u32, i16_from_f32, u8_from_f32, usize_from},
+    storage::generator::ChunkGeneratorRegistry,
     texture_palette::{PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette},
 };
 

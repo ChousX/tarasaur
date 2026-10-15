@@ -596,7 +596,7 @@ mod band_tests {
 
     #[test]
     fn downsample_converts_to_coarse_voxels() {
-        use crate::field::persistence::downsample_bytes;
+        use crate::storage::persistence::downsample_bytes;
         // A plane at world x = 5: distance in voxels of each LOD.
         let plane = |lod: LOD| -> Vec<f32> {
             let n = crate::num::usize_from(lod.size());

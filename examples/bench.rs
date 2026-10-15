@@ -74,11 +74,13 @@ use tarasaur::{
     field::{
         Field, LOD, MaterialField, SDF, VoxelField, VoxelMaterial,
         editor::{SdfCsgSphere, WorldEditor},
-        loading::MaxInFlightLoads,
-        persistence::AutosaveIntervalSecs,
     },
     grid::flatten_cube,
     num::{f32_from_u32, usize_from},
+    storage::{
+        loading::MaxInFlightLoads,
+        persistence::{AutosaveIntervalSecs, SaveDirectory},
+    },
     voxel::{
         VoxelDepthPrepass,
         arena::{ArenaConfig, VoxelChunkArenaSet},
@@ -313,19 +315,10 @@ fn main() -> AppExit {
         ..out
     };
 
-    // Saves resolve against the working directory: point it at an empty
-    // scratch world so every run generates the same terrain from scratch.
+    // An empty scratch save directory, so every run generates the same
+    // terrain from scratch and your saves are never read or written.
     let world_dir = manifest.join("target").join("bench-world");
     let _ = std::fs::remove_dir_all(&world_dir);
-    if let Err(e) =
-        std::fs::create_dir_all(&world_dir).and_then(|()| std::env::set_current_dir(&world_dir))
-    {
-        eprintln!(
-            "bench: can't use scratch world {}: {e}",
-            world_dir.display()
-        );
-        return AppExit::error();
-    }
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(render_plugin()).set(WindowPlugin {
@@ -349,6 +342,7 @@ fn main() -> AppExit {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     register_terrain(&mut app);
+    app.insert_resource(SaveDirectory(world_dir));
     let Some(msaa) = parse_msaa(flag("--msaa").as_deref()) else {
         return AppExit::error();
     };

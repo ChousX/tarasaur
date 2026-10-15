@@ -9,10 +9,11 @@ use crate::{
     chunk::ChunkPlugin,
     field::{
         Field, FieldsPlugin, MaterialField, SDF, VisibilityField, VoxelField, VoxelMaterial,
+        register_edits, surface::SurfaceCullPlugin,
+    },
+    storage::{
         loading::ChunkLoadingPlugin,
         persistence::{ChunkPersistencePlugin, register_saveable},
-        register_edits,
-        surface::SurfaceCullPlugin,
     },
     texture_palette::plugin::PalettePlugin,
     voxel::{VoxelRenderPlugin, register_field_upload},
@@ -97,8 +98,8 @@ mod tests {
             DirtyField, FieldsPlugin, LOD, MaterialField, VoxelField, VoxelMaterial,
             editor::{EditFieldMessage, EditMode},
             ops::{AccumulateExt, BlendExt},
-            persistence::ChunkPersistencePlugin,
         },
+        storage::persistence::ChunkPersistencePlugin,
         voxel::resident::ForceResident,
     };
 

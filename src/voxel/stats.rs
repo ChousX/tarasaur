@@ -16,7 +16,8 @@ use bevy::{
 use crate::{
     chunk::Chunk,
     field::systems::SdfReinitTask,
-    field::{LOD, TargetLOD, loading::ChunkDataTask},
+    field::{LOD, TargetLOD},
+    storage::loading::ChunkDataTask,
     voxel::{
         arena::{VoxelChunkArena, VoxelChunkArenaSet},
         draw::VoxelViewDraws,

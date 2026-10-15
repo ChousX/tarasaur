@@ -13,15 +13,18 @@ use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
 };
-use std::sync::{Mutex, PoisonError};
+use std::{
+    path::PathBuf,
+    sync::{Mutex, PoisonError},
+};
 
 use super::generator::ChunkGeneratorRegistry;
 use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin, chebyshev};
-use crate::field::persistence::{
-    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, PreparedField, SaveCache,
-    build_if_dirty, commit_save, read_save,
-};
 use crate::field::{LOD, MaxEditLod, TargetLOD};
+use crate::storage::persistence::{
+    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, PreparedField, SaveCache,
+    SaveDirectory, build_if_dirty, commit_save, read_save,
+};
 use bevy::ecs::system::SystemParam;
 
 /// In flight while data for `lod` is being produced off-thread. Its
@@ -71,9 +74,10 @@ fn make_task(
     generators: ChunkGeneratorRegistry,
     registry: ChunkPersistenceRegistry,
     cache: SaveCache,
+    dir: PathBuf,
 ) -> Task<Vec<FieldSavePayload>> {
     AsyncComputeTaskPool::get().spawn(async move {
-        if let Some(save) = read_save(&cache, pos)
+        if let Some(save) = read_save(&cache, &dir, pos)
             && save.header.lod >= lod
         {
             return save
@@ -133,6 +137,7 @@ pub(crate) struct LoadSources<'w> {
     generators: Res<'w, ChunkGeneratorRegistry>,
     registry: Res<'w, ChunkPersistenceRegistry>,
     cache: Res<'w, SaveCache>,
+    dir: Res<'w, SaveDirectory>,
     max: Res<'w, MaxEditLod>,
 }
 
@@ -188,7 +193,7 @@ pub(crate) fn start_chunk_loads(
                 continue;
             } // let JFA finish so the save has real distances
             if let Some((data, _)) = build_if_dirty(world, entity) {
-                commit_save(&sources.cache, data);
+                commit_save(&sources.cache, &sources.dir.0, data);
             }
         }
         commands.entity(entity).insert(ChunkDataTask {
@@ -198,6 +203,7 @@ pub(crate) fn start_chunk_loads(
                 (*sources.generators).clone(),
                 (*sources.registry).clone(),
                 (*sources.cache).clone(),
+                sources.dir.0.clone(),
             ),
             lod: target.0,
         });

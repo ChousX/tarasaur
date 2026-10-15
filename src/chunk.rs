@@ -407,7 +407,7 @@ fn plan_chunk_ops(
             None if keep => {}
             None => {
                 commands.queue(move |world: &mut World| {
-                    crate::field::persistence::flush_and_despawn(world, entity);
+                    crate::storage::persistence::flush_and_despawn(world, entity);
                 });
             }
         }

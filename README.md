@@ -24,7 +24,7 @@ hardware such as a Steam Deck.
 - **Editing.** World-space sphere and box brushes (`WorldEditor`), and exact
   CSG spheres (`SdfCsgSphere`). Edits that span chunks apply to every
   chunk they touch.
-- **Persistence.** Edited chunks autosave to `./saves/chunks/`. Saves load
+- **Persistence.** Edited chunks autosave to `./saves/chunks/` (`SaveDirectory`). Saves load
   before generators, and lower LODs are downsampled from the save.
 - **Triplanar texturing with PBR lighting.** A `TexturePalette` albedo
   array, plus an optional ARM array (ambient occlusion, roughness,
@@ -131,9 +131,9 @@ Render world: upload into per-LOD arena slot ─► pass1 (active cells) ─► 
 | `chunk` | Chunk entities, `ChunkManager`, `ChunkLoader` LOD bands, the spawn and despawn planner |
 | `field` | Field traits, `SDF`, `VisibilityField`, `MaterialField`, `EditableChunks`; `field::apron` builds padded volumes |
 | `grid` | Voxel grid layout: flattening, the apron, sampling between grids |
-| `field::loading` | Off-thread load tasks; installs fields and LOD atomically |
+| `storage::loading` | Off-thread load tasks; installs fields and LOD atomically |
 | `field::systems`, `ops`, `editor` | Edit messages, brushes, async jump-flood reinit |
-| `field::persistence` | Save files, save cache, autosave, downsampling |
+| `storage::persistence` | Save files, save cache, autosave, downsampling |
 | `field::surface` | Tags the chunks that can produce geometry (`HasSurface`) |
 | `voxel::extract` | Change-driven builds of padded volumes for the render world |
 | `voxel::arena` | GPU slot and vertex-range allocation per LOD |
@@ -157,6 +157,7 @@ one path in its module, and `tarasaur::prelude` gathers the common ones.
 | `RemeshBudget` | 4M cells | Cells re-meshed per frame. Past the budget, chunks keep their old mesh |
 | `MaxEditLod` | `High` | The only LOD that is edited and saved |
 | `AutosaveIntervalSecs` | 2.0 | Autosave period |
+| `SaveDirectory` | `./saves/chunks` | Where chunk saves are read and written |
 | `EditPinTimeout` | 2.0 s | How long an edited chunk stays at max LOD after the last edit |
 | `CursorQueryMode` | `Auto` | Cursor ray backend (Auto uses the CPU) |
 | `ShowChunkBounds` | absent | Insert it to draw chunk bounds, colored by LOD |

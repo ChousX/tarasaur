@@ -1,4 +1,5 @@
-//! Chunk saves: one postcard file per chunk under `./saves/chunks/`.
+//! Chunk saves: one postcard file per chunk in `SaveDirectory`
+//! (`./saves/chunks/` by default).
 //!
 //! Only max-LOD chunks with unsaved edits are written (autosave, manual
 //! `SaveChunkMessage`, or on despawn). Each saveable field registers a
@@ -8,17 +9,17 @@
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
 use crate::field::VoxelField;
-use crate::field::generator::ChunkGeneratorRegistry;
-use crate::field::loading::ChunkDataTask;
 use crate::field::{LOD, MaxEditLod};
 use crate::grid::flatten_cube;
 use crate::num::{f32_from_u32, usize_from};
+use crate::storage::generator::ChunkGeneratorRegistry;
+use crate::storage::loading::ChunkDataTask;
 use crate::{chunk::ReplanRequested, field::SDF};
 use crate::{field::DirtyField, field::systems::SdfReinitTask};
 use bevy::ecs::message::MessageReader;
@@ -45,9 +46,22 @@ pub struct ChunkSaveData {
     pub fields: Vec<FieldSavePayload>,
 }
 
+/// Where chunk saves are read and written. Set it before chunks load (e.g.
+/// insert it when building the app); relative paths resolve against the
+/// working directory.
+#[derive(Resource, Clone, Debug)]
+pub struct SaveDirectory(pub PathBuf);
+
+impl Default for SaveDirectory {
+    fn default() -> Self {
+        Self(PathBuf::from("./saves/chunks"))
+    }
+}
+
+/// The save file of the chunk at `p` in `dir`.
 #[must_use]
-pub fn chunk_path(p: IVec3) -> PathBuf {
-    PathBuf::from(format!("./saves/chunks/chunk_{}_{}_{}.bin", p.x, p.y, p.z))
+pub fn chunk_path(dir: &Path, p: IVec3) -> PathBuf {
+    dir.join(format!("chunk_{}_{}_{}.bin", p.x, p.y, p.z))
 }
 
 // ------------------------------------------------------------ save cache ----
@@ -78,21 +92,22 @@ impl SaveCache {
     }
 }
 
-pub(crate) fn read_save(cache: &SaveCache, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
+pub(crate) fn read_save(cache: &SaveCache, dir: &Path, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
     if let Some(hit) = cache.get(pos) {
         return Some(hit);
     }
-    let bytes = std::fs::read(chunk_path(pos)).ok()?;
+    let bytes = std::fs::read(chunk_path(dir, pos)).ok()?;
     postcard::from_bytes::<ChunkSaveData>(&bytes)
         .ok()
         .map(Arc::new)
 }
 
-pub(crate) fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
+pub(crate) fn commit_save(cache: &SaveCache, dir: &Path, data: ChunkSaveData) {
     let pos = data.header.chunk_pos;
     let data = Arc::new(data);
     lock(&cache.0.map).insert(pos, data.clone());
     let cache = cache.clone();
+    let path = chunk_path(dir, pos);
     AsyncComputeTaskPool::get()
         .spawn(async move {
             let _guard = lock(&cache.0.write_lock);
@@ -101,7 +116,6 @@ pub(crate) fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
             if !current.is_some_and(|c| Arc::ptr_eq(&c, &data)) {
                 return;
             }
-            let path = chunk_path(pos);
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
@@ -306,8 +320,8 @@ pub(crate) fn flush_and_despawn(world: &mut World, e: Entity) {
         return;
     }
     if let Some((data, _)) = build_if_dirty(world, e) {
-        let cache = world.resource::<SaveCache>().clone();
-        commit_save(&cache, data);
+        let cache = world.resource::<SaveCache>();
+        commit_save(cache, &world.resource::<SaveDirectory>().0, data);
     }
     if let Ok(em) = world.get_entity_mut(e) {
         em.despawn();
@@ -315,9 +329,13 @@ pub(crate) fn flush_and_despawn(world: &mut World, e: Entity) {
 }
 
 /// Saves `e` if it has unsaved changes and records the new save point.
-fn save_if_dirty(world: &World, cache: &SaveCache, commands: &mut Commands, e: Entity) {
+fn save_if_dirty(world: &World, commands: &mut Commands, e: Entity) {
     if let Some((data, fp)) = build_if_dirty(world, e) {
-        commit_save(cache, data);
+        commit_save(
+            world.resource::<SaveCache>(),
+            &world.resource::<SaveDirectory>().0,
+            data,
+        );
         commands.entity(e).insert(ChunkSaveState(fp));
     }
 }
@@ -334,7 +352,6 @@ pub(crate) fn autosave_dirty_chunks(
     world: &World,
     time: Res<Time>,
     interval: Res<AutosaveIntervalSecs>,
-    cache: Res<SaveCache>,
     chunks: Query<Entity, (With<Chunk>, With<ChunkSaveState>)>,
     mut acc: Local<f32>,
     mut commands: Commands,
@@ -345,7 +362,7 @@ pub(crate) fn autosave_dirty_chunks(
     }
     *acc = 0.0;
     for e in &chunks {
-        save_if_dirty(world, &cache, &mut commands, e);
+        save_if_dirty(world, &mut commands, e);
     }
 }
 
@@ -357,7 +374,6 @@ pub(crate) fn generic_save_chunk_system(
     mut events: MessageReader<SaveChunkMessage>,
     world: &World,
     chunk_manager: Res<ChunkManager>,
-    cache: Res<SaveCache>,
     mut commands: Commands,
 ) {
     for SaveChunkMessage(pos) in events.read() {
@@ -365,7 +381,7 @@ pub(crate) fn generic_save_chunk_system(
             warn!("Cannot save chunk at {:?}: not loaded", pos);
             continue;
         };
-        save_if_dirty(world, &cache, &mut commands, e);
+        save_if_dirty(world, &mut commands, e);
     }
 }
 
@@ -375,6 +391,7 @@ impl Plugin for ChunkPersistencePlugin {
         app.init_resource::<ChunkPersistenceRegistry>()
             .init_resource::<ChunkGeneratorRegistry>()
             .init_resource::<SaveCache>()
+            .init_resource::<SaveDirectory>()
             .init_resource::<MaxEditLod>()
             .init_resource::<AutosaveIntervalSecs>()
             .add_message::<SaveChunkMessage>()
