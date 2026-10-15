@@ -2,8 +2,8 @@
 
 use bevy::prelude::*;
 use tarasaur::{
-    LOD, SDF,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
+    field::{LOD, SDF},
     prelude::*,
 };
 

@@ -2,9 +2,11 @@
 //! between voxels at mesh and fragment time, never in the stored data.
 
 use crate::{
-    ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
+    field::{
+        ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice,
+        ops::{AccumulateExt, BlendExt},
+    },
     grid::{flatten_with_size, nearest_neighbor_sample},
-    ops::{AccumulateExt, BlendExt},
 };
 
 use super::{Field, LOD};

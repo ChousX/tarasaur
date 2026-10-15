@@ -11,7 +11,7 @@
 //! 3. [`field`]: per-chunk voxel grids. `SDF` (shape), `VisibilityField`
 //!    (optional mask) and `MaterialField<M>` (opt-in). Edits go through
 //!    `WorldEditor` / CSG messages, only at `MaxEditLod`.
-//! 4. [`voxel::extract`]: changed chunks get padded volumes (own voxels plus
+//! 4. `voxel::extract`: changed chunks get padded volumes (own voxels plus
 //!    a 2-voxel apron from neighbours) built in parallel and handed to the
 //!    render world.
 //! 5. [`voxel`]: volumes are packed into GPU arenas and meshed with surface
@@ -33,6 +33,4 @@ pub mod prelude;
 pub mod texture_palette;
 pub mod voxel;
 
-pub use chunk::*;
-pub use field::*;
 pub use plugin::TarasaurPlugin;

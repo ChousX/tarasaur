@@ -7,13 +7,16 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use tarasaur::editor::WorldEditor;
+use tarasaur::field::editor::WorldEditor;
 use tarasaur::num::{f32_from_i32, f32_from_u32, i16_from_f32, i32_from_f32, usize_from};
 use tarasaur::{
-    Field, LOD, MaterialField, SDF, TarasaurPlugin, VisibilityField, VoxelDataSlice, VoxelMaterial,
+    TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::MaterialFieldPlugin,
-    ops::{AccumulateExt, BlendExt},
+    field::{
+        Field, LOD, MaterialField, SDF, VisibilityField, VoxelDataSlice, VoxelMaterial,
+        ops::{AccumulateExt, BlendExt},
+    },
     texture_palette::{
         asset::TexturePalette, builder::PaletteBuilder, plugin::ActivePalette,
         properties::PaletteMaterial,

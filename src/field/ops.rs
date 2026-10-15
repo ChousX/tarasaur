@@ -370,7 +370,10 @@ impl SignedDistance for f32 {
 #[cfg(test)]
 mod tests {
     use super::{Cuboid, FieldBoxOps, Vec3};
-    use crate::{LOD, VisibilityField, field::Field};
+    use crate::{
+        field::Field,
+        field::{LOD, VisibilityField},
+    };
 
     fn hidden_count(field: &VisibilityField) -> usize {
         let n = field.size().x;

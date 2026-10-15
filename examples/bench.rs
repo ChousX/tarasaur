@@ -66,21 +66,24 @@ use common::{
 };
 use renderdoc::{RenderDoc, V141};
 use tarasaur::{
-    FieldLOD, LOD, MaterialField, SDF, TarasaurPlugin, VoxelDataSlice, VoxelMaterial,
+    TarasaurPlugin,
     chunk::{
         CHUNK_SIZE, ChunkLoader, ChunkManager, overlapping_chunks, update_cursor_focus,
         world_pos_to_chunk_pos,
     },
-    editor::{SdfCsgSphere, WorldEditor},
     field::{Field, MaterialFieldPlugin},
+    field::{
+        FieldLOD, LOD, MaterialField, SDF, VoxelDataSlice, VoxelMaterial,
+        editor::{SdfCsgSphere, WorldEditor},
+        loading::MaxInFlightLoads,
+        persistence::AutosaveIntervalSecs,
+    },
     grid::flatten_cube,
-    loading::MaxInFlightLoads,
     num::{f32_from_u32, usize_from},
-    persistence::AutosaveIntervalSecs,
     voxel::{
+        VoxelDepthPrepass,
         arena::{ArenaConfig, VoxelChunkArenaSet},
         cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
-        pipeline::VoxelDepthPrepass,
         query::{PendingVoxelQueries, VoxelQueryResults},
         stats,
         terrain_ray::TerrainRay,

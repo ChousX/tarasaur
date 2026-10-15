@@ -4,8 +4,8 @@
 //! Values are in voxels of the chunk's own LOD, negative inside, clamped to
 //! `±SDF_BAND`. The GPU copy is snorm16 (`quantize_sdf`).
 
+use crate::field::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice};
 use crate::num::{f32_from_i32, f32_from_u32, i16_from_f32};
-use crate::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, Versionable, VoxelDataSlice};
 
 use super::{Field, LOD};
 use crate::grid::{NEIGHBORS_MASK, PADDING, flatten_cube, sample_neighbor};
@@ -591,11 +591,14 @@ pub fn compute_sdf_distances(data: &mut [f32], size: u32) {
 #[cfg(test)]
 mod band_tests {
     use super::{SDF, SDF_BAND};
-    use crate::{FieldFromRaw, LOD, field::Field};
+    use crate::{
+        field::Field,
+        field::{FieldFromRaw, LOD},
+    };
 
     #[test]
     fn downsample_converts_to_coarse_voxels() {
-        use crate::persistence::downsample_bytes;
+        use crate::field::persistence::downsample_bytes;
         // A plane at world x = 5: distance in voxels of each LOD.
         let plane = |lod: LOD| -> Vec<f32> {
             let n = crate::num::usize_from(lod.size());
@@ -621,7 +624,7 @@ mod band_tests {
 
     #[test]
     fn border_versions_only_bump_for_touched_faces() {
-        use crate::Versionable;
+        use crate::field::Versionable;
         let n = LOD::Lowest.volume();
         let mut sdf = SDF::from_raw(LOD::Lowest, vec![1.0; n]);
         sdf.set(3, 3, 3, -1.0); // interior of a 4^3 grid: no neighbour reads it

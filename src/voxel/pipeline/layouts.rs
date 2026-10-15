@@ -6,7 +6,7 @@ use bevy::render::render_resource::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages,
 };
 
-use crate::LOD;
+use crate::field::LOD;
 
 /// A read-write or read-only storage buffer binding, bound to `ShaderStages`.
 pub const fn storage_buffer_entry(

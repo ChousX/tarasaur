@@ -9,10 +9,10 @@ use common::{
     FlyCam, TerrainMaterial, fly_cam_system, register_terrain, render_plugin, setup_terrain_palette,
 };
 use tarasaur::{
-    LOD, SDF, TarasaurPlugin,
+    TarasaurPlugin,
     chunk::ChunkLoader,
-    editor::WorldEditor,
     field::MaterialFieldPlugin,
+    field::{LOD, SDF, editor::WorldEditor},
     voxel::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
 };
 

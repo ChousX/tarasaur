@@ -4,14 +4,15 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use tarasaur::loading::ChunkDataTask;
-use tarasaur::{Chunk, SDF};
+use tarasaur::field::loading::ChunkDataTask;
 use tarasaur::{
-    LOD, TarasaurPlugin,
+    TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ShowChunkBounds},
+    field::LOD,
     field::generator::ChunkGeneratorRegistry,
     voxel::cursor::{CursorHit, resolve_cursor_hit},
 };
+use tarasaur::{chunk::Chunk, field::SDF};
 
 fn main() {
     let mut app = App::new();

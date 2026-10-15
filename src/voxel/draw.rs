@@ -29,7 +29,7 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE,
+    chunk::CHUNK_SIZE,
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
         arena::{VoxelChunkArena, VoxelChunkArenaSet},

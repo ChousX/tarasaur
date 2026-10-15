@@ -1,19 +1,29 @@
 //! Common imports: `use tarasaur::prelude::*;`.
+//!
+//! Everything here also has one canonical path in its module; the prelude
+//! only gathers what most apps touch.
 
-// Core Plugin & Main Exports
 pub use crate::plugin::TarasaurPlugin;
 
-// Re-export Bevy's Aabb for spatial bounds edits
-pub use bevy::camera::primitives::Aabb;
+// Chunks and streaming
+pub use crate::chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, ShowChunkBounds};
+pub use crate::field::generator::ChunkGeneratorRegistry;
 
-// Primary Field Types & Traits
+// Fields and editing
 pub use crate::field::{
-    FieldsPlugin, SDF, VisibilityField,
-    editor::*,
-    persistence::{ChunkPersistencePlugin, RegisterSaveableFieldExt},
+    Field, LOD, MaterialField, MaterialFieldPlugin, MaxEditLod, SDF, TargetLOD, VisibilityField,
+    VoxelMaterial,
+    editor::{EditMode, SdfCsgSphere, SdfSphereStamp, WorldEditor},
+    ops::{AccumulateExt, BlendExt},
+    persistence::{AutosaveIntervalSecs, RegisterSaveableFieldExt, SaveChunkMessage},
 };
 
-// Voxel & Chunk Management APIs
-pub use crate::chunk::{ChunkManager, ChunkPlugin};
-// Render Pipeline Types
-pub use crate::voxel::VoxelRenderPlugin;
+// Rendering, palettes and ray casts
+pub use crate::texture_palette::{
+    PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette,
+};
+pub use crate::voxel::{
+    VoxelDepthPrepass,
+    cursor::{CursorBrush, CursorHit, CursorQueryMode},
+    terrain_ray::TerrainRay,
+};

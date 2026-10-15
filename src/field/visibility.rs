@@ -3,7 +3,7 @@
 
 use super::Field;
 use crate::{
-    ApronSample, ExtractGate, FieldFromRaw, FieldLOD, LOD, Versionable, VoxelDataSlice,
+    field::{ApronSample, ExtractGate, FieldFromRaw, FieldLOD, LOD, Versionable, VoxelDataSlice},
     grid::{flatten_with_size, nearest_neighbor_sample},
     num::usize_from,
 };

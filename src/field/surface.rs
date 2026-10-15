@@ -6,8 +6,8 @@ use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
 use crate::{
-    SDF,
     chunk::{Chunk, ChunkManager, ChunkPosition},
+    field::SDF,
     grid::NEIGHBORS_MASK,
 };
 

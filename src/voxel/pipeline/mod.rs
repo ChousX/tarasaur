@@ -1,7 +1,7 @@
 //! Pipelines and bind groups: the meshing and query compute pipelines, the
 //! PBR raster pipeline (one per view key) and the palette material.
 
-pub(crate) mod layouts;
+pub mod layouts;
 use bevy::{
     mesh::VertexBufferLayout,
     pbr::{
@@ -45,10 +45,10 @@ use crate::{
 
 #[derive(Resource)]
 pub struct VoxelPipelineLayouts {
-    pub pass1_surface_layout: BindGroupLayout,
-    pub pass3_surface_layout: BindGroupLayout,
-    pub raster_chunk_visibility_layout: BindGroupLayout,
-    pub query_layout: BindGroupLayout,
+    pub pass1_surface: BindGroupLayout,
+    pub pass3_surface: BindGroupLayout,
+    pub raster_chunk_visibility: BindGroupLayout,
+    pub query: BindGroupLayout,
 }
 
 impl FromWorld for VoxelPipelineLayouts {
@@ -58,28 +58,28 @@ impl FromWorld for VoxelPipelineLayouts {
             render_device.create_bind_group_layout(Some(label), &entries)
         };
         Self {
-            pass1_surface_layout: layout(
+            pass1_surface: layout(
                 "voxel_surface_pass1_layout",
                 layouts::pass1_surface_entries(),
             ),
-            pass3_surface_layout: layout(
+            pass3_surface: layout(
                 "voxel_surface_pass3_layout",
                 layouts::pass3_surface_entries(),
             ),
-            raster_chunk_visibility_layout: layout(
+            raster_chunk_visibility: layout(
                 "voxel_raster_chunk_visibility_layout",
                 layouts::raster_chunk_visibility_entries(),
             ),
-            query_layout: layout("voxel_query_layout", layouts::query_entries()),
+            query: layout("voxel_query_layout", layouts::query_entries()),
         }
     }
 }
 
 #[derive(Resource)]
 pub struct VoxelComputePipeline {
-    pub pass1_pipeline_id: CachedComputePipelineId,
-    pub pass3_pipeline_id: CachedComputePipelineId,
-    pub query_pipeline_id: CachedComputePipelineId,
+    pub pass1: CachedComputePipelineId,
+    pub pass3: CachedComputePipelineId,
+    pub query: CachedComputePipelineId,
 }
 
 impl FromWorld for VoxelComputePipeline {
@@ -106,7 +106,7 @@ impl FromWorld for VoxelComputePipeline {
         };
         Self {
             // Active cells and their vertex slots.
-            pass1_pipeline_id: queue(
+            pass1: queue(
                 "surface_nets_pass1_pipeline",
                 "voxel_pass1_pipeline_layout",
                 layouts::pass1_surface_entries(),
@@ -114,7 +114,7 @@ impl FromWorld for VoxelComputePipeline {
                 "cs_main",
             ),
             // Vertices, indices and indirect arguments, per active cell.
-            pass3_pipeline_id: queue(
+            pass3: queue(
                 "surface_nets_pass3_pipeline",
                 "voxel_pass3_pipeline_layout",
                 layouts::pass3_surface_entries(),
@@ -122,7 +122,7 @@ impl FromWorld for VoxelComputePipeline {
                 "cs_main",
             ),
             // Cursor/raycast query: single-thread workgroups, one per query.
-            query_pipeline_id: queue(
+            query: queue(
                 "voxel_cursor_query_pipeline",
                 "voxel_query_pipeline_layout",
                 layouts::query_entries(),

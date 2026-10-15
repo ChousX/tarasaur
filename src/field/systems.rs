@@ -12,11 +12,14 @@ use super::{
     ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
 };
 use crate::{
-    CHUNK_SIZE, ChunkPosition, DirtyField, MaxEditLod, VisibilityField,
+    chunk::{CHUNK_SIZE, ChunkPosition},
     chunk::{ChunkManager, overlapping_chunks},
-    editor::{SdfCsgSphere, SdfSphereStamp},
+    field::{
+        DirtyField, MaxEditLod, VisibilityField,
+        editor::{SdfCsgSphere, SdfSphereStamp},
+        ops::{FieldSphereOps, ShapeEditOps},
+    },
     num::f32_from_u32,
-    ops::{FieldSphereOps, ShapeEditOps},
     voxel::resident::ForceResident,
 };
 use bevy::{

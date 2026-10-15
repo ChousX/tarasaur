@@ -11,24 +11,23 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::marker::PhantomData;
 
-pub mod apron;
+pub(crate) mod apron;
 pub mod editor;
 pub mod generator;
 pub mod loading;
-pub mod lod;
-pub mod material;
+mod lod;
+mod material;
 pub mod ops;
 pub mod persistence;
 mod plugin;
-pub mod sdf;
-pub mod surface;
-pub mod systems;
-pub mod visibility;
+pub(crate) mod sdf;
+pub(crate) mod surface;
+pub(crate) mod systems;
+mod visibility;
 pub use lod::{LOD, MaxEditLod, TargetLOD};
-pub use material::MaterialField;
-pub use material::VoxelMaterial;
-pub use plugin::*;
-pub use sdf::SDF;
+pub use material::{MaterialField, VoxelMaterial};
+pub use plugin::{AppFieldExt, FieldSet, FieldsPlugin, MaterialFieldPlugin};
+pub use sdf::{SDF, SDF_BAND, quantize_sdf};
 pub use visibility::VisibilityField;
 
 /// Marks a chunk whose `F` was edited this cycle. For `SDF` it means the

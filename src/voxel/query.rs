@@ -25,7 +25,8 @@ use bevy::{
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    CHUNK_SIZE, LOD,
+    chunk::CHUNK_SIZE,
+    field::LOD,
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
         arena::VoxelChunkArenaSet,
@@ -269,7 +270,7 @@ impl VoxelQueryBuffers {
                     }
                     device.create_bind_group(
                         Some("voxel_query_bind_group"),
-                        &layouts.query_layout,
+                        &layouts.query,
                         &entries(&bufs),
                     )
                 })
@@ -423,8 +424,7 @@ pub fn dispatch_voxel_query_pass(
     if count == 0 {
         return;
     }
-    let Some(pipeline) = pipeline_cache.get_compute_pipeline(compute_pipeline.query_pipeline_id)
-    else {
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(compute_pipeline.query) else {
         return;
     };
 

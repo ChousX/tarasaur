@@ -9,19 +9,19 @@ use bevy::render::{Render, RenderApp};
 use bevy::shape::{Cuboid, Sphere};
 
 use crate::chunk::NewChunkSpawned;
-use crate::editor::{SdfCsgSphere, SdfSphereStamp};
+use crate::field::editor::{SdfCsgSphere, SdfSphereStamp};
 use crate::field::material::VoxelMaterial;
-use crate::field::{MaterialField, SDF, VisibilityField};
-use crate::persistence::RegisterSaveableFieldExt;
-use crate::systems::{
+use crate::field::persistence::RegisterSaveableFieldExt;
+use crate::field::systems::{
     clear_dirty, detect_topology_desync, process_sdf_csg_spheres, process_sdf_sphere_stamps,
     resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
+use crate::field::{FieldLOD, FieldNew, LOD, TargetLOD};
+use crate::field::{MaterialField, SDF, VisibilityField};
 use crate::voxel::{
     extract::add_field_extraction,
     upload::{prepare_material_for_arena, prepare_voxel_arena},
 };
-use crate::{FieldLOD, FieldNew, LOD, TargetLOD};
 
 use super::{
     Field,
@@ -180,11 +180,13 @@ mod tests {
 
     use super::{FieldsPlugin, MaterialFieldPlugin};
     use crate::{
-        DirtyField, LOD, MaterialField, Versionable, VoxelMaterial,
         chunk::{Chunk, ChunkManager, ChunkPosition},
-        editor::{EditFieldMessage, EditMode},
-        ops::{AccumulateExt, BlendExt},
-        persistence::ChunkPersistencePlugin,
+        field::{
+            DirtyField, LOD, MaterialField, Versionable, VoxelMaterial,
+            editor::{EditFieldMessage, EditMode},
+            ops::{AccumulateExt, BlendExt},
+            persistence::ChunkPersistencePlugin,
+        },
         voxel::resident::ForceResident,
     };
 

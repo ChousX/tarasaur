@@ -3,10 +3,11 @@
 //! follows the (2-3 frame late) hit under the cursor.
 
 use bevy::prelude::*;
-use tarasaur::DirtyField;
+use tarasaur::field::DirtyField;
 use tarasaur::{
-    Field, LOD, SDF, TarasaurPlugin,
+    TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
+    field::{Field, LOD, SDF},
     voxel::cursor::{CursorBrush, CursorHit, CursorQueryMode, resolve_cursor_hit},
 };
 

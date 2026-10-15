@@ -9,7 +9,7 @@ use bevy::{
 
 use crate::{
     chunk::update_cursor_focus,
-    editor::SdfCsgSphere,
+    field::editor::SdfCsgSphere,
     voxel::{
         query::{PendingVoxelQueries, VoxelQueryResults},
         terrain_ray::TerrainRay,

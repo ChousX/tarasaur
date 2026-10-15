@@ -22,8 +22,8 @@ use bevy::{
 };
 
 use crate::{
-    ApronSample, Chunk, ChunkManager, ChunkPosition, ExtractGate, LOD, Versionable,
-    VisibilityField,
+    chunk::{Chunk, ChunkManager, ChunkPosition},
+    field::{ApronSample, ExtractGate, LOD, Versionable, VisibilityField},
     field::{
         apron::{fill_apron, seam_lod_ranks},
         surface::HasSurface,

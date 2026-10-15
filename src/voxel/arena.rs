@@ -23,7 +23,7 @@ use bevy::{
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    LOD,
+    field::LOD,
     num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from},
     voxel::{
         types::{CreateStorage, DrawIndexedIndirectArgs, entries},
@@ -468,7 +468,7 @@ fn batch_uniform_buffer(
     wg_size: u32,
 ) -> Buffer {
     let chunk_voxels = sizes.texture_size.saturating_sub(2);
-    let voxel_size = crate::CHUNK_SIZE / f32_from_u32(chunk_voxels);
+    let voxel_size = crate::chunk::CHUNK_SIZE / f32_from_u32(chunk_voxels);
     make_batch_uniform_buffer(
         render_device,
         label,
@@ -487,7 +487,7 @@ fn arena_bind_groups(
 ) -> [BindGroup; 3] {
     let pass1 = render_device.create_bind_group(
         Some("arena_pass1_bind_group"),
-        &layouts.pass1_surface_layout,
+        &layouts.pass1_surface,
         &entries(&[
             (0, &b.sdf),
             (1, &b.active_cells),
@@ -504,7 +504,7 @@ fn arena_bind_groups(
     );
     let pass3 = render_device.create_bind_group(
         Some("arena_pass3_bind_group"),
-        &layouts.pass3_surface_layout,
+        &layouts.pass3_surface,
         &entries(&[
             (0, &b.sdf),
             (1, &b.active_cells),
@@ -524,7 +524,7 @@ fn arena_bind_groups(
     );
     let raster = render_device.create_bind_group(
         Some("arena_raster_chunk_bind_group"),
-        &layouts.raster_chunk_visibility_layout,
+        &layouts.raster_chunk_visibility,
         &entries(&[
             (0, &b.chunk_meta),
             (1, &b.visibility_mask),

@@ -23,7 +23,8 @@ use bevy::{
 };
 
 use crate::{
-    CHUNK_SIZE, LOD, MaterialField, SDF, VisibilityField, VoxelMaterial,
+    chunk::CHUNK_SIZE,
+    field::{LOD, MaterialField, SDF, VisibilityField, VoxelMaterial},
     voxel::extract::ExtractedChunkField,
     voxel::{
         arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
@@ -493,7 +494,7 @@ fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::count_active_cells;
-    use crate::{VoxelDataSlice, field::SDF, grid::flatten_cube, num::usize_from};
+    use crate::{field::SDF, field::VoxelDataSlice, grid::flatten_cube, num::usize_from};
 
     fn volume(n: u32, inside: &[(u32, u32, u32)]) -> Vec<u8> {
         let mut v = vec![1.0f32; usize_from(n).pow(3)];

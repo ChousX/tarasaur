@@ -22,7 +22,7 @@ use bevy::math::{IVec3, UVec3, Vec3};
 use common::terrain_height;
 use tarasaur::{
     chunk::CHUNK_SIZE,
-    field::sdf::{SDF_BAND, quantize_sdf},
+    field::{SDF_BAND, quantize_sdf},
     num::{f32_from_i32, f32_from_u32, f32_from_usize, usize_from},
 };
 

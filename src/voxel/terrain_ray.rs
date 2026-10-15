@@ -4,9 +4,9 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
-    SDF,
     chunk::{CHUNK_SIZE, Chunk, ChunkManager, world_pos_to_chunk_pos},
     field::Field,
+    field::SDF,
     num::f32_from_u32,
 };
 

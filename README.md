@@ -39,10 +39,7 @@ hardware such as a Steam Deck.
 
 ```rust
 use bevy::prelude::*;
-use tarasaur::{
-    CHUNK_SIZE, LOD, TarasaurPlugin, chunk::ChunkLoader,
-    field::generator::ChunkGeneratorRegistry,
-};
+use tarasaur::prelude::*;
 
 fn main() {
     let mut app = App::new();
@@ -145,7 +142,9 @@ Render world: upload into per-LOD arena slot ─► pass1 (active cells) ─► 
 | `texture_palette` | `TexturePalette` asset, builder, validation |
 | `num` | The checked numeric casts (the crate denies `as`) |
 
-Every module starts with a `//!` summary. `cargo doc --open` shows them all.
+Every module starts with a `//!` summary. `cargo doc --open` shows the public
+API; add `--document-private-items` for the internal modules too. Each item has
+one path in its module, and `tarasaur::prelude` gathers the common ones.
 
 ## Tuning
 

@@ -41,10 +41,7 @@ pub fn dispatch_voxel_compute_passes_batched(
         return;
     }
 
-    let ids = [
-        ("pass1", pipeline.pass1_pipeline_id),
-        ("pass3", pipeline.pass3_pipeline_id),
-    ];
+    let ids = [("pass1", pipeline.pass1), ("pass3", pipeline.pass3)];
     let [Some(pass1_pipeline), Some(pass3_pipeline)] =
         ids.map(|(_, id)| pipeline_cache.get_compute_pipeline(id))
     else {

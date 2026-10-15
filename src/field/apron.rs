@@ -5,7 +5,8 @@
 use bevy::prelude::*;
 
 use crate::{
-    ApronSample, ChunkManager, ChunkPosition, LOD, VoxelDataSlice,
+    chunk::{ChunkManager, ChunkPosition},
+    field::{ApronSample, LOD, VoxelDataSlice},
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
     num::f32_from_u32,
 };
@@ -92,7 +93,7 @@ pub fn seam_lod_ranks<T: Component + VoxelDataSlice>(
 /// Same-LOD neighbours are copied as-is. Other LODs are resampled at this
 /// chunk's spacing but keep the neighbour's voxel units, so SDF values never
 /// clip at `SDF_BAND`; pass3 rescales them (see [`seam_lod_ranks`]).
-pub(crate) fn fill_apron_with<'a, T>(
+pub fn fill_apron_with<'a, T>(
     vol: &mut [T::Elem],
     size: u32,
     neighbor: impl Fn(IVec3) -> Option<(&'a [T::Elem], u32)>,
@@ -151,8 +152,8 @@ pub(crate) fn fill_apron_with<'a, T>(
 #[cfg(test)]
 mod tests {
     use crate::{
-        VoxelDataSlice,
         field::SDF,
+        field::VoxelDataSlice,
         grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
         num::usize_from,
     };
@@ -161,7 +162,7 @@ mod tests {
     type Neighbors<E> = [Option<(Vec<E>, u32)>; 7];
 
     /// The original apron fill: always the interpolating `sample_apron`.
-    fn reference_apron<T: crate::ApronSample>(
+    fn reference_apron<T: crate::field::ApronSample>(
         vol: &mut [T::Elem],
         size: u32,
         neighbors: &Neighbors<T::Elem>,
@@ -210,7 +211,7 @@ mod tests {
 
     /// Fills a `size`^3 interior and the 7 neighbours, then checks the fast
     /// apron fill against the reference, compared as uploaded bytes.
-    fn check_apron<T: crate::ApronSample>(
+    fn check_apron<T: crate::field::ApronSample>(
         size: u32,
         neighbor_sizes: [Option<u32>; 7],
         value: impl Fn(&mut u64) -> T::Elem,

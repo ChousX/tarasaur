@@ -16,7 +16,10 @@ use bevy::{
 };
 use std::collections::VecDeque;
 
-use crate::{LOD, TargetLOD, voxel::cursor::CursorHit};
+use crate::{
+    field::{LOD, TargetLOD},
+    voxel::cursor::CursorHit,
+};
 
 pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
@@ -350,14 +353,14 @@ fn effective_distance(
 }
 
 #[derive(Clone, Copy)]
-pub struct ChunkOp {
+pub(crate) struct ChunkOp {
     dist: i32,
     pos: IVec3,
     lod: LOD,
 }
 
 #[derive(Resource, Default)]
-pub struct ChunkOpQueue(VecDeque<ChunkOp>);
+pub(crate) struct ChunkOpQueue(VecDeque<ChunkOp>);
 
 /// Recomputes the desired state. Despawns are immediate; spawns and LOD
 /// changes go into a nearest-first queue drained by `apply_chunk_ops`.
@@ -404,7 +407,7 @@ fn plan_chunk_ops(
             None if keep => {}
             None => {
                 commands.queue(move |world: &mut World| {
-                    crate::persistence::flush_and_despawn(world, entity);
+                    crate::field::persistence::flush_and_despawn(world, entity);
                 });
             }
         }
@@ -517,7 +520,7 @@ impl Default for EditPinTimeout {
 #[derive(Resource, Default)]
 pub struct ReplanRequested(pub bool);
 
-pub fn expire_edit_pins(
+pub(crate) fn expire_edit_pins(
     time: Res<Time>,
     timeout: Res<EditPinTimeout>,
     mut pins: Query<(Entity, &mut EditPin)>,

@@ -5,7 +5,10 @@
 //! generators. `resolve_chunk_data_tasks` builds the fields on the compute
 //! pool and `install_chunk` swaps them and the `LOD` in atomically.
 
-use crate::{DirtyField, SDF, VisibilityField, field::systems::SdfReinitTask};
+use crate::{
+    field::systems::SdfReinitTask,
+    field::{DirtyField, SDF, VisibilityField},
+};
 use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
@@ -14,11 +17,11 @@ use std::sync::{Mutex, PoisonError};
 
 use super::generator::ChunkGeneratorRegistry;
 use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin, chebyshev};
-use crate::persistence::{
+use crate::field::persistence::{
     ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, PreparedField, SaveCache,
     build_if_dirty, commit_save, read_save,
 };
-use crate::{LOD, MaxEditLod, TargetLOD};
+use crate::field::{LOD, MaxEditLod, TargetLOD};
 use bevy::ecs::system::SystemParam;
 
 /// In flight while data for `lod` is being produced off-thread. Its
@@ -126,7 +129,7 @@ type LoadCandidate = (
 
 /// Where a load gets its data: saves first, then the generators.
 #[derive(SystemParam)]
-pub struct LoadSources<'w> {
+pub(crate) struct LoadSources<'w> {
     generators: Res<'w, ChunkGeneratorRegistry>,
     registry: Res<'w, ChunkPersistenceRegistry>,
     cache: Res<'w, SaveCache>,
@@ -135,7 +138,7 @@ pub struct LoadSources<'w> {
 
 /// How many more loads may start this frame.
 #[derive(SystemParam)]
-pub struct LoadSlots<'w, 's> {
+pub(crate) struct LoadSlots<'w, 's> {
     in_flight: Query<'w, 's, (), With<ChunkDataTask>>,
     cap: Res<'w, MaxInFlightLoads>,
 }
@@ -146,7 +149,7 @@ impl LoadSlots<'_, '_> {
     }
 }
 
-pub fn start_chunk_loads(
+pub(crate) fn start_chunk_loads(
     world: &World,
     chunks: Query<LoadCandidate, (With<Chunk>, Without<ChunkDataTask>)>,
     loaders: Query<&CurrentChunk, With<ChunkLoader>>,
@@ -202,7 +205,7 @@ pub fn start_chunk_loads(
     }
 }
 
-pub fn resolve_chunk_data_tasks(
+pub(crate) fn resolve_chunk_data_tasks(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut ChunkDataTask, &TargetLOD)>,
     registry: Res<ChunkPersistenceRegistry>,

@@ -16,11 +16,11 @@ use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
 use crate::field::generator::ChunkGeneratorRegistry;
 use crate::field::loading::ChunkDataTask;
 use crate::field::{FieldFromRaw, FieldNew, Versionable, VoxelDataSlice};
+use crate::field::{LOD, MaxEditLod};
 use crate::grid::flatten_cube;
 use crate::num::{f32_from_u32, usize_from};
-use crate::{DirtyField, field::systems::SdfReinitTask};
-use crate::{LOD, MaxEditLod};
-use crate::{SDF, chunk::ReplanRequested};
+use crate::{chunk::ReplanRequested, field::SDF};
+use crate::{field::DirtyField, field::systems::SdfReinitTask};
 use bevy::ecs::component::Mutable;
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
@@ -58,7 +58,7 @@ pub fn chunk_path(p: IVec3) -> PathBuf {
 /// Load tasks consult it before disk, so a downgrade -> re-upgrade can never
 /// read a stale file, and a despawn can't lose a pending write.
 #[derive(Resource, Clone, Default)]
-pub struct SaveCache(Arc<SaveCacheInner>);
+pub(crate) struct SaveCache(Arc<SaveCacheInner>);
 
 #[derive(Default)]
 struct SaveCacheInner {
@@ -79,7 +79,7 @@ impl SaveCache {
     }
 }
 
-pub fn read_save(cache: &SaveCache, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
+pub(crate) fn read_save(cache: &SaveCache, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
     if let Some(hit) = cache.get(pos) {
         return Some(hit);
     }
@@ -89,7 +89,7 @@ pub fn read_save(cache: &SaveCache, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
         .map(Arc::new)
 }
 
-pub fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
+pub(crate) fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
     let pos = data.header.chunk_pos;
     let data = Arc::new(data);
     lock(&cache.0.map).insert(pos, data.clone());
@@ -134,10 +134,10 @@ pub fn commit_save(cache: &SaveCache, data: ChunkSaveData) {
 /// Sum of field versions at the last save (or install). Differs from the
 /// current sum => unsaved edits.
 #[derive(Component, Clone, Copy, Debug)]
-pub struct ChunkSaveState(pub u64);
+pub(crate) struct ChunkSaveState(pub u64);
 
 #[derive(Clone, Copy)]
-pub struct FieldVTable {
+pub(crate) struct FieldVTable {
     pub type_id: &'static str,
     pub save: fn(&World, Entity) -> Option<Vec<u8>>,
     pub version: fn(&World, Entity) -> u64,
@@ -154,11 +154,11 @@ pub struct FieldVTable {
 /// A trait rather than a boxed `FnOnce(&mut EntityWorldMut)`: that closure
 /// type is higher-ranked, and returning it from a `TaskPool::scope` task
 /// makes the compiler demand the scope's borrows be `'static`.
-pub trait ApplyField: Send {
+pub(crate) trait ApplyField: Send {
     fn apply(self: Box<Self>, em: &mut EntityWorldMut<'_>);
 }
 
-pub type PreparedField = Box<dyn ApplyField>;
+pub(crate) type PreparedField = Box<dyn ApplyField>;
 
 /// Inserts a built field.
 struct InsertField<F>(F);
@@ -179,14 +179,14 @@ impl<F: Component> ApplyField for RemoveField<F> {
 }
 
 #[derive(Resource, Default, Clone)]
-pub struct ChunkPersistenceRegistry {
+pub(crate) struct ChunkPersistenceRegistry {
     pub(crate) fields: Vec<FieldVTable>,
 }
 
 /// Power-of-two LOD sizes and voxel i sitting at i*`CHUNK_SIZE/size` make
 /// this an exact stride sample; no interpolation, no JFA.
 #[must_use]
-pub fn downsample_bytes<F: VoxelDataSlice>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
+pub(crate) fn downsample_bytes<F: VoxelDataSlice>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
     let src: Vec<F::Elem> = bytemuck::pod_collect_to_vec(bytes);
     let (fs, ts) = (from.size(), to.size());
     // Bad input: install falls back to a default field.
@@ -273,7 +273,7 @@ impl RegisterSaveableFieldExt for App {
 
 /// Some((data, fingerprint)) if the chunk is at max LOD, has no load in
 /// flight, and has unsaved changes.
-pub fn build_if_dirty(world: &World, e: Entity) -> Option<(ChunkSaveData, u64)> {
+pub(crate) fn build_if_dirty(world: &World, e: Entity) -> Option<(ChunkSaveData, u64)> {
     let lod = *world.get::<LOD>(e)?;
     if lod != world.resource::<MaxEditLod>().0
         || world.get::<ChunkDataTask>(e).is_some()
@@ -312,7 +312,7 @@ pub fn build_if_dirty(world: &World, e: Entity) -> Option<(ChunkSaveData, u64)> 
 }
 
 /// Used by the loader when a chunk leaves range.
-pub fn flush_and_despawn(world: &mut World, e: Entity) {
+pub(crate) fn flush_and_despawn(world: &mut World, e: Entity) {
     if is_settling(world, e) {
         world.resource_mut::<ReplanRequested>().0 = true; // try again next frame
         return;
@@ -342,7 +342,7 @@ impl Default for AutosaveIntervalSecs {
     }
 }
 
-pub fn autosave_dirty_chunks(
+pub(crate) fn autosave_dirty_chunks(
     world: &World,
     time: Res<Time>,
     interval: Res<AutosaveIntervalSecs>,
@@ -365,7 +365,7 @@ pub fn autosave_dirty_chunks(
 #[derive(Message)]
 pub struct SaveChunkMessage(pub IVec3);
 
-pub fn generic_save_chunk_system(
+pub(crate) fn generic_save_chunk_system(
     mut events: MessageReader<SaveChunkMessage>,
     world: &World,
     chunk_manager: Res<ChunkManager>,
@@ -396,6 +396,6 @@ impl Plugin for ChunkPersistencePlugin {
 
 /// Edits are still being turned into real distances. Saving now would
 /// persist pre-JFA data, and replacing the fields now would discard the edits.
-pub fn is_settling(world: &World, e: Entity) -> bool {
+pub(crate) fn is_settling(world: &World, e: Entity) -> bool {
     world.get::<SdfReinitTask>(e).is_some() || world.get::<DirtyField<SDF, f32>>(e).is_some()
 }

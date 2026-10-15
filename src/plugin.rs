@@ -6,8 +6,7 @@ use crate::{
         FieldsPlugin, SDF, VisibilityField,
         persistence::{ChunkPersistencePlugin, RegisterSaveableFieldExt},
     },
-    loading::ChunkLoadingPlugin,
-    surface::SurfaceCullPlugin,
+    field::{loading::ChunkLoadingPlugin, surface::SurfaceCullPlugin},
     texture_palette::plugin::PalettePlugin,
     voxel::VoxelRenderPlugin,
 };

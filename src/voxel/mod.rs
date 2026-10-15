@@ -8,7 +8,7 @@
 //!   `surface_nets_pass1` finds active cells and assigns vertices;
 //!   `surface_nets_pass3` places vertices, blends materials, stitches LOD
 //!   seams and writes indices and draw args.
-//! - **Draw** ([`draw`]): CPU frustum culling per view, a compaction pass,
+//! - **Draw** (`draw`): CPU frustum culling per view, a compaction pass,
 //!   then one `multi_draw_indexed_indirect` per arena (`voxel_raster.wesl`:
 //!   triplanar albedo + ARM, per-pixel visibility discard, Bevy PBR
 //!   lighting), optionally after a depth-only prepass (`VoxelDepthPrepass`).
@@ -17,19 +17,23 @@
 
 pub mod arena;
 pub mod cursor;
-pub mod draw;
-pub mod extract;
-pub mod mesh;
-pub mod pipeline;
+pub(crate) mod draw;
+pub(crate) mod extract;
+pub(crate) mod mesh;
+pub(crate) mod pipeline;
 pub mod query;
-pub mod raster;
-pub mod resident;
+pub(crate) mod raster;
+pub(crate) mod resident;
 pub mod stats;
-pub mod telemetry;
+pub(crate) mod telemetry;
 pub mod terrain_ray;
 pub mod types;
-pub mod upload;
-pub mod util;
+pub(crate) mod upload;
+pub(crate) mod util;
+
+pub use pipeline::VoxelDepthPrepass;
+pub use telemetry::GuardTelemetry;
+pub use upload::RemeshBudget;
 
 use bevy::{
     asset::{load_internal_asset, uuid_handle},
@@ -39,10 +43,10 @@ use bevy::{
 };
 
 use extract::{LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks};
-use pipeline::{VoxelComputePipeline, VoxelDepthPrepass, VoxelPipelineLayouts};
+use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
-    SDF, VisibilityField,
+    field::{SDF, VisibilityField},
     voxel::{
         arena::VoxelChunkArenaSet,
         cursor::CursorPlugin,
@@ -64,8 +68,8 @@ use crate::{
         },
         raster::voxel_raster_pass,
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
-        telemetry::{GuardTelemetry, map_guard_readbacks},
-        upload::{RemeshBudget, prepare_visibility_for_arena, prepare_voxel_arena},
+        telemetry::map_guard_readbacks,
+        upload::{prepare_visibility_for_arena, prepare_voxel_arena},
     },
 };
 

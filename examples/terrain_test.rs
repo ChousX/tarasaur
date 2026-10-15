@@ -3,9 +3,10 @@
 
 use bevy::{input::mouse::MouseMotion, prelude::*};
 use tarasaur::{
-    Field, LOD, SDF, TarasaurPlugin,
+    TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::editor::WorldEditor,
+    field::{Field, LOD, SDF},
     num::{f32_from_i32, f32_from_u32, i32_from_f32},
 };
 

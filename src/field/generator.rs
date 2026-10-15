@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
-use crate::LOD;
+use crate::field::LOD;
 use crate::field::SDF;
-use crate::persistence::FieldSavePayload;
+use crate::field::persistence::FieldSavePayload;
 
 /// A registered generator: pure function of chunk position + LOD, no ECS
 /// access. That purity is what makes it safe to clone into and run inside
