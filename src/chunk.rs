@@ -129,9 +129,10 @@ fn on_add_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookContex
     };
     if chunk_manager.is_loaded(&chunk_pos) {
         warn!(
-            "New chunk at pos:{} was not spawned, there was already a chunk there",
+            "New chunk at pos:{} was despawned, there was already a chunk there",
             chunk_pos
         );
+        world.commands().entity(entity).despawn();
         return;
     }
     chunk_manager.add_chunk(chunk_pos, entity);
@@ -142,7 +143,10 @@ fn on_remove_chunk(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
         return;
     };
     if let Some(mut chunk_manager) = world.get_resource_mut::<ChunkManager>() {
-        chunk_manager.remove_chunk(&chunk_pos);
+        // A rejected duplicate never owned the position: leave its owner mapped.
+        if chunk_manager.get_chunk(&chunk_pos) == Some(entity) {
+            chunk_manager.remove_chunk(&chunk_pos);
+        }
     }
 }
 
@@ -546,4 +550,29 @@ pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChu
     if !inside_window {
         focus.0 = Some(new);
     } // assign only on change, so is_changed stays meaningful
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Chunk, ChunkManager, ChunkPosition};
+    use bevy::prelude::*;
+
+    #[test]
+    fn duplicate_chunk_is_despawned_and_keeps_the_owner_mapped() {
+        let mut world = World::new();
+        world.init_resource::<ChunkManager>();
+        let pos = IVec3::new(1, -2, 3);
+        let owner = world.spawn((Chunk, ChunkPosition(pos))).id();
+        let duplicate = world.spawn((Chunk, ChunkPosition(pos))).id();
+        world.flush();
+
+        assert!(world.get_entity(duplicate).is_err());
+        assert_eq!(
+            world.resource::<ChunkManager>().get_chunk(&pos),
+            Some(owner)
+        );
+
+        world.despawn(owner);
+        assert_eq!(world.resource::<ChunkManager>().get_chunk(&pos), None);
+    }
 }
