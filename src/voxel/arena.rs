@@ -748,11 +748,13 @@ impl Default for ArenaConfig {
     }
 }
 
-/// How many arenas per LOD the cursor-query shader can currently address.
+/// Where a lookup entry keeps its arena index (8 bits, above the slot's 20).
 ///
-/// `cursor_query.wgsl` / `query_entries()` bind exactly one `sdf_buffer` +
-/// `chunk_meta` per LOD, so only arena 0 is visible to queries for now.
-pub const QUERY_ARENAS_PER_LOD: usize = 1;
+/// The LOD rank sits above both, at bit 28; keep in sync with
+/// `cursor_query.wgsl`.
+pub const LOOKUP_ARENA_SHIFT: u32 = 20;
+const LOOKUP_SLOT_MASK: u32 = (1 << LOOKUP_ARENA_SHIFT) - 1;
+const LOOKUP_MAX_ARENAS: usize = 1 << 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaSlot {
@@ -766,6 +768,7 @@ pub struct GpuChunkLookupEntry {
     pub pos_x: u32,
     pub pos_y: u32,
     pub pos_z: u32,
+    /// `rank << 28 | arena << LOOKUP_ARENA_SHIFT | slot`.
     pub packed_slot_and_rank: u32,
 }
 
@@ -796,7 +799,8 @@ pub struct VoxelChunkArenaSet {
 }
 
 impl VoxelChunkArenaSet {
-    /// (`lod_rank`, arena) for every LOD's query-visible arena.
+    /// (`lod_rank`, first arena) for every LOD that has one. Every arena of a
+    /// LOD shares its sizes, so this is what the query uniforms read.
     pub fn query_arenas(&self) -> impl Iterator<Item = (usize, &VoxelChunkArena)> {
         self.arenas
             .iter()
@@ -965,13 +969,16 @@ impl VoxelChunkArenaSet {
 
         'outer: for (rank, arenas) in self.arenas.iter().enumerate() {
             let rank = u32::try_from(rank).unwrap_or(0);
-            for arena in arenas.iter().take(QUERY_ARENAS_PER_LOD) {
+            for (arena_idx, arena) in arenas.iter().enumerate().take(LOOKUP_MAX_ARENAS) {
+                let arena_idx = u32::try_from(arena_idx).unwrap_or(0);
                 for (&pos, &slot) in &arena.slot_of_chunk_pos {
                     if total_entries >= cap {
                         bevy::log::warn!("Merged lookup table exceeded capacity ({cap})!");
                         break 'outer;
                     }
-                    let packed = (rank << 28) | (slot & 0x0FFF_FFFF);
+                    let packed = (rank << 28)
+                        | (arena_idx << LOOKUP_ARENA_SHIFT)
+                        | (slot & LOOKUP_SLOT_MASK);
                     let initial_idx = wrap(usize_from(hash_chunk_pos(pos)));
                     let mut idx = initial_idx;
                     loop {

@@ -101,17 +101,18 @@ pub struct VoxelQueryResultReceiver {
 /// Static buffers + triple-buffered bind groups for the cursor/raycast
 /// query pass.
 ///
-/// Buffers themselves don't depend on any arena and are built
-/// eagerly in `VoxelRenderPlugin::finish()`; the bind groups DO reference
-/// each LOD's first arena (`sdf_buffer`/`chunk_meta_buffer`), which
-/// don't exist yet at `finish()` time (arenas
-/// are created lazily on first chunk extraction) — so bind group creation
-/// is deferred to `prepare_voxel_queries`, and rebuilt only when a LOD gains
-/// its first arena or the lookup table grows (arena buffers never change
-/// identity once created).
+/// The query runs once per arena index: pass `j` binds arena `j` of every
+/// LOD (a dummy where a LOD has fewer) and traces only the chunks stored
+/// there; a later pass keeps its hit only if it is closer. The bind groups
+/// reference the arenas' buffers, which are created lazily, so they're built
+/// in `prepare_voxel_queries` and rebuilt only when a LOD gains an arena or
+/// the lookup table grows (arena buffers never change identity).
 #[derive(Resource)]
 pub struct VoxelQueryBuffers {
-    pub bind_groups: [Option<BindGroup>; QUERY_BUFFER_SLOTS],
+    /// Per readback slot: one bind group per pass (arena index).
+    pub bind_groups: [Vec<BindGroup>; QUERY_BUFFER_SLOTS],
+    /// Per pass: a uniform holding that pass's arena index.
+    pub pass_uniforms: Vec<Buffer>,
     pub query_buffer: Buffer,
     pub hit_buffers: [Buffer; QUERY_BUFFER_SLOTS],
     pub readback_buffers: [Buffer; QUERY_BUFFER_SLOTS],
@@ -125,7 +126,8 @@ pub struct VoxelQueryBuffers {
     pub merged_lookup_capacity: u32,
     pub dummy_sdf_buffer: Buffer,
     pub dummy_meta_buffer: Buffer,
-    pub bound_lod_presence: [bool; LOD::COUNT],
+    /// Arenas per LOD the bind groups were built for.
+    pub bound_arena_counts: [usize; LOD::COUNT],
 }
 
 fn slot_buffers(
@@ -201,7 +203,8 @@ impl FromWorld for VoxelQueryBuffers {
         });
 
         Self {
-            bind_groups: [None, None, None],
+            bind_groups: Default::default(),
+            pass_uniforms: Vec::new(),
             query_buffer,
             hit_buffers,
             readback_buffers,
@@ -213,8 +216,67 @@ impl FromWorld for VoxelQueryBuffers {
             merged_lookup_capacity: initial_lookup_capacity,
             dummy_sdf_buffer,
             dummy_meta_buffer,
-            bound_lod_presence: [false; LOD::COUNT],
+            bound_arena_counts: [0; LOD::COUNT],
         }
+    }
+}
+
+impl VoxelQueryBuffers {
+    /// Rebuilds the bind groups if never built, or a LOD gained an arena
+    /// (its buffers replace a dummy, or it needs another pass).
+    fn update_bind_groups(
+        &mut self,
+        device: &RenderDevice,
+        layouts: &VoxelPipelineLayouts,
+        arena_set: &VoxelChunkArenaSet,
+    ) {
+        let counts = arena_set.arenas.each_ref().map(Vec::len);
+        if !self.bind_groups[0].is_empty() && self.bound_arena_counts == counts {
+            return;
+        }
+        let passes = counts.iter().copied().max().unwrap_or(0).max(1);
+        while self.pass_uniforms.len() < passes {
+            let pass = u32::try_from(self.pass_uniforms.len()).unwrap_or(u32::MAX);
+            self.pass_uniforms
+                .push(device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("voxel_query_pass_uniform"),
+                    contents: bytemuck::cast_slice(&[pass, 0, 0, 0]),
+                    usage: BufferUsages::UNIFORM,
+                }));
+        }
+        let qb = &*self;
+        let bind_groups = qb.hit_buffers.each_ref().map(|hit| {
+            qb.pass_uniforms
+                .iter()
+                .take(passes)
+                .enumerate()
+                .map(|(pass, pass_uniform)| {
+                    let mut bufs = vec![
+                        (0, &qb.query_buffer),
+                        (1, hit),
+                        (2, &qb.query_uniform_buffer),
+                        (3, &qb.merged_lookup_buffer),
+                        (12, pass_uniform),
+                    ];
+                    // Bindings 4, 5 for rank 0; 6, 7 for rank 1; ...
+                    for (base, arenas) in (4u32..).step_by(2).zip(&arena_set.arenas) {
+                        let (sdf, meta) = arenas
+                            .get(pass)
+                            .map_or((&qb.dummy_sdf_buffer, &qb.dummy_meta_buffer), |a| {
+                                (&a.sdf_buffer, &a.chunk_meta_buffer)
+                            });
+                        bufs.extend([(base, sdf), (base.wrapping_add(1), meta)]);
+                    }
+                    device.create_bind_group(
+                        Some("voxel_query_bind_group"),
+                        &layouts.query_layout,
+                        &entries(&bufs),
+                    )
+                })
+                .collect()
+        });
+        self.bind_groups = bind_groups;
+        self.bound_arena_counts = counts;
     }
 }
 
@@ -296,7 +358,7 @@ pub fn prepare_voxel_queries(
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             });
         query_buffers.merged_lookup_capacity = needed;
-        query_buffers.bind_groups = [None, None, None]; // buffer identity changed
+        query_buffers.bind_groups = Default::default(); // buffer identity changed
     }
     arena_set.rebuild_merged_lookup(
         &render_queue,
@@ -307,22 +369,19 @@ pub fn prepare_voxel_queries(
     let mut lod_voxel_size = [0.0f32; 4];
     let mut lod_texture_size = [0u32; 4];
     let mut lod_surface_epsilon = [0.0f32; 4];
-    let mut current_presence = [false; LOD::COUNT];
 
     for (r, arena) in arena_set.query_arenas() {
         let voxel_size = CHUNK_SIZE / f32_from_u32(arena.texture_size.saturating_sub(2));
-        let (Some(size), Some(texture), Some(epsilon), Some(present)) = (
+        let (Some(size), Some(texture), Some(epsilon)) = (
             lod_voxel_size.get_mut(r),
             lod_texture_size.get_mut(r),
             lod_surface_epsilon.get_mut(r),
-            current_presence.get_mut(r),
         ) else {
             continue;
         };
         *size = voxel_size;
         *texture = arena.texture_size;
         *epsilon = voxel_size * 0.05;
-        *present = true;
     }
 
     let uniforms = QueryUniforms {
@@ -344,37 +403,7 @@ pub fn prepare_voxel_queries(
         bytemuck::bytes_of(&uniforms),
     );
 
-    // Rebuild bind groups if never built, or the live-LOD set changed
-    // (a brand-new arena's buffers need to replace the dummy fallback).
-    if query_buffers.bind_groups[0].is_none()
-        || query_buffers.bound_lod_presence != current_presence
-    {
-        let qb = &*query_buffers;
-        let bind_groups = qb.hit_buffers.each_ref().map(|hit| {
-            let mut bufs = vec![
-                (0, &qb.query_buffer),
-                (1, hit),
-                (2, &qb.query_uniform_buffer),
-                (3, &qb.merged_lookup_buffer),
-            ];
-            // Bindings 4, 5 for rank 0; 6, 7 for rank 1; ...
-            for (base, arenas) in (4u32..).step_by(2).zip(&arena_set.arenas) {
-                let (sdf, meta) = arenas
-                    .first()
-                    .map_or((&qb.dummy_sdf_buffer, &qb.dummy_meta_buffer), |a| {
-                        (&a.sdf_buffer, &a.chunk_meta_buffer)
-                    });
-                bufs.extend([(base, sdf), (base.wrapping_add(1), meta)]);
-            }
-            Some(render_device.create_bind_group(
-                Some("voxel_query_bind_group"),
-                &layouts.query_layout,
-                &entries(&bufs),
-            ))
-        });
-        query_buffers.bind_groups = bind_groups;
-        query_buffers.bound_lod_presence = current_presence;
-    }
+    query_buffers.update_bind_groups(&render_device, &layouts, &arena_set);
 }
 
 /// Runs in `VoxelPrepareSet::Dispatch`, after the meshing dispatch.
@@ -403,7 +432,7 @@ pub fn dispatch_voxel_query_pass(
     next_slot.0 = slot.wrapping_add(1) % QUERY_BUFFER_SLOTS;
 
     let qb = &*query_buffers;
-    let (Some(state), Some(slot_count), Some(Some(bind_group)), Some(hit), Some(readback)) = (
+    let (Some(state), Some(slot_count), Some(bind_groups), Some(hit), Some(readback)) = (
         qb.slot_state.get(slot),
         qb.slot_query_count.get(slot),
         qb.bind_groups.get(slot),
@@ -412,7 +441,7 @@ pub fn dispatch_voxel_query_pass(
     ) else {
         return;
     };
-    if state.load(Ordering::Acquire) != SLOT_FREE {
+    if bind_groups.is_empty() || state.load(Ordering::Acquire) != SLOT_FREE {
         return;
     }
 
@@ -421,7 +450,9 @@ pub fn dispatch_voxel_query_pass(
     });
     let recorder = recorder.as_deref();
     let span = recorder.time_span(&mut encoder, "voxel_query");
-    {
+    // One pass per arena index, in order: pass 0 writes every result, later
+    // passes only a closer hit.
+    for bind_group in bind_groups {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("voxel_cursor_query"),
             timestamp_writes: None,

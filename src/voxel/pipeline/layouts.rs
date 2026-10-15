@@ -129,5 +129,11 @@ pub fn query_entries() -> Vec<BindGroupLayoutEntry> {
             true,
         )); // chunk_meta[lod]
     }
+    // This pass's arena index.
+    entries.push(uniform_buffer_entry(
+        12,
+        ShaderStages::COMPUTE,
+        NonZeroU64::new(16),
+    ));
     entries
 }

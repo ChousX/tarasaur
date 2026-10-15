@@ -40,7 +40,7 @@ struct QueryUniforms {
 @group(0) @binding(0) var<storage, read> queries: array<RayQuery>;
 @group(0) @binding(1) var<storage, read_write> hits: array<HitResult>;
 @group(0) @binding(2) var<uniform> params: QueryUniforms;
-@group(0) @binding(3) var<storage, read> chunk_lookup: array<vec4<u32>>; // x,y,z,(lod_rank<<28|slot)
+@group(0) @binding(3) var<storage, read> chunk_lookup: array<vec4<u32>>; // x,y,z,packed (see below)
 
 @group(0) @binding(4)  var<storage, read> sdf_buffer_0: array<u32>;
 @group(0) @binding(5)  var<storage, read> chunk_meta_0: array<ChunkMetaGpu>;
@@ -51,9 +51,22 @@ struct QueryUniforms {
 @group(0) @binding(10) var<storage, read> sdf_buffer_3: array<u32>;
 @group(0) @binding(11) var<storage, read> chunk_meta_3: array<ChunkMetaGpu>;
 
+// The query runs once per arena index; the bindings above are arena
+// `arena` of each LOD, and only chunks stored there are traced.
+struct QueryPass {
+    arena: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+@group(0) @binding(12) var<uniform> query_pass: QueryPass;
+
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+// Lookup entry: rank << 28 | arena << 20 | slot (see LOOKUP_ARENA_SHIFT).
 const LOD_RANK_SHIFT: u32 = 28u;
-const SLOT_MASK: u32 = 0x0FFFFFFFu;
+const ARENA_SHIFT: u32 = 20u;
+const ARENA_MASK: u32 = 0xFFu;
+const SLOT_MASK: u32 = 0xFFFFFu;
 
 fn hash_chunk(x: i32, y: i32, z: i32) -> u32 {
     var h = bitcast<u32>(x) * 0x9E3779B1u;
@@ -62,18 +75,18 @@ fn hash_chunk(x: i32, y: i32, z: i32) -> u32 {
     return h;
 }
 
-fn lookup_chunk(cx: i32, cy: i32, cz: i32) -> vec2<u32> { // (lod_rank, slot), slot==EMPTY_SLOT if absent
+fn lookup_chunk(cx: i32, cy: i32, cz: i32) -> vec3<u32> { // (lod_rank, arena, slot), slot==EMPTY_SLOT if absent
     let cap = params.lookup_capacity;
     var idx = hash_chunk(cx, cy, cz) % cap;
     for (var probe = 0u; probe < cap; probe = probe + 1u) {
         let e = chunk_lookup[idx];
-        if (e.w == EMPTY_SLOT) { return vec2<u32>(0u, EMPTY_SLOT); }
+        if (e.w == EMPTY_SLOT) { return vec3<u32>(0u, 0u, EMPTY_SLOT); }
         if (bitcast<i32>(e.x) == cx && bitcast<i32>(e.y) == cy && bitcast<i32>(e.z) == cz) {
-            return vec2<u32>(e.w >> LOD_RANK_SHIFT, e.w & SLOT_MASK);
+            return vec3<u32>(e.w >> LOD_RANK_SHIFT, (e.w >> ARENA_SHIFT) & ARENA_MASK, e.w & SLOT_MASK);
         }
         idx = (idx + 1u) % cap;
     }
-    return vec2<u32>(0u, EMPTY_SLOT);
+    return vec3<u32>(0u, 0u, EMPTY_SLOT);
 }
 
 // snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
@@ -257,13 +270,18 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (t > q.max_distance) { break; }
 
         let found = lookup_chunk(cx, cy, cz);
-        let slot = found.y;
-        if (slot != EMPTY_SLOT) {
+        let slot = found.z;
+        // Chunks in other arenas are traced by their own pass.
+        if (slot != EMPTY_SLOT && found.y == query_pass.arena) {
             let rank = found.x;
             let cmeta = chunk_meta_at(rank, slot);
             let hit = sphere_trace_chunk(rank, slot, cmeta.chunk_world_origin, q.origin, dir, t, q.max_distance);
             if (hit.did_hit == 1u) {
-                hits[qi] = hit;
+                // Pass 0 writes first; a later pass only keeps a closer hit.
+                let prev = hits[qi];
+                if (query_pass.arena == 0u || prev.did_hit == 0u || hit.hit_distance < prev.hit_distance) {
+                    hits[qi] = hit;
+                }
                 return;
             }
             t = hit.hit_distance;
@@ -277,5 +295,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             cz = cz + step_z; t = t_max_z; t_max_z = t_max_z + t_delta_z;
         }
     }
-    hits[qi] = result;
+    if (query_pass.arena == 0u) {
+        hits[qi] = result;
+    }
 }

@@ -203,7 +203,9 @@ cargo test -j 2      # full parallelism can run out of memory
 The bench runs repeatable phases (load, hold, spin, fly, edit, box, query,
 reslot) and writes its results to `bench_results/`. The last three also
 check correctness: box brushes stay inside the box, GPU ray queries return
-one result per ray and agree with the CPU ray, and chunks that lose and
+one result per ray and agree with the CPU ray (also on terrain past a LOD's
+first arena: the bench uses small arenas, so High terrain spans several,
+which costs some frame time against the defaults), and chunks that lose and
 regain their arena slot get their materials back (read back from the GPU).
 A failed check makes the bench exit with an error.
 

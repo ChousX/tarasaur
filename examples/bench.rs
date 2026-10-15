@@ -17,7 +17,9 @@
 //! - `box`:   box brushes: an SDF box sculpted every frame, plus one material
 //!   box off the voxel grid. Checks that only voxels inside it changed.
 //! - `query`: GPU ray queries every frame. Checks each result batch holds
-//!   exactly the queries sent, and that the hits match the CPU ray.
+//!   exactly the queries sent, and that the hits match the CPU ray, also on
+//!   chunks stored past a LOD's first arena (the bench uses small arenas so
+//!   High terrain spans several).
 //! - `reslot`: chunks filled solid (no mesh, slot released) and dug out again
 //!   (a new slot), every 60 frames. Checks their material slots are
 //!   refilled, by reading them back from the GPU.
@@ -72,7 +74,7 @@ use tarasaur::{
     num::{f32_from_u32, usize_from},
     persistence::AutosaveIntervalSecs,
     voxel::{
-        arena::VoxelChunkArenaSet,
+        arena::{ArenaConfig, VoxelChunkArenaSet},
         cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
         pipeline::VoxelDepthPrepass,
         query::{PendingVoxelQueries, VoxelQueryResults},
@@ -113,9 +115,15 @@ const QUERY_RAYS: usize = 48;
 const QUERY_MAX_DISTANCE: f32 = 100.0;
 /// GPU and CPU hits closer than this (world units) agree.
 const QUERY_TOLERANCE: f32 = 0.5;
-/// Share of rays on which GPU and CPU must agree.
-const QUERY_MIN_AGREEMENT: f64 = 0.9;
+/// When the render world reports which arena holds each chunk.
+const ARENA_REPORT_AT: u32 = QUERY_FRAMES - 30;
 const RESLOT_FRAMES: u32 = 300;
+/// Arenas small enough that High terrain spans several, with enough of them
+/// that no LOD has less room than with the defaults.
+const BENCH_ARENAS: ArenaConfig = ArenaConfig {
+    max_arenas: [1, 4, 4, 8],
+    max_buffer_bytes: 32 * 1024 * 1024,
+};
 const RESLOT_PERIOD: u32 = 60;
 /// Into a cycle, when the solid-filled chunks are dug out again.
 const RESLOT_DIG_AT: u32 = 20;
@@ -385,8 +393,13 @@ fn add_checked_phases(app: &mut App) {
     let probe = SlotProbe::default();
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app
-            .insert_resource(probe.clone())
-            .add_systems(Render, read_back_slots.in_set(RenderSystems::Cleanup));
+            .world_mut()
+            .resource_mut::<VoxelChunkArenaSet>()
+            .config = BENCH_ARENAS;
+        render_app.insert_resource(probe.clone()).add_systems(
+            Render,
+            (read_back_slots, report_arenas).in_set(RenderSystems::Cleanup),
+        );
     }
     app.insert_resource(probe)
         .init_resource::<QueryWatch>()
@@ -664,9 +677,18 @@ fn query_rays() -> Vec<(Vec3, Vec3)> {
         .collect()
 }
 
-fn drive_queries(bench: Res<Bench>, mut pending: ResMut<PendingVoxelQueries>) {
+fn drive_queries(
+    bench: Res<Bench>,
+    mut pending: ResMut<PendingVoxelQueries>,
+    probe: Res<SlotProbe>,
+) {
     if bench.phase != Phase::Query {
         return;
+    }
+    if bench.frame_in_phase == ARENA_REPORT_AT
+        && let Ok(mut state) = probe.0.lock()
+    {
+        state.arena_request = true;
     }
     for (i, (origin, dir)) in query_rays().into_iter().enumerate() {
         pending.0.push(RayQuery {
@@ -704,7 +726,12 @@ fn watch_queries(
 
 /// Batches arrived, each the right length, and the latest agrees with the
 /// CPU ray cast (the view is still, so every batch should).
-fn check_queries(mut bench: ResMut<Bench>, watch: Res<QueryWatch>, terrain: TerrainRay) {
+fn check_queries(
+    mut bench: ResMut<Bench>,
+    watch: Res<QueryWatch>,
+    terrain: TerrainRay,
+    probe: Res<SlotProbe>,
+) {
     if !Phase::Query.last_frame(&bench) {
         return;
     }
@@ -717,25 +744,69 @@ fn check_queries(mut bench: ResMut<Bench>, watch: Res<QueryWatch>, terrain: Terr
             watch.batches, watch.wrong_length
         ),
     );
-    let rays = query_rays();
-    let agree = rays
+    // Per ray: did the GPU agree with the CPU, and the CPU hit (if any).
+    let rays: Vec<(bool, Option<Vec3>)> = query_rays()
         .iter()
         .zip(&watch.latest)
-        .filter(|((origin, dir), gpu)| {
+        .map(|((origin, dir), gpu)| {
             let cpu = terrain.cast(*origin, *dir, QUERY_MAX_DISTANCE);
-            match (cpu, gpu.did_hit != 0) {
+            let agree = match (&cpu, gpu.did_hit != 0) {
                 (Some(c), true) => c.pos.distance(Vec3::from(gpu.hit_pos_world)) < QUERY_TOLERANCE,
                 (None, false) => true,
                 _ => false,
+            };
+            if !agree {
+                info!(
+                    "[bench] query ray {dir:?} disagrees: cpu (pos, dist) {:?}, gpu hit={} pos {:?} dist {} slot {}",
+                    cpu.as_ref().map(|c| (c.pos, c.distance)),
+                    gpu.did_hit,
+                    gpu.hit_pos_world,
+                    gpu.hit_distance,
+                    gpu.chunk_slot
+                );
             }
+            // Just past the surface, inside the chunk that was hit.
+            (agree, cpu.map(|c| c.pos + *dir * 0.01))
         })
-        .count();
-    let share = f64_from_usize(agree) / f64_from_usize(rays.len());
+        .collect();
+    let agree = rays.iter().filter(|r| r.0).count();
     bench.checks.record(
         Phase::Query,
         "query_matches_cpu",
-        share >= QUERY_MIN_AGREEMENT,
-        format!("{agree}/{} rays agree with the CPU ray", rays.len()),
+        agree == QUERY_RAYS,
+        format!("{agree}/{QUERY_RAYS} rays agree with the CPU ray"),
+    );
+
+    // The rays whose terrain lives past its LOD's first arena: only a pass
+    // per arena finds those.
+    let report = probe.0.lock().ok().and_then(|mut s| s.arena_report.take());
+    let Some(report) = report else {
+        bench.checks.record(
+            Phase::Query,
+            "query_overflow_arenas",
+            false,
+            "no arena report from the render world".into(),
+        );
+        return;
+    };
+    let overflow: Vec<bool> = rays
+        .iter()
+        .filter_map(|&(agree, hit)| {
+            let (_, arena) = report.chunk_arena.get(&world_pos_to_chunk_pos(&hit?))?;
+            (*arena > 0).then_some(agree)
+        })
+        .collect();
+    let overflow_agree = overflow.iter().filter(|a| **a).count();
+    let most_arenas = report.counts.iter().copied().max().unwrap_or(0);
+    bench.checks.record(
+        Phase::Query,
+        "query_overflow_arenas",
+        most_arenas >= 2 && !overflow.is_empty() && overflow_agree == overflow.len(),
+        format!(
+            "arenas per LOD {:?}; {overflow_agree}/{} rays into a chunk past its LOD's first arena agree",
+            report.counts,
+            overflow.len()
+        ),
     );
 }
 
@@ -868,6 +939,39 @@ struct ProbeState {
     requests: Vec<SlotRequest>,
     /// One line per request, ending in ": ok" when the slot matched.
     results: Vec<String>,
+    /// Set by the main world to ask for an `ArenaReport`.
+    arena_request: bool,
+    arena_report: Option<ArenaReport>,
+}
+
+/// Which arena holds each resident chunk.
+struct ArenaReport {
+    /// Arenas per LOD rank.
+    counts: [usize; LOD::COUNT],
+    /// Chunk position -> (LOD rank, arena index).
+    chunk_arena: HashMap<IVec3, (usize, usize)>,
+}
+
+/// Answers an arena-report request with the arena of every resident chunk.
+fn report_arenas(probe: Res<SlotProbe>, arena_set: Res<VoxelChunkArenaSet>) {
+    let Ok(mut state) = probe.0.lock() else {
+        return;
+    };
+    if !std::mem::take(&mut state.arena_request) {
+        return;
+    }
+    let mut chunk_arena = HashMap::new();
+    for (rank, arenas) in arena_set.arenas.iter().enumerate() {
+        for (arena_idx, arena) in arenas.iter().enumerate() {
+            for &pos in arena.slot_of_chunk_pos.keys() {
+                chunk_arena.insert(pos, (rank, arena_idx));
+            }
+        }
+    }
+    state.arena_report = Some(ArenaReport {
+        counts: arena_set.arenas.each_ref().map(Vec::len),
+        chunk_arena,
+    });
 }
 
 /// Shared by both worlds: the main world asks, the render world answers.
