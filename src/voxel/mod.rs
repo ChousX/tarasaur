@@ -19,13 +19,16 @@ pub mod arena;
 pub mod cursor;
 pub mod draw;
 pub mod extract;
+pub mod mesh;
 pub mod pipeline;
 pub mod query;
+pub mod raster;
 pub mod resident;
 pub mod stats;
-pub mod systems;
+pub mod telemetry;
 pub mod terrain_ray;
 pub mod types;
+pub mod upload;
 pub mod util;
 
 use bevy::{
@@ -47,6 +50,8 @@ use crate::{
             DRAW_COMPACTION_SHADER_HANDLE, VoxelDrawPipeline, VoxelViewDraws,
             prepare_voxel_view_draws,
         },
+        extract::extract_visibility_removed,
+        mesh::dispatch_voxel_compute_passes_batched,
         pipeline::{
             VoxelMaterialBindGroup, VoxelRasterPipeline, queue_voxel_raster_pipelines,
             update_voxel_material_bind_group,
@@ -57,12 +62,10 @@ use crate::{
             clear_pending_voxel_queries, dispatch_voxel_query_pass, drain_voxel_query_results,
             extract_voxel_queries, map_voxel_query_results, prepare_voxel_queries,
         },
+        raster::voxel_raster_pass,
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
-        systems::{
-            GuardTelemetry, RemeshBudget, dispatch_voxel_compute_passes_batched,
-            extract_visibility_removed, map_guard_readbacks, prepare_visibility_for_arena,
-            prepare_voxel_arena, voxel_raster_pass,
-        },
+        telemetry::{GuardTelemetry, map_guard_readbacks},
+        upload::{RemeshBudget, prepare_visibility_for_arena, prepare_voxel_arena},
     },
 };
 

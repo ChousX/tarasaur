@@ -30,7 +30,7 @@ use crate::{
     },
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
     num::usize_from,
-    voxel::{arena::VoxelChunkArenaSet, resident::ForceResident, systems::ExtractedChunkField},
+    voxel::{arena::VoxelChunkArenaSet, resident::ForceResident},
 };
 
 /// Frames between full consistency checks in debug builds.
@@ -327,6 +327,51 @@ pub fn pad_dirty_chunks<T>(
             seq: frame.0,
         },
     ));
+}
+
+/// A chunk's padded volume of field `T` in the render world, waiting to be
+/// uploaded (see `voxel::upload`).
+#[derive(Component)]
+pub struct ExtractedChunkField<T: Send + Sync + 'static> {
+    pub main_entity: MainEntity,
+    pub chunk_pos: IVec3,
+    pub padded_data: Arc<[u8]>,
+    pub size: u32,
+    pub lod: LOD,
+    /// See [`seam_lod_ranks`]; only the SDF upload uses it.
+    pub lod_ranks: u32,
+    /// Main-world frame it was extracted in. An upload can wait several
+    /// frames; when a newer one for the same chunk arrives, the newest wins.
+    pub seq: u32,
+    pub _type: PhantomData<T>,
+}
+
+/// A chunk that lost its `VisibilityField`: sends an empty mask, which
+/// clears the slot's mask flag.
+pub fn extract_visibility_removed(
+    mut commands: Commands,
+    mut removed: Extract<RemovedComponents<VisibilityField>>,
+    chunks: Extract<Query<(&ChunkPosition, &LOD, Has<VisibilityField>)>>,
+    frame: Extract<Res<FrameCount>>,
+) {
+    for entity in removed.read() {
+        let Ok((pos, lod, still_has)) = chunks.get(entity) else {
+            continue;
+        };
+        if still_has {
+            continue;
+        }
+        commands.spawn(ExtractedChunkField::<VisibilityField> {
+            main_entity: entity.into(),
+            chunk_pos: pos.0,
+            padded_data: Arc::from([]),
+            size: lod.size().wrapping_add(PADDING),
+            lod: *lod,
+            lod_ranks: 0,
+            seq: frame.0,
+            _type: PhantomData,
+        });
+    }
 }
 
 /// Forwards this frame's padded volumes of `T` to the render world.

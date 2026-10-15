@@ -19,7 +19,7 @@ use crate::systems::{
 };
 use crate::voxel::{
     extract::add_field_extraction,
-    systems::{prepare_material_for_arena, prepare_voxel_arena},
+    upload::{prepare_material_for_arena, prepare_voxel_arena},
 };
 use crate::{FieldLOD, FieldNew, LOD, TargetLOD};
 

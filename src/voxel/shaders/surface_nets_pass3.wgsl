@@ -24,7 +24,7 @@ struct BatchUniforms {
 
 struct ChunkMeta {
     chunk_world_origin: vec3<f32>,
-    lod_ranks: u32, // see seam_lod_ranks in voxel/systems.rs
+    lod_ranks: u32, // see seam_lod_ranks in field/apron.rs
 }
 
 @group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;

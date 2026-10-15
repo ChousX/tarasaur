@@ -1,69 +1,37 @@
-//! Render-world systems: arena uploads (sized by a CPU active-cell count),
-//! the surface-nets dispatch and the raster pass.
+//! Render-world uploads into the arenas.
+//!
+//! Each changed chunk's SDF gets a slot and an exact-size vertex range (from
+//! a CPU count of active cells), and its material/visibility data follows
+//! it into that slot.
 
-use super::util::dispatch;
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
-    marker::PhantomData,
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
 };
 
-use crate::grid::PADDING;
 use crate::num::{u64_from_usize, usize_from};
 
 use bevy::{
-    diagnostic::FrameCount,
     ecs::system::SystemParam,
-    pbr::{MeshViewBindGroup, ViewKeyCache},
     prelude::*,
     render::{
-        Extract,
-        diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
-        render_resource::{
-            CommandEncoder, CommandEncoderDescriptor, ComputePipeline, IndexFormat, MapMode,
-            PipelineCache, RenderPassDescriptor, RenderPipeline, StoreOp,
-        },
-        renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
+        renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
-        view::{ExtractedView, ViewDepthStencilTexture, ViewTarget},
     },
     tasks::ComputeTaskPool,
 };
 
 use crate::{
-    CHUNK_SIZE, ChunkPosition, LOD, MaterialField, SDF, VisibilityField, VoxelMaterial,
+    CHUNK_SIZE, LOD, MaterialField, SDF, VisibilityField, VoxelMaterial,
+    voxel::extract::ExtractedChunkField,
     voxel::{
-        arena::{
-            ArenaSlot, ChunkMeta, INDICES_PER_CELL, PASS1_WORKGROUP_EDGE, VoxelChunkArena,
-            VoxelChunkArenaSet,
-        },
-        draw::{VoxelDrawPipeline, VoxelViewDraws, encode_draw_compaction},
-        pipeline::{
-            VoxelDepthPrepass, VoxelMaterialBindGroup, VoxelPipelineLayouts, VoxelRasterKey,
-            VoxelRasterPipeline, raster_keys,
-        },
+        arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
+        pipeline::VoxelPipelineLayouts,
         stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
     },
 };
-
-use super::pipeline::VoxelComputePipeline;
-
-#[derive(Component)]
-pub struct ExtractedChunkField<T: Send + Sync + 'static> {
-    pub main_entity: MainEntity,
-    pub chunk_pos: IVec3,
-    pub padded_data: Arc<[u8]>,
-    pub size: u32,
-    pub lod: LOD,
-    /// See [`seam_lod_ranks`]; only the SDF upload uses it.
-    pub lod_ranks: u32,
-    /// Main-world frame it was extracted in. An upload can wait several
-    /// frames; when a newer one for the same chunk arrives, the newest wins.
-    pub seq: u32,
-    pub _type: PhantomData<T>,
-}
 
 /// Max cells re-meshed per frame, summed over all arenas.
 ///
@@ -509,301 +477,8 @@ pub fn prepare_visibility_for_arena(
     }
 }
 
-/// Re-meshes only the dirty slots of each arena. Every slot owns a fixed
-/// vertex/index range, so untouched chunks keep their geometry as-is.
-pub fn dispatch_voxel_compute_passes_batched(
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
-    pipeline_cache: Res<PipelineCache>,
-    pipeline: Res<VoxelComputePipeline>,
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
-    telemetry: Res<GuardTelemetry>,
-    diagnostics: MeshDiagnostics,
-) {
-    if !arena_set.iter().any(|a| !a.dirty_slots.is_empty()) {
-        return;
-    }
-
-    let ids = [
-        ("pass1", pipeline.pass1_pipeline_id),
-        ("pass3", pipeline.pass3_pipeline_id),
-    ];
-    let [Some(pass1_pipeline), Some(pass3_pipeline)] =
-        ids.map(|(_, id)| pipeline_cache.get_compute_pipeline(id))
-    else {
-        for (name, id) in ids {
-            if pipeline_cache.get_compute_pipeline(id).is_none() {
-                warn!(
-                    "[dispatch] {name} not ready: {:?}",
-                    pipeline_cache.get_compute_pipeline_state(id)
-                );
-            }
-        }
-        return; // dirty slots stay dirty until the pipelines are ready
-    };
-
-    let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("voxel_compute_encoder_batched"),
-    });
-    let mut dirty: Vec<&mut VoxelChunkArena> = arena_set
-        .iter_mut()
-        .filter(|a| !a.dirty_slots.is_empty())
-        .collect();
-    let (mut meshed_chunks, mut meshed_cells) = (0u32, 0u64);
-    for arena in &mut dirty {
-        arena.dirty_slots.sort_unstable();
-        arena.dirty_slots.dedup();
-        render_queue.write_buffer(
-            &arena.active_slot_map_buffer,
-            0,
-            bytemuck::cast_slice(&arena.dirty_slots),
-        );
-        let n = dirty_count(arena);
-        meshed_chunks = meshed_chunks.saturating_add(n);
-        meshed_cells =
-            meshed_cells.saturating_add(u64::from(arena.total_cells).saturating_mul(u64::from(n)));
-    }
-    if let Some(mut stats) = diagnostics.stats {
-        stats.meshed_chunks = meshed_chunks;
-        stats.meshed_cells = meshed_cells;
-    }
-    encode_mesh_passes(
-        &mut encoder,
-        diagnostics.recorder.as_deref(),
-        [pass1_pipeline, pass3_pipeline],
-        &dirty,
-    );
-
-    for arena in dirty {
-        if telemetry.0 && arena.guard_state.load(Ordering::Acquire) == GUARD_FREE {
-            encoder.copy_buffer_to_buffer(
-                &arena.guard_debug_buffer,
-                0,
-                &arena.guard_readback_buffer,
-                0,
-                16,
-            );
-            encoder.clear_buffer(&arena.guard_debug_buffer, 0, None);
-            arena.guard_state.store(GUARD_COPIED, Ordering::Release);
-        }
-        arena.dirty_slots.clear();
-    }
-    render_queue.submit(std::iter::once(encoder.finish()));
-}
-
-fn dirty_count(arena: &VoxelChunkArena) -> u32 {
-    u32::try_from(arena.dirty_slots.len()).unwrap_or(u32::MAX)
-}
-
-/// Optional instrumentation for the meshing dispatch.
-#[derive(SystemParam)]
-pub struct MeshDiagnostics<'w> {
-    recorder: Option<Res<'w, DiagnosticsRecorder>>,
-    stats: Option<ResMut<'w, VoxelFrameStats>>,
-}
-
-/// Must match pass3's `@workgroup_size`.
-const PASS3_WORKGROUP: u32 = 64;
-
-/// Records the meshing passes for every dirty arena. `pipelines` is pass1,
-/// pass3.
-///
-/// Stage-major (every arena's pass1, then every arena's pass3) so each
-/// stage is one timing span. Arenas share no buffers, so the order between
-/// them doesn't matter.
-fn encode_mesh_passes(
-    encoder: &mut CommandEncoder,
-    recorder: Option<&DiagnosticsRecorder>,
-    pipelines: [&ComputePipeline; 2],
-    dirty: &[&mut VoxelChunkArena],
-) {
-    let [pass1, pass3] = pipelines;
-    let mesh_span = recorder.time_span(encoder, "voxel_mesh");
-    timed(recorder, encoder, "pass1", |enc| {
-        for arena in dirty {
-            // pass1 counts each chunk's active cells into these.
-            enc.clear_buffer(&arena.chunk_counts_buffer, 0, None);
-            let wg1 = arena.cell_count.div_ceil(PASS1_WORKGROUP_EDGE);
-            dispatch(
-                enc,
-                "surface_nets_pass1_batched",
-                pass1,
-                &arena.pass1_bind_group,
-                (wg1, wg1, wg1.saturating_mul(dirty_count(arena))),
-            );
-        }
-    });
-    // x = vertex (active cell) within a chunk, y = chunk. Every dirty
-    // chunk's vertex range holds at least its active cells, so the largest
-    // range bounds them all; threads past a chunk's count exit.
-    timed(recorder, encoder, "pass3", |enc| {
-        for arena in dirty {
-            let most = arena
-                .dirty_slots
-                .iter()
-                .filter_map(|&s| arena.slot_range.get(usize_from(s)))
-                .map(|&(_, capacity)| capacity)
-                .max()
-                .unwrap_or(0);
-            dispatch(
-                enc,
-                "surface_nets_pass3_batched",
-                pass3,
-                &arena.pass3_bind_group,
-                (most.div_ceil(PASS3_WORKGROUP), dirty_count(arena), 1),
-            );
-        }
-    });
-    mesh_span.end(encoder);
-}
-
-/// Runs `f` inside a CPU/GPU timing span. A no-op span without
-/// `RenderDiagnosticsPlugin`.
-fn timed(
-    recorder: Option<&DiagnosticsRecorder>,
-    encoder: &mut CommandEncoder,
-    name: &'static str,
-    f: impl FnOnce(&mut CommandEncoder),
-) {
-    let span = recorder.time_span(encoder, name);
-    f(encoder);
-    span.end(encoder);
-}
-
-/// Everything `voxel_raster_pass` draws with, besides the view.
-#[derive(SystemParam)]
-pub struct RasterResources<'w> {
-    view_keys: Res<'w, ViewKeyCache>,
-    depth_prepass: Option<Res<'w, VoxelDepthPrepass>>,
-    arena_set: Res<'w, VoxelChunkArenaSet>,
-    pipeline_cache: Res<'w, PipelineCache>,
-    raster_pipeline: Res<'w, VoxelRasterPipeline>,
-    voxel_material: Res<'w, VoxelMaterialBindGroup>,
-    draws: Res<'w, VoxelViewDraws>,
-    draw_pipeline: Res<'w, VoxelDrawPipeline>,
-}
-
-impl RasterResources<'_> {
-    /// The compiled pipeline for `key`, warning (once) while it isn't.
-    fn pipeline(&self, key: VoxelRasterKey) -> Option<&RenderPipeline> {
-        let id = self.raster_pipeline.id(key)?;
-        let pipeline = self.pipeline_cache.get_render_pipeline(id);
-        if pipeline.is_none() {
-            warn_once!(
-                "raster pipeline: {:?}",
-                self.pipeline_cache.get_render_pipeline_state(id)
-            );
-        }
-        pipeline
-    }
-}
-
-/// Draws the chunks `prepare_voxel_view_draws` found visible in this view.
-///
-/// One multi-draw per arena, lit by Bevy's PBR with the view's own mesh view
-/// bind groups (lights, shadows, fog, light probes). With
-/// [`VoxelDepthPrepass`], every arena is first drawn depth-only, so the PBR
-/// pass shades each pixel once.
-pub fn voxel_raster_pass(
-    view: ViewQuery<(
-        &ViewTarget,
-        &ViewDepthStencilTexture,
-        &ExtractedView,
-        &MeshViewBindGroup,
-    )>,
-    res: RasterResources,
-    mut ctx: RenderContext,
-) {
-    let draws = res.draws.get(view.entity());
-    let (target, depth_texture, extracted_view, mesh_view) = view.into_inner();
-    if draws.iter().all(|d| d.count == 0) {
-        return;
-    }
-    let depth_prepass = res.depth_prepass.as_deref().copied().unwrap_or_default();
-    let Some((prepass_key, shade_key)) = raster_keys(
-        &res.view_keys,
-        extracted_view,
-        &res.voxel_material,
-        depth_prepass,
-    ) else {
-        return;
-    };
-    // A prepass that isn't compiled yet is skipped; shading alone is still
-    // correct, since its depth test works without the prepass.
-    let prepass = prepass_key.and_then(|key| res.pipeline(key));
-    let (Some(shade), Some(compaction)) = (
-        res.pipeline(shade_key),
-        res.pipeline_cache
-            .get_compute_pipeline(res.draw_pipeline.id),
-    ) else {
-        return;
-    };
-
-    encode_draw_compaction(ctx.command_encoder(), compaction, draws);
-
-    // Timed on the encoder, around the pass: on tiling GPUs (Adreno, Mali)
-    // timestamps inside a render pass can fire before the tiles are shaded.
-    let diagnostics = ctx.diagnostic_recorder();
-    let recorder = diagnostics.as_deref();
-    let span = recorder.time_span(ctx.command_encoder(), "voxel_raster");
-
-    let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
-        label: Some("voxel_raster_pass"),
-        color_attachments: &[Some(target.get_color_attachment())],
-        depth_stencil_attachment: Some(depth_texture.get_attachment(StoreOp::Store)),
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    render_pass.set_bind_group(0, &mesh_view.main, &mesh_view.main_offsets);
-    render_pass.set_bind_group(1, &mesh_view.binding_array, &[]);
-    render_pass.set_bind_group(2, &res.voxel_material.bind_group, &[]);
-
-    // Both pipelines share one layout, so the bind groups stay set.
-    for pipeline in prepass.into_iter().chain([shade]) {
-        render_pass.set_render_pipeline(pipeline);
-        for d in draws.iter().filter(|d| d.count > 0) {
-            let Some(arena) = res.arena_set.arenas.get(d.lod).and_then(|a| a.get(d.arena)) else {
-                continue;
-            };
-            render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(arena.index_buffer.slice(..), IndexFormat::Uint32);
-            render_pass.set_bind_group(3, &arena.raster_chunk_bind_group, &[]);
-            render_pass.multi_draw_indexed_indirect(&d.args, 0, d.count);
-        }
-    }
-    drop(render_pass);
-    span.end(ctx.command_encoder());
-}
-
 /// Byte stride of one slot's entry in `indirect_args_buffer`.
 const ARGS_STRIDE: u64 = u64_from_usize(std::mem::size_of::<DrawIndexedIndirectArgs>());
-
-pub fn extract_visibility_removed(
-    mut commands: Commands,
-    mut removed: Extract<RemovedComponents<VisibilityField>>,
-    chunks: Extract<Query<(&ChunkPosition, &LOD, Has<VisibilityField>)>>,
-    frame: Extract<Res<FrameCount>>,
-) {
-    for entity in removed.read() {
-        let Ok((pos, lod, still_has)) = chunks.get(entity) else {
-            continue;
-        };
-        if still_has {
-            continue;
-        }
-        commands.spawn(ExtractedChunkField::<VisibilityField> {
-            main_entity: entity.into(),
-            chunk_pos: pos.0,
-            padded_data: Arc::from([]),
-            size: lod.size().wrapping_add(PADDING),
-            lod: *lod,
-            lod_ranks: 0,
-            seq: frame.0,
-            _type: PhantomData,
-        });
-    }
-}
 
 fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
     let mut packed = vec![0u32; bits.len().div_ceil(32)];
@@ -835,64 +510,5 @@ mod tests {
         assert_eq!(count_active_cells(&volume(3, &[(1, 1, 1)]), 3), 8);
         // A corner voxel touches only the one cell it's a corner of.
         assert_eq!(count_active_cells(&volume(4, &[(0, 0, 0)]), 4), 1);
-    }
-}
-
-/// Logs pass3's range guard (a chunk skipped because the GPU counted more
-/// cells than its CPU-sized range). Should never fire; costs one small
-/// readback per arena per frame, so on in debug builds only.
-#[derive(Resource)]
-pub struct GuardTelemetry(pub bool);
-
-impl Default for GuardTelemetry {
-    fn default() -> Self {
-        Self(cfg!(debug_assertions))
-    }
-}
-
-const GUARD_FREE: u8 = 0;
-const GUARD_COPIED: u8 = 1;
-const GUARD_MAPPED: u8 = 2;
-
-pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelChunkArenaSet>) {
-    if !telemetry.0 {
-        return;
-    }
-    for (rank, arenas) in arena_set.arenas.iter().enumerate() {
-        for (arena_idx, arena) in arenas.iter().enumerate() {
-            let state = arena.guard_state.clone();
-            if state
-                .compare_exchange(
-                    GUARD_COPIED,
-                    GUARD_MAPPED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                continue;
-            }
-            let buf = arena.guard_readback_buffer.clone();
-            let chunk_pos_of_slot = arena.chunk_pos_of_slot.clone();
-            buf.clone().slice(..).map_async(MapMode::Read, move |result| {
-                if result.is_ok() {
-                    // The view must be dropped before `unmap`; it is, at the
-                    // end of this statement.
-                    let v = buf.slice(..).get_mapped_range().ok().and_then(|data| {
-                        let bytes = data.get(..16)?;
-                        bytemuck::try_pod_read_unaligned::<[u32; 4]>(bytes).ok()
-                    });
-                    buf.unmap();
-                    if let Some(v) = v.filter(|v| v[0] != 0) {
-                        let pos = chunk_pos_of_slot.get(usize_from(v[1])).copied().flatten();
-                        warn!(
-                            "[guard] LOD rank {rank} arena {arena_idx}: {} chunk(s) skipped; last slot {} at {:?}: gpu_count {} > cpu_count {}",
-                            v[0], v[1], pos, v[2], v[3]
-                        );
-                    }
-                }
-                state.store(GUARD_FREE, Ordering::Release);
-            });
-        }
     }
 }

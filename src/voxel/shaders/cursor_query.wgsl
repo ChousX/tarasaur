@@ -107,7 +107,7 @@ fn sdf_index(base: u32, x: u32, y: u32, z: u32, s: u32) -> u32 {
 }
 
 // Apron voxels from a neighbour at another LOD hold that neighbour's voxel
-// units (see seam_lod_ranks in voxel/systems.rs): factor to this chunk's.
+// units (see seam_lod_ranks in field/apron.rs): factor to this chunk's.
 fn apron_scale(lod_ranks: u32, n: u32, x: u32, y: u32, z: u32) -> f32 {
     let bits = u32(x >= n) | (u32(y >= n) << 1u) | (u32(z >= n) << 2u);
     if (bits == 0u) {

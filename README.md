@@ -130,14 +130,15 @@ Render world: upload into per-LOD arena slot ─► pass1 (active cells) ─► 
 | Module | Role |
 |---|---|
 | `chunk` | Chunk entities, `ChunkManager`, `ChunkLoader` LOD bands, the spawn and despawn planner |
-| `field` | Field traits, `SDF`, `VisibilityField`, `MaterialField`, `EditableChunks` |
+| `field` | Field traits, `SDF`, `VisibilityField`, `MaterialField`, `EditableChunks`; `field::apron` builds padded volumes |
+| `grid` | Voxel grid layout: flattening, the apron, sampling between grids |
 | `field::loading` | Off-thread load tasks; installs fields and LOD atomically |
 | `field::systems`, `ops`, `editor` | Edit messages, brushes, async jump-flood reinit |
 | `field::persistence` | Save files, save cache, autosave, downsampling |
 | `field::surface` | Tags the chunks that can produce geometry (`HasSurface`) |
 | `voxel::extract` | Change-driven builds of padded volumes for the render world |
 | `voxel::arena` | GPU slot and vertex-range allocation per LOD |
-| `voxel::systems` | Uploads, the meshing dispatch, the raster pass, apron fill |
+| `voxel::upload`, `mesh`, `raster` | Arena uploads, the surface-nets dispatch, the raster pass |
 | `voxel::pipeline` | Meshing and query pipelines; PBR raster pipelines specialized per view; palette bind group |
 | `voxel::draw` | Per-view frustum culling and draw-argument compaction |
 | `voxel::query`, `cursor`, `terrain_ray` | GPU and CPU ray casts, `CursorHit`, the default brush |
