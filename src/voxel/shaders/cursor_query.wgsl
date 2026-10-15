@@ -167,6 +167,8 @@ fn sphere_trace_chunk(rank: u32, slot: u32, chunk_origin: vec3<f32>, ray_origin:
     let size_f = f32(texture_size) - 2.0;   // chunk spans local [0, size_f]
     let tol = 1e-3;
 
+    // The last sample's t, while it was outside.
+    var outside_t = -1.0;
     for (var i = 0u; i < params.max_sphere_steps; i = i + 1u) {
         let world_pos = ray_origin + dir * t;
         let local_pos = (world_pos - chunk_origin) / voxel_size;   // mesh has no +1 offset
@@ -178,15 +180,35 @@ fn sphere_trace_chunk(rank: u32, slot: u32, chunk_origin: vec3<f32>, ray_origin:
 
         let d = sample_sdf(rank, slot, texture_size, local_pos);   // d is in voxels
         if (d < 0.05) {
+            var hit_t = t;
+            // Stepped from outside to inside: find the crossing between them.
+            if (d <= 0.0 && outside_t >= 0.0) {
+                var lo = outside_t;
+                var hi = t;
+                for (var k = 0u; k < 10u; k = k + 1u) {
+                    let mid = 0.5 * (lo + hi);
+                    let mid_local = (ray_origin + dir * mid - chunk_origin) / voxel_size;
+                    if (sample_sdf(rank, slot, texture_size, mid_local) > 0.0) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                hit_t = hi;
+            }
+            let hit_local = (ray_origin + dir * hit_t - chunk_origin) / voxel_size;
             result.did_hit = 1u;
-            result.hit_pos_world = world_pos;
-            result.hit_distance = t;
-            result.hit_normal = compute_normal(rank, slot, texture_size, local_pos);
-            result.voxel_coord = vec3<u32>(local_pos);
+            result.hit_pos_world = ray_origin + dir * hit_t;
+            result.hit_distance = hit_t;
+            result.hit_normal = compute_normal(rank, slot, texture_size, hit_local);
+            result.voxel_coord = vec3<u32>(hit_local);
             return result;
         }
+        outside_t = t;
 
-        t = t + max(d * voxel_size * 0.9, voxel_size * 0.1);
+        // Edited distances (jump flood) can overestimate near thin
+        // features, so cap the step or the ray could hop over one.
+        t = t + clamp(d * 0.9, 0.1, 1.5) * voxel_size;
         if (t > t_max) {
             result.hit_distance = t_max;
             return result;
