@@ -256,14 +256,17 @@ pub fn detect_topology_desync(
     }
 }
 
-pub fn clear_dirty_visibility(
-    mut commands: Commands,
-    query: Query<Entity, With<DirtyField<VisibilityField, bool>>>,
-) {
+/// Ends the edit cycle for a field whose `DirtyField` needs no follow-up.
+///
+/// That's every field but `SDF`, which keeps its marker until the jump flood
+/// lands. Runs in `FieldSet::Reinit`, after every edit of the cycle.
+pub fn clear_dirty<F, V>(mut commands: Commands, query: Query<Entity, With<DirtyField<F, V>>>)
+where
+    F: Field<V>,
+    V: Copy + Default + Send + Sync + 'static,
+{
     for entity in query.iter() {
-        commands
-            .entity(entity)
-            .remove::<DirtyField<VisibilityField, bool>>();
+        commands.entity(entity).remove::<DirtyField<F, V>>();
     }
 }
 

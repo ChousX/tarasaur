@@ -14,8 +14,8 @@ use crate::field::material::VoxelMaterial;
 use crate::field::{MaterialField, SDF, VisibilityField};
 use crate::persistence::RegisterSaveableFieldExt;
 use crate::systems::{
-    clear_dirty_visibility, detect_topology_desync, process_sdf_csg_spheres,
-    process_sdf_sphere_stamps, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
+    clear_dirty, detect_topology_desync, process_sdf_csg_spheres, process_sdf_sphere_stamps,
+    resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
 use crate::voxel::{
     extract::add_field_extraction,
@@ -62,6 +62,10 @@ impl<M: VoxelMaterial> Default for MaterialFieldPlugin<M> {
 impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
         app.add_field::<MaterialField<M>, M>();
+        app.add_systems(
+            Update,
+            clear_dirty::<MaterialField<M>, M>.in_set(FieldSet::Reinit),
+        );
         app.add_observer(build_field_on_chunk_spawn::<MaterialField<M>>);
         app.register_saveable_field::<MaterialField<M>>();
         add_field_extraction::<MaterialField<M>>(app);
@@ -92,7 +96,7 @@ impl Plugin for FieldsPlugin {
                 detect_topology_desync,
                 spawn_sdf_reinit_tasks,
                 resolve_sdf_reinit_tasks,
-                clear_dirty_visibility,
+                clear_dirty::<VisibilityField, bool>,
             )
                 .chain()
                 .in_set(FieldSet::Reinit),
@@ -167,4 +171,93 @@ fn build_field_on_chunk_spawn<F: Component + FieldNew>(
     }
     let lod = lod.copied().unwrap_or_default();
     commands.entity(entity).insert(F::new_for_lod(lod));
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::prelude::*;
+    use bevy::shape::Sphere;
+
+    use super::{FieldsPlugin, MaterialFieldPlugin};
+    use crate::{
+        DirtyField, LOD, MaterialField, Versionable, VoxelMaterial,
+        chunk::{Chunk, ChunkManager, ChunkPosition},
+        editor::{EditFieldMessage, EditMode},
+        ops::{AccumulateExt, BlendExt},
+        persistence::ChunkPersistencePlugin,
+        voxel::resident::ForceResident,
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+    enum Mat {
+        #[default]
+        A,
+        B,
+    }
+
+    impl VoxelMaterial for Mat {
+        const COUNT: u8 = 2;
+        fn to_id(self) -> u8 {
+            match self {
+                Self::A => 0,
+                Self::B => 1,
+            }
+        }
+        fn from_id(id: u8) -> Self {
+            if id == 1 { Self::B } else { Self::A }
+        }
+    }
+
+    impl AccumulateExt for Mat {
+        fn accumulate(self, delta: Self) -> Self {
+            delta
+        }
+    }
+
+    impl BlendExt for Mat {
+        fn blend_towards(self, target: Self, factor: f32) -> Self {
+            if factor >= 0.5 { target } else { self }
+        }
+    }
+
+    #[test]
+    fn material_edits_dont_leave_a_dirty_marker() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            ChunkPersistencePlugin,
+            FieldsPlugin,
+            MaterialFieldPlugin::<Mat>::new(),
+        ))
+        .init_resource::<ChunkManager>()
+        .init_resource::<ForceResident>();
+        let chunk = app
+            .world_mut()
+            .spawn((
+                Chunk,
+                ChunkPosition(IVec3::ZERO),
+                LOD::High,
+                MaterialField::<Mat>::new(LOD::High),
+            ))
+            .id();
+        app.world_mut()
+            .write_message(EditFieldMessage::<MaterialField<Mat>, Sphere, Mat>::new(
+                Vec3::splat(5.0),
+                Sphere { radius: 1.0 },
+                Mat::B,
+                EditMode::Absolute,
+            ));
+        app.update();
+
+        let world = app.world();
+        let edited = world
+            .get::<MaterialField<Mat>>(chunk)
+            .is_some_and(|f| f.version() > 0);
+        assert!(edited, "the edit should have landed this frame");
+        assert!(
+            world
+                .get::<DirtyField<MaterialField<Mat>, Mat>>(chunk)
+                .is_none()
+        );
+    }
 }
