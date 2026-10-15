@@ -133,6 +133,15 @@ pub trait VoxelField: Component<Mutability = Mutable> + Sized {
     fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem {
         nearest_neighbor_sample(data, size, x, y, z)
     }
+    /// An apron voxel where the neighbour can't be read (not loaded, or
+    /// mid-LOD-change): `past` voxels beyond this chunk's edge voxel `edge`
+    /// per axis, and `inward[axis]` the voxel one in from `edge` along each
+    /// axis (read only where `past` is nonzero). Default: the edge voxel, as
+    /// categorical data must; `SDF` continues its gradient, so the surface
+    /// and its normals carry on smoothly across the missing neighbour.
+    fn extend_edge(edge: Self::Elem, _inward: [Self::Elem; 3], _past: UVec3) -> Self::Elem {
+        edge
+    }
 }
 
 use crate::chunk::{Chunk, EditPin};

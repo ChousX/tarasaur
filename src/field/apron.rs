@@ -152,7 +152,7 @@ pub fn fill_apron_with<'a, T>(
                             let at = local.as_vec3() * scale * ratio;
                             T::sample_apron(data, n_size, at.x, at.y, at.z)
                         }
-                        None => vol.get(idx(cell.min(edge))).copied().unwrap_or_default(),
+                        None => extend_edge::<T>(vol, padded, cell, edge),
                     };
                     if let Some(v) = vol.get_mut(idx(cell)) {
                         *v = value;
@@ -161,6 +161,20 @@ pub fn fill_apron_with<'a, T>(
             }
         }
     }
+}
+
+/// The fallback for an apron voxel `cell` whose neighbour can't be read:
+/// [`VoxelField::extend_edge`] from this chunk's nearest edge voxel. Reads
+/// only interior voxels.
+fn extend_edge<T: VoxelField>(vol: &[T::Elem], padded: u32, cell: UVec3, edge: UVec3) -> T::Elem {
+    let at = |c: UVec3| {
+        vol.get(flatten_cube(c.x, c.y, c.z, padded))
+            .copied()
+            .unwrap_or_default()
+    };
+    let base = cell.min(edge);
+    let inward = [UVec3::X, UVec3::Y, UVec3::Z].map(|axis| at(base.saturating_sub(axis)));
+    T::extend_edge(at(base), inward, cell.saturating_sub(edge))
 }
 
 #[cfg(test)]
@@ -210,7 +224,7 @@ mod tests {
                                 let at = local * scale * ratio;
                                 T::sample_apron(data, *n_size, at.x, at.y, at.z)
                             }
-                            None => vol[idx(cell.min(edge))],
+                            None => super::extend_edge::<T>(vol, padded, cell, edge),
                         };
                     }
                 }
@@ -264,6 +278,42 @@ mod tests {
             bytes(&expected),
             "size {size}, neighbours {neighbor_sizes:?}"
         );
+    }
+
+    /// A planar SDF carries on exactly into the apron of a missing
+    /// neighbour, edges and corners included.
+    #[test]
+    fn missing_neighbour_extends_sdf() {
+        use bevy::math::UVec3;
+        let size = 8;
+        let padded = size + PADDING;
+        let plane = |x: u32, y: u32, z: u32| {
+            UVec3::new(x, y, z)
+                .as_vec3()
+                .dot(bevy::math::Vec3::new(0.3, 0.8, -0.5))
+                - 2.0
+        };
+        let mut vol = vec![0.0f32; usize_from(padded).pow(3)];
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    vol[flatten_cube(x, y, z, padded)] = plane(x, y, z);
+                }
+            }
+        }
+        super::fill_apron_with::<SDF>(&mut vol, size, |_| None);
+        for z in 0..padded {
+            for y in 0..padded {
+                for x in 0..padded {
+                    let got = vol[flatten_cube(x, y, z, padded)];
+                    let want = plane(x, y, z);
+                    assert!(
+                        (got - want).abs() < 1e-4,
+                        "({x}, {y}, {z}): {got} vs {want}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

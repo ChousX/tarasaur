@@ -320,6 +320,16 @@ impl VoxelField for SDF {
     fn sample_apron(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
         sample_neighbor(data, size, x, y, z)
     }
+
+    /// Linear: exact for a planar surface. Clamping instead flattened the
+    /// gradient across the edge, which bent normals and folded triangles
+    /// along the outermost loaded chunks.
+    fn extend_edge(edge: f32, inward: [f32; 3], past: UVec3) -> f32 {
+        inward
+            .iter()
+            .zip(past.to_array())
+            .fold(edge, |v, (&i, k)| (edge - i).mul_add(f32_from_u32(k), v))
+    }
 }
 
 /// Quantizes an SDF value to snorm16 over +/-`SDF_BAND`, as the GPU copy

@@ -7,7 +7,7 @@ use bevy::{
     render::{render_resource::Buffer, sync_world::MainEntity},
 };
 
-use crate::{field::LOD, voxel::arena::VoxelChunkArenaSet};
+use crate::{field::LOD, num::usize_from, voxel::arena::VoxelChunkArenaSet};
 
 /// Where a resident chunk's material ids live on the GPU.
 pub struct MaterialSlot {
@@ -17,6 +17,24 @@ pub struct MaterialSlot {
     pub offset: u64,
     /// Edge of the padded volume: the chunk's voxels plus the apron.
     pub padded_size: u32,
+}
+
+/// One arena's mesh output, and where each of its chunks' meshes lie in it.
+pub struct MeshArena {
+    pub lod: LOD,
+    /// Two `vec4<f32>` per vertex: world position (.w packed material), then
+    /// normal (.w packed material and slot) (`COPY_SRC`).
+    pub vertex_buffer: Buffer,
+    /// `u32` indices into `vertex_buffer`, absolute (`COPY_SRC`).
+    pub index_buffer: Buffer,
+    /// `DrawIndexedIndirectArgs` per slot; `index_count` comes first
+    /// (`COPY_SRC`).
+    pub indirect_args_buffer: Buffer,
+    /// `[slot] -> vertex count`, a `u32` per slot (`COPY_SRC`).
+    pub vertex_count_buffer: Buffer,
+    /// Every chunk holding a slot here: (chunk position, slot, first vertex).
+    /// Its indices start at `first vertex * INDICES_PER_CELL`.
+    pub slots: Vec<(IVec3, u32, u32)>,
 }
 
 /// Where a resident chunk's visibility mask lives on the GPU.
@@ -64,6 +82,32 @@ impl ArenaInspector<'_> {
                         .map(move |&pos| (pos, lod, index))
                 })
             })
+    }
+
+    /// Every arena's mesh output, for reading the meshes back.
+    #[must_use]
+    pub fn mesh_arenas(&self) -> Vec<MeshArena> {
+        LOD::ALL
+            .iter()
+            .zip(&self.arenas.arenas)
+            .flat_map(|(&lod, arenas)| {
+                arenas.iter().map(move |arena| MeshArena {
+                    lod,
+                    vertex_buffer: arena.final_vertex_buffer.clone(),
+                    index_buffer: arena.index_buffer.clone(),
+                    indirect_args_buffer: arena.indirect_args_buffer.clone(),
+                    vertex_count_buffer: arena.slot_vertex_count_buffer.clone(),
+                    slots: arena
+                        .slot_of_chunk_pos
+                        .iter()
+                        .filter_map(|(&pos, &slot)| {
+                            let (base, _) = *arena.slot_range.get(usize_from(slot))?;
+                            Some((pos, slot, base))
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     /// The material slot of `chunk` (a main-world entity) at `lod`, if it

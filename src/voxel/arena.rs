@@ -391,12 +391,12 @@ impl ArenaBuffers {
             final_vertex: dev.storage(
                 "arena_final_vertex_buffer",
                 per_chunk(budget.saturating_mul(VERTEX_BYTES)),
-                BufferUsages::STORAGE | BufferUsages::VERTEX,
+                STORAGE_SRC | BufferUsages::VERTEX,
             ),
             index: dev.storage(
                 "arena_index_buffer",
                 per_chunk(index_bytes),
-                BufferUsages::STORAGE | BufferUsages::INDEX,
+                STORAGE_SRC | BufferUsages::INDEX,
             ),
             indirect_args: indirect_args_buffer(dev, sizes.max_chunks),
             chunk_meta: dev.storage(
@@ -424,7 +424,7 @@ impl ArenaBuffers {
             slot_vertex_count: dev.storage(
                 "arena_slot_vertex_count_buffer",
                 per_chunk(4),
-                STORAGE_DST,
+                STORAGE_DST | BufferUsages::COPY_SRC,
             ),
             active_slot_map: dev.storage("arena_active_slot_map_buffer", per_chunk(4), STORAGE_DST),
             guard_debug: dev.storage(

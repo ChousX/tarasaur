@@ -435,13 +435,24 @@ struct SmallArenas(bool);
 /// render-world readbacks.
 fn add_checked_phases(app: &mut App, small_arenas: bool) {
     let probe = SlotProbe::default();
+    let mesh_probe = MeshProbe::default();
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        render_app.insert_resource(probe.clone()).add_systems(
-            Render,
-            (read_back_slots, read_back_masks, report_arenas).in_set(RenderSystems::Cleanup),
-        );
+        render_app
+            .insert_resource(probe.clone())
+            .insert_resource(mesh_probe.clone())
+            .add_systems(
+                Render,
+                (
+                    read_back_slots,
+                    read_back_masks,
+                    read_back_meshes,
+                    report_arenas,
+                )
+                    .in_set(RenderSystems::Cleanup),
+            );
     }
     app.insert_resource(probe)
+        .insert_resource(mesh_probe)
         .insert_resource(SmallArenas(small_arenas))
         .init_resource::<QueryWatch>()
         .add_systems(
@@ -452,12 +463,14 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
                 drive_reslots,
                 drive_visibility,
                 drive_dig,
+                drive_mesh_probe,
                 watch_queries,
                 check_material_box,
                 check_queries,
                 check_reslots,
                 check_visibility,
                 check_dig,
+                check_meshes,
             ),
         );
 }
@@ -1111,6 +1124,533 @@ fn read_back_slots(
                 }
             });
     }
+}
+
+// ---------------------------------------------------------------------------
+// hold: every mesh lies on the generated surface
+// ---------------------------------------------------------------------------
+
+/// When meshes are read back: fresh from load (`hold`), straight after
+/// streaming while moving (near `fly`'s end), and after sitting still at
+/// the fly's end (near `edit`'s end, skipping the edited chunks). The
+/// readback takes a few frames, so each is checked on its phase's last.
+const MESH_PROBES: [(Phase, u32); 3] = [
+    (Phase::Hold, 10),
+    (Phase::Fly, FLY_FRAMES - 30),
+    (Phase::Edit, EDIT_FRAMES - 30),
+];
+/// A vertex further than this from the heightfield, in its chunk's voxels,
+/// is off the surface. Surface nets keeps a vertex inside its cell, and a
+/// seam cell spans at most a few of this chunk's voxels.
+const MESH_MAX_OFF_SURFACE: f32 = 2.0;
+/// A triangle edge longer than this, in its chunk's voxels, is a sliver.
+const MESH_MAX_EDGE: f32 = 6.0;
+/// A vertex normal further than this from the heightfield's, in degrees.
+const MESH_MAX_NORMAL_DEG: f32 = 30.0;
+/// Bytes per vertex: two `vec4<f32>`.
+const MESH_VERTEX_BYTES: u64 = 32;
+/// Bytes per slot of `DrawIndexedIndirectArgs`.
+const MESH_ARGS_BYTES: u64 = 20;
+/// Indices reserved per vertex (`INDICES_PER_CELL`).
+const MESH_INDICES_PER_VERTEX: u32 = 18;
+
+#[derive(Default)]
+struct MeshProbeState {
+    /// The probe the main world asked for, not yet started.
+    requested: Option<Phase>,
+    /// The probe being read back, and its arenas still pending.
+    current: Option<Phase>,
+    pending: usize,
+    /// Chunks to skip: edited on purpose.
+    exclude: Vec<IVec3>,
+    report: MeshReport,
+    done: Vec<(Phase, MeshReport)>,
+}
+
+/// One flagged spot: how bad, and where (local is in the chunk's voxels).
+#[derive(Clone, Copy)]
+struct MeshFlag {
+    value: f32,
+    pos: IVec3,
+    lod: LOD,
+    local: Vec3,
+}
+
+#[derive(Default, Clone)]
+struct MeshReport {
+    chunks: usize,
+    vertices: usize,
+    triangles: usize,
+    /// Indices outside their chunk's vertex range.
+    bad_indices: usize,
+    /// Vertices further than `MESH_MAX_OFF_SURFACE` voxels off the surface.
+    off_surface: Vec<MeshFlag>,
+    /// Triangles with an edge longer than `MESH_MAX_EDGE` voxels (centroid).
+    long_edges: Vec<MeshFlag>,
+    /// Triangles facing down, value = face normal y (centroid). The
+    /// heightfield has no overhangs, so a correct triangle faces up.
+    folds: Vec<MeshFlag>,
+    /// Vertex normals more than `MESH_MAX_NORMAL_DEG` degrees off the
+    /// heightfield's.
+    bad_normals: Vec<MeshFlag>,
+    /// Largest off-surface distance per LOD rank, in that LOD's voxels.
+    max_off: [f32; LOD::COUNT],
+    /// Every resident chunk's LOD, to describe the neighbours of a flag.
+    lods: HashMap<IVec3, LOD>,
+}
+
+impl MeshReport {
+    fn merge(&mut self, part: Self) {
+        self.chunks = self.chunks.saturating_add(part.chunks);
+        self.vertices = self.vertices.saturating_add(part.vertices);
+        self.triangles = self.triangles.saturating_add(part.triangles);
+        self.bad_indices = self.bad_indices.saturating_add(part.bad_indices);
+        self.off_surface.extend(part.off_surface);
+        self.long_edges.extend(part.long_edges);
+        self.folds.extend(part.folds);
+        self.bad_normals.extend(part.bad_normals);
+        for (m, p) in self.max_off.iter_mut().zip(part.max_off) {
+            *m = m.max(p);
+        }
+    }
+}
+
+/// Shared by both worlds: the main world asks, the render world answers.
+#[derive(Resource, Clone, Default)]
+struct MeshProbe(Arc<Mutex<MeshProbeState>>);
+
+fn drive_mesh_probe(bench: Res<Bench>, probe: Res<MeshProbe>) {
+    if !MESH_PROBES.contains(&(bench.phase, bench.frame_in_phase)) {
+        return;
+    }
+    if let Ok(mut s) = probe.0.lock() {
+        s.requested = Some(bench.phase);
+        s.exclude = if bench.phase == Phase::Edit {
+            let margin = Vec3::splat(EDIT_RADIUS + CHUNK_SIZE);
+            overlapping_chunks(edit_target() - margin, edit_target() + margin).collect()
+        } else {
+            Vec::new()
+        };
+    }
+}
+
+/// The heightfield's slope at `p`'s column, as (d/dx, d/dz).
+fn heightfield_slope(p: Vec3) -> (f32, f32) {
+    let e = 0.05;
+    let gx = (terrain_height(p.x + e, p.z) - terrain_height(p.x - e, p.z)) / (2.0 * e);
+    let gz = (terrain_height(p.x, p.z + e) - terrain_height(p.x, p.z - e)) / (2.0 * e);
+    (gx, gz)
+}
+
+/// The generated heightfield's upward normal at `p`'s column.
+fn heightfield_normal(p: Vec3) -> Vec3 {
+    let (gx, gz) = heightfield_slope(p);
+    Vec3::new(-gx, 1.0, -gz).normalize()
+}
+
+/// Distance from `p` to the generated heightfield, approximately: the
+/// height difference over the slope's stretch, as the generator's SDF does.
+fn heightfield_distance(p: Vec3) -> f32 {
+    let (gx, gz) = heightfield_slope(p);
+    (p.y - terrain_height(p.x, p.z)) / gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt()
+}
+
+/// Copies every arena's vertices, indices, index counts and vertex counts to
+/// one mappable buffer, then checks each chunk's mesh against the
+/// heightfield.
+fn read_back_meshes(
+    probe: Res<MeshProbe>,
+    arenas: ArenaInspector,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    let (mesh_arenas, exclude) = {
+        let Ok(mut s) = probe.0.lock() else {
+            return;
+        };
+        if s.current.is_some() {
+            return; // one at a time
+        }
+        let Some(phase) = s.requested.take() else {
+            return;
+        };
+        s.current = Some(phase);
+        s.report = MeshReport {
+            lods: arenas
+                .resident_chunks()
+                .map(|(pos, lod, _)| (pos, lod))
+                .collect(),
+            ..default()
+        };
+        let mesh_arenas = arenas.mesh_arenas();
+        s.pending = mesh_arenas.len();
+        (mesh_arenas, Arc::new(s.exclude.clone()))
+    };
+    for arena in mesh_arenas {
+        let sources = [
+            &arena.vertex_buffer,
+            &arena.index_buffer,
+            &arena.indirect_args_buffer,
+            &arena.vertex_count_buffer,
+        ];
+        let sizes = sources.map(|b| b.size());
+        let mut offsets = [0u64; 4];
+        let mut total = 0u64;
+        for (offset, size) in offsets.iter_mut().zip(sizes) {
+            *offset = total;
+            total = total.saturating_add(size);
+        }
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("bench_mesh_readback"),
+            size: total,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("bench_mesh_readback"),
+        });
+        for ((src, offset), size) in sources.into_iter().zip(offsets).zip(sizes) {
+            encoder.copy_buffer_to_buffer(src, 0, &readback, offset, size);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let state = probe.0.clone();
+        let exclude = exclude.clone();
+        readback
+            .clone()
+            .slice(..)
+            .map_async(MapMode::Read, move |result| {
+                let mut part = MeshReport::default();
+                if result.is_ok() {
+                    if let Ok(bytes) = readback.slice(..).get_mapped_range() {
+                        let parts = offsets.map(|o| usize::try_from(o).unwrap_or(usize::MAX));
+                        let piece = |k: usize| {
+                            let from = parts.get(k).copied().unwrap_or(usize::MAX);
+                            let to = parts
+                                .get(k.saturating_add(1))
+                                .copied()
+                                .unwrap_or(bytes.len());
+                            bytes.get(from..to).unwrap_or_default()
+                        };
+                        let mesh = ArenaBytes {
+                            vertices: piece(0),
+                            indices: piece(1),
+                            args: piece(2),
+                            counts: piece(3),
+                        };
+                        check_arena_meshes(&arena, &exclude, &mesh, &mut part);
+                    }
+                    readback.unmap();
+                }
+                if let Ok(mut s) = state.lock() {
+                    s.report.merge(part);
+                    s.pending = s.pending.saturating_sub(1);
+                    if s.pending == 0
+                        && let Some(phase) = s.current.take()
+                    {
+                        let report = std::mem::take(&mut s.report);
+                        s.done.push((phase, report));
+                    }
+                }
+            });
+    }
+}
+
+/// One arena's read-back buffers.
+struct ArenaBytes<'a> {
+    vertices: &'a [u8],
+    indices: &'a [u8],
+    args: &'a [u8],
+    counts: &'a [u8],
+}
+
+impl ArenaBytes<'_> {
+    fn position(&self, vertex: u32) -> Option<Vec3> {
+        read_vec3(
+            self.vertices,
+            u64::from(vertex).checked_mul(MESH_VERTEX_BYTES)?,
+        )
+    }
+
+    fn normal(&self, vertex: u32) -> Option<Vec3> {
+        read_vec3(
+            self.vertices,
+            u64::from(vertex)
+                .checked_mul(MESH_VERTEX_BYTES)?
+                .checked_add(16)?,
+        )
+    }
+}
+
+/// The `u32` at word `index`.
+fn read_u32(bytes: &[u8], index: u64) -> Option<u32> {
+    let i = usize::try_from(index.checked_mul(4)?).ok()?;
+    Some(u32::from_le_bytes(
+        bytes.get(i..i.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn read_vec3(bytes: &[u8], at: u64) -> Option<Vec3> {
+    let word = at / 4;
+    let f = |k: u64| read_u32(bytes, word.checked_add(k)?).map(f32::from_bits);
+    Some(Vec3::new(f(0)?, f(1)?, f(2)?))
+}
+
+/// Whether `v` is over `max` (or not a number).
+fn exceeds(v: f32, max: f32) -> bool {
+    v.partial_cmp(&max) != Some(std::cmp::Ordering::Less)
+        && v.partial_cmp(&max) != Some(std::cmp::Ordering::Equal)
+}
+
+fn check_arena_meshes(
+    arena: &tarasaur::voxel::inspect::MeshArena,
+    exclude: &[IVec3],
+    mesh: &ArenaBytes,
+    report: &mut MeshReport,
+) {
+    for &(pos, slot, base) in &arena.slots {
+        if exclude.contains(&pos) {
+            continue;
+        }
+        let count = read_u32(mesh.counts, u64::from(slot)).unwrap_or(0);
+        report.chunks = report.chunks.saturating_add(1);
+        report.vertices = report.vertices.saturating_add(usize_from(count));
+        let chunk = ChunkMesh {
+            pos,
+            lod: arena.lod,
+            base,
+            count,
+        };
+        check_vertices(&chunk, mesh, report);
+        let index_count = read_u32(mesh.args, u64::from(slot) * MESH_ARGS_BYTES / 4).unwrap_or(0);
+        check_triangles(&chunk, index_count, mesh, report);
+    }
+}
+
+/// One chunk's vertex range in its arena.
+struct ChunkMesh {
+    pos: IVec3,
+    lod: LOD,
+    base: u32,
+    count: u32,
+}
+
+impl ChunkMesh {
+    fn flag(&self, value: f32, p: Vec3) -> MeshFlag {
+        let local = (p - self.pos.as_vec3() * CHUNK_SIZE) / self.lod.voxel_size();
+        MeshFlag {
+            value,
+            pos: self.pos,
+            lod: self.lod,
+            local,
+        }
+    }
+
+    const fn holds(&self, vertex: u32) -> bool {
+        vertex >= self.base && vertex < self.base.saturating_add(self.count)
+    }
+}
+
+fn check_vertices(chunk: &ChunkMesh, mesh: &ArenaBytes, report: &mut MeshReport) {
+    let voxel = chunk.lod.voxel_size();
+    for v in chunk.base..chunk.base.saturating_add(chunk.count) {
+        let Some(p) = mesh.position(v) else {
+            continue;
+        };
+        let d = heightfield_distance(p).abs() / voxel;
+        if let Some(m) = report.max_off.get_mut(usize_from(chunk.lod.rank())) {
+            *m = m.max(d);
+        }
+        if exceeds(d, MESH_MAX_OFF_SURFACE) {
+            report.off_surface.push(chunk.flag(d, p));
+        }
+        if let Some(n) = mesh.normal(v) {
+            let cos = n.normalize_or_zero().dot(heightfield_normal(p));
+            let angle = cos.clamp(-1.0, 1.0).acos().to_degrees();
+            if exceeds(angle, MESH_MAX_NORMAL_DEG) {
+                report.bad_normals.push(chunk.flag(angle, p));
+            }
+        }
+    }
+}
+
+fn check_triangles(
+    chunk: &ChunkMesh,
+    index_count: u32,
+    mesh: &ArenaBytes,
+    report: &mut MeshReport,
+) {
+    let voxel = chunk.lod.voxel_size();
+    let first = u64::from(chunk.base).saturating_mul(u64::from(MESH_INDICES_PER_VERTEX));
+    for t in 0..u64::from(index_count / 3) {
+        report.triangles = report.triangles.saturating_add(1);
+        let at = first.saturating_add(t.saturating_mul(3));
+        let ids = [0, 1, 2].map(|k| read_u32(mesh.indices, at.saturating_add(k)));
+        let [Some(i0), Some(i1), Some(i2)] = ids else {
+            continue;
+        };
+        if ![i0, i1, i2].into_iter().all(|i| chunk.holds(i)) {
+            report.bad_indices = report.bad_indices.saturating_add(1);
+            continue;
+        }
+        let (Some(a), Some(b), Some(c)) = (mesh.position(i0), mesh.position(i1), mesh.position(i2))
+        else {
+            continue;
+        };
+        let centroid = (a + b + c) / 3.0;
+        let longest = a.distance(b).max(b.distance(c)).max(c.distance(a)) / voxel;
+        if exceeds(longest, MESH_MAX_EDGE) {
+            report.long_edges.push(chunk.flag(longest, centroid));
+        }
+        // Counter-clockwise front faces.
+        let face = (b - a).cross(c - a).normalize_or_zero();
+        if face != Vec3::ZERO && face.y <= 0.0 {
+            report.folds.push(chunk.flag(face.y, centroid));
+        }
+    }
+}
+
+/// The LODs of the chunks around `pos`, as "dx,dy,dz:LOD" for each one that
+/// differs from `pos`'s own, or has no mesh ("none").
+fn describe_neighbours(lods: &HashMap<IVec3, LOD>, pos: IVec3) -> String {
+    let own = lods.get(&pos).copied();
+    let mut parts = Vec::new();
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let d = IVec3::new(dx, dy, dz);
+                if d == IVec3::ZERO {
+                    continue;
+                }
+                let other = lods.get(&pos.saturating_add(d)).copied();
+                if other != own {
+                    let lod = other.map_or_else(|| "none".to_string(), |l| format!("{l:?}"));
+                    parts.push(format!("{dx},{dy},{dz}:{lod}"));
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        "all neighbours same LOD".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn describe_flag(kind: &str, f: &MeshFlag, lods: &HashMap<IVec3, LOD>) -> String {
+    format!(
+        "  {kind} {:.2}: chunk {} {:?} at local ({:.2}, {:.2}, {:.2}) of {}; {}",
+        f.value,
+        f.pos,
+        f.lod,
+        f.local.x,
+        f.local.y,
+        f.local.z,
+        f.lod.size(),
+        describe_neighbours(lods, f.pos)
+    )
+}
+
+/// The report's summary, plus its worst flags.
+fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "{} chunks, {} vertices, {} triangles; {} off-surface vertices (> {MESH_MAX_OFF_SURFACE} voxels), {} long triangles (> {MESH_MAX_EDGE} voxels), {} bad indices",
+            r.chunks,
+            r.vertices,
+            r.triangles,
+            r.off_surface.len(),
+            r.long_edges.len(),
+            r.bad_indices
+        ),
+        format!(
+            "  known at LOD seams, not failed: {} downward triangles, {} vertex normals > {MESH_MAX_NORMAL_DEG} degrees off ({} > 90)",
+            r.folds.len(),
+            r.bad_normals.len(),
+            r.bad_normals.iter().filter(|f| f.value > 90.0).count()
+        ),
+        format!(
+            "  worst off-surface per LOD (voxels): {}",
+            LOD::ALL
+                .iter()
+                .zip(r.max_off)
+                .map(|(l, m)| format!("{l:?} {m:.2}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ];
+    let mut worst: Vec<_> = r.off_surface.iter().map(|f| ("off", f)).collect();
+    worst.extend(r.long_edges.iter().map(|f| ("edge", f)));
+    worst.sort_by(|a, b| b.1.value.total_cmp(&a.1.value));
+    // Most downward first.
+    let mut folds: Vec<_> = r.folds.iter().map(|f| ("fold", f)).collect();
+    folds.sort_by(|a, b| a.1.value.total_cmp(&b.1.value));
+    let mut normals: Vec<_> = r.bad_normals.iter().map(|f| ("normal", f)).collect();
+    normals.sort_by(|a, b| b.1.value.total_cmp(&a.1.value));
+    for (kind, f) in worst
+        .iter()
+        .chain(folds.iter().take(8))
+        .chain(normals.iter().take(8))
+    {
+        lines.push(describe_flag(kind, f, &r.lods));
+    }
+    lines
+}
+
+/// Every flag, for offline analysis: `bench_results/mesh-<phase>.csv`.
+fn write_mesh_csv(phase: Phase, r: &MeshReport) {
+    let mut csv = String::from("kind,value,cx,cy,cz,lod,size,lx,ly,lz,neighbours\n");
+    let kinds = [
+        ("off", &r.off_surface),
+        ("edge", &r.long_edges),
+        ("fold", &r.folds),
+        ("normal", &r.bad_normals),
+    ];
+    for (kind, list) in kinds {
+        for f in list {
+            let _ = writeln!(
+                csv,
+                "{kind},{},{},{},{},{:?},{},{},{},{},{}",
+                f.value,
+                f.pos.x,
+                f.pos.y,
+                f.pos.z,
+                f.lod,
+                f.lod.size(),
+                f.local.x,
+                f.local.y,
+                f.local.z,
+                describe_neighbours(&r.lods, f.pos)
+            );
+        }
+    }
+    let _ = std::fs::write(format!("bench_results/mesh-{}.csv", phase.name()), csv);
+}
+
+fn check_meshes(mut bench: ResMut<Bench>, probe: Res<MeshProbe>) {
+    let phase = bench.phase;
+    if !MESH_PROBES.iter().any(|&(p, _)| p == phase) || !phase.last_frame(&bench) {
+        return;
+    }
+    let (pass, detail) = {
+        let Ok(state) = probe.0.lock() else {
+            return;
+        };
+        match state.done.iter().find(|(p, _)| *p == phase) {
+            None => (false, "readback unfinished".to_string()),
+            Some((_, r)) => {
+                write_mesh_csv(phase, r);
+                // Folds and bent normals are still known at LOD seams, so
+                // they're reported (and in the CSV) without failing the run.
+                let pass = r.chunks > 0
+                    && r.off_surface.is_empty()
+                    && r.long_edges.is_empty()
+                    && r.bad_indices == 0;
+                (pass, mesh_report_lines(r).join("\n"))
+            }
+        }
+    };
+    bench.checks.record(phase, "mesh_on_surface", pass, detail);
 }
 
 // ---------------------------------------------------------------------------
