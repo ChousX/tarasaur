@@ -192,6 +192,7 @@ pub fn prepare_voxel_arena(
     extracted_chunks: Query<(Entity, &ExtractedChunkField<SDF>)>,
     mut commands: Commands,
     mut out_of_room: Local<bool>,
+    stats: Option<ResMut<VoxelFrameStats>>,
 ) {
     arena_set.deferred.clear();
     arena_set.reslotted.clear();
@@ -290,6 +291,10 @@ pub fn prepare_voxel_arena(
         commands.entity(extracted_entity).despawn();
     }
     *out_of_room = any_out_of_room;
+    if let Some(mut stats) = stats {
+        let n = u32::try_from(arena_set.reslotted.len()).unwrap_or(u32::MAX);
+        stats.reslotted = stats.reslotted.saturating_add(n);
+    }
 }
 
 /// Writes a placed chunk's SDF, metadata, vertex range and draw args into
@@ -420,6 +425,15 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
     out
 }
 
+/// Adds the uploads refilled from the cache to `VoxelFrameStats::side_refills`.
+fn count_refills(stats: Option<ResMut<VoxelFrameStats>>, uploads: &[SideUpload]) {
+    if let Some(mut stats) = stats {
+        let n = uploads.iter().filter(|u| u.extracted.is_none()).count();
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        stats.side_refills = stats.side_refills.saturating_add(n);
+    }
+}
+
 /// Sibling to `prepare_voxel_arena`: uploads material ids into the slot it
 /// placed. Must run after it, so `deferred`, `reslotted` and new slots are
 /// current.
@@ -428,8 +442,11 @@ pub fn prepare_material_for_arena<M: VoxelMaterial>(
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<MaterialField<M>>)>,
     mut commands: Commands,
+    stats: Option<ResMut<VoxelFrameStats>>,
 ) {
-    for up in side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands) {
+    let uploads = side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands);
+    count_refills(stats, &uploads);
+    for up in uploads {
         let slot = up.slot.slot;
         let Some(arena) = arena_set.arena_mut(up.lod, up.slot.arena_idx) else {
             continue;
@@ -453,8 +470,11 @@ pub fn prepare_visibility_for_arena(
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<VisibilityField>)>,
     mut commands: Commands,
+    stats: Option<ResMut<VoxelFrameStats>>,
 ) {
-    for up in side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands) {
+    let uploads = side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands);
+    count_refills(stats, &uploads);
+    for up in uploads {
         let slot = up.slot.slot;
         let Some(arena) = arena_set.arena_mut(up.lod, up.slot.arena_idx) else {
             continue;

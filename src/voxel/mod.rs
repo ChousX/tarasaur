@@ -15,7 +15,7 @@
 //! - **Query** ([`query`]): optional GPU ray casts against the arenas, read
 //!   back a few frames later.
 
-mod arena;
+pub mod arena;
 pub mod cursor;
 pub mod draw;
 pub mod extract;

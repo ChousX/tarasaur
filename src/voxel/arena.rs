@@ -354,7 +354,12 @@ impl ArenaBuffers {
                 per_chunk(sdf_elems.saturating_mul(2)),
                 STORAGE_DST,
             ),
-            material: dev.storage("arena_material_buffer", per_chunk(sdf_elems), STORAGE_DST),
+            // COPY_SRC: lets tests read a slot back.
+            material: dev.storage(
+                "arena_material_buffer",
+                per_chunk(sdf_elems),
+                STORAGE_DST | BufferUsages::COPY_SRC,
+            ),
             visibility_mask: dev.storage(
                 "arena_visibility_mask_buffer",
                 per_chunk(mask_words_per_chunk.saturating_mul(4)),
@@ -532,6 +537,7 @@ fn arena_bind_groups(
 }
 
 impl VoxelChunkArena {
+    #[must_use]
     pub fn new(
         render_device: &RenderDevice,
         layouts: &super::pipeline::VoxelPipelineLayouts,
@@ -695,11 +701,13 @@ impl VoxelChunkArena {
     }
 
     /// This frame's dispatch already fills the per-dispatch scratch.
+    #[must_use]
     pub const fn dirty_full(&self) -> bool {
         self.dirty_slots.len() >= usize_from(self.scratch_chunks)
     }
 
     /// Whether `slot` can be re-meshed this frame (already queued, or room left).
+    #[must_use]
     pub fn can_mark_dirty(&self, slot: u32) -> bool {
         self.dirty_slots.contains(&slot) || !self.dirty_full()
     }
@@ -712,6 +720,7 @@ impl VoxelChunkArena {
         }
     }
 
+    #[must_use]
     pub fn existing_slot(&self, main_entity: MainEntity) -> Option<u32> {
         self.slot_of_main_entity.get(&main_entity).copied()
     }
@@ -740,6 +749,7 @@ impl Default for ArenaConfig {
 }
 
 /// How many arenas per LOD the cursor-query shader can currently address.
+///
 /// `cursor_query.wgsl` / `query_entries()` bind exactly one `sdf_buffer` +
 /// `chunk_meta` per LOD, so only arena 0 is visible to queries for now.
 pub const QUERY_ARENAS_PER_LOD: usize = 1;
@@ -795,6 +805,7 @@ impl VoxelChunkArenaSet {
     }
 
     #[inline]
+    #[must_use]
     pub const fn lod_index(lod: LOD) -> usize {
         usize_from(lod.rank())
     }
@@ -820,6 +831,7 @@ impl VoxelChunkArenaSet {
     }
 
     /// Finds which arena (within `lod`) already holds this entity, if any.
+    #[must_use]
     pub fn find_slot(&self, lod: LOD, main_entity: MainEntity) -> Option<ArenaSlot> {
         self.arenas
             .get(Self::lod_index(lod))?
@@ -920,6 +932,7 @@ impl VoxelChunkArenaSet {
         }
     }
 
+    #[must_use]
     pub fn total_max_chunks(&self) -> u32 {
         self.iter()
             .fold(0u32, |sum, a| sum.saturating_add(a.max_chunks))

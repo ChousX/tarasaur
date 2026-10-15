@@ -39,6 +39,11 @@ pub struct VoxelFrameStats {
     /// Slots still marked for re-meshing after the dispatch (pipelines not
     /// compiled yet).
     pub dirty_slots: u32,
+    /// Chunks whose SDF went into a different slot.
+    pub reslotted: u32,
+    /// Material/visibility slot writes refilled from the render world's
+    /// cache (for reslotted chunks the main world didn't re-send).
+    pub side_refills: u32,
 }
 
 /// Hands render-world stats to the main world. The meshing counts
@@ -59,8 +64,10 @@ pub const LOD_PENDING: DiagnosticPath = DiagnosticPath::const_new("voxel/lod_pen
 /// Chunks with a jump-flood re-init in flight after an edit.
 pub const REINITS: DiagnosticPath = DiagnosticPath::const_new("voxel/reinits");
 pub const DIRTY_SLOTS: DiagnosticPath = DiagnosticPath::const_new("voxel/dirty_slots");
+pub const RESLOTTED: DiagnosticPath = DiagnosticPath::const_new("voxel/reslotted");
+pub const SIDE_REFILLS: DiagnosticPath = DiagnosticPath::const_new("voxel/side_refills");
 
-pub const ALL: [DiagnosticPath; 10] = [
+pub const ALL: [DiagnosticPath; 12] = [
     DRAWS,
     RESIDENT,
     MESHED_CHUNKS,
@@ -71,6 +78,8 @@ pub const ALL: [DiagnosticPath; 10] = [
     LOADS_IN_FLIGHT,
     LOD_PENDING,
     REINITS,
+    RESLOTTED,
+    SIDE_REFILLS,
 ];
 
 /// Publishes [`VoxelFrameStats`] and main-world chunk counts as diagnostics.
@@ -112,10 +121,14 @@ fn send_frame_stats(
         out.pending_uploads = count(arena_set.deferred.len());
         out.meshed_chunks = out.meshed_chunks.saturating_add(stats.meshed_chunks);
         out.meshed_cells = out.meshed_cells.saturating_add(stats.meshed_cells);
+        out.reslotted = out.reslotted.saturating_add(stats.reslotted);
+        out.side_refills = out.side_refills.saturating_add(stats.side_refills);
     }
-    // Meshing counts are per frame; the dispatch only writes them when it runs.
+    // Per-frame counts, only written by the systems that did the work.
     stats.meshed_chunks = 0;
     stats.meshed_cells = 0;
+    stats.reslotted = 0;
+    stats.side_refills = 0;
 }
 
 type ChunkState = (
@@ -148,6 +161,8 @@ fn publish_voxel_diagnostics(
         let taken = *s;
         s.meshed_chunks = 0;
         s.meshed_cells = 0;
+        s.reslotted = 0;
+        s.side_refills = 0;
         taken
     }) else {
         return;
@@ -160,4 +175,6 @@ fn publish_voxel_diagnostics(
     });
     diagnostics.add_measurement(&PENDING_UPLOADS, || f64::from(stats.pending_uploads));
     diagnostics.add_measurement(&DIRTY_SLOTS, || f64::from(stats.dirty_slots));
+    diagnostics.add_measurement(&RESLOTTED, || f64::from(stats.reslotted));
+    diagnostics.add_measurement(&SIDE_REFILLS, || f64::from(stats.side_refills));
 }

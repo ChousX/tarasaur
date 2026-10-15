@@ -201,8 +201,12 @@ cargo test -j 2      # full parallelism can run out of memory
 
 ## Benchmarking and profiling
 
-The bench runs repeatable phases (load, hold, spin, fly, edit) and writes
-its results to `bench_results/`:
+The bench runs repeatable phases (load, hold, spin, fly, edit, box, query,
+reslot) and writes its results to `bench_results/`. The last three also
+check correctness: box brushes stay inside the box, GPU ray queries return
+one result per ray and agree with the CPU ray, and chunks that lose and
+regain their arena slot get their materials back (read back from the GPU).
+A failed check makes the bench exit with an error.
 
 ```sh
 cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass]

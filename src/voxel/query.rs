@@ -14,6 +14,7 @@ use bevy::{
     prelude::*,
     render::{
         Extract,
+        diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
         render_resource::{
             BindGroup, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
             CommandEncoderDescriptor, ComputePassDescriptor, MapMode, PipelineCache,
@@ -400,6 +401,7 @@ pub fn dispatch_voxel_query_pass(
     compute_pipeline: Res<VoxelComputePipeline>,
     query_buffers: Res<VoxelQueryBuffers>,
     mut next_slot: ResMut<NextQuerySlot>,
+    recorder: Option<Res<DiagnosticsRecorder>>,
 ) {
     let count = query_buffers.active_count;
     if count == 0 {
@@ -430,6 +432,8 @@ pub fn dispatch_voxel_query_pass(
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_query_encoder"),
     });
+    let recorder = recorder.as_deref();
+    let span = recorder.time_span(&mut encoder, "voxel_query");
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("voxel_cursor_query"),
@@ -439,6 +443,7 @@ pub fn dispatch_voxel_query_pass(
         pass.set_bind_group(0, bind_group, &[]);
         pass.dispatch_workgroups(count, 1, 1);
     }
+    span.end(&mut encoder);
     encoder.copy_buffer_to_buffer(hit, 0, readback, 0, hit.size());
     render_queue.submit(std::iter::once(encoder.finish()));
 
