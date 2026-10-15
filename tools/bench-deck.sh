@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Run the bench on a Steam Deck, from a checkout on the Deck itself.
+#
+#   tools/bench-deck.sh [label] [-- extra bench args]
+#
+# e.g. `tools/bench-deck.sh`, `tools/bench-deck.sh lod-a -- --msaa 1`.
+# Works from Desktop Mode or over ssh (`ssh deck@steamdeck`): with no
+# display in the environment it draws on the Deck's own screen (:0).
+#
+# Uses the flake's dev shell when nix is installed and we aren't already in
+# it, otherwise the cargo on PATH. Results land in bench_results/ as
+# deck-<label>-<timestamp>.{frames,summary}.csv.
+#
+# Env: JOBS (cargo build jobs, default 4: a full-parallel Bevy build can run
+# the Deck out of memory), DISPLAY (default :0 when nothing is set).
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+label="$(git rev-parse --short HEAD 2>/dev/null || echo run)"
+if [[ $# -gt 0 && "$1" != "--" ]]; then
+    label="$1"
+    shift
+fi
+if [[ "${1:-}" == "--" ]]; then
+    shift
+fi
+
+# Over ssh there is no display; use the one on the Deck's screen.
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    export DISPLAY=:0
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+fi
+
+cmd=(cargo run --release -j "${JOBS:-4}" --example bench -- --label "deck-$label" "$@")
+if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix >/dev/null; then
+    cmd=(nix develop --command "${cmd[@]}")
+fi
+
+# Note the power state: a Deck on battery or with a TDP cap benches slower.
+if [[ -r /sys/class/power_supply/ACAD/online ]]; then
+    [[ "$(cat /sys/class/power_supply/ACAD/online)" == 1 ]] || echo "warning: on battery" >&2
+fi
+
+echo "+ ${cmd[*]}" >&2
+"${cmd[@]}"

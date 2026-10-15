@@ -243,6 +243,11 @@ cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-
 cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 ```
 
+On a Steam Deck, run `tools/bench-deck.sh [label] [-- bench args]` from a
+checkout on the Deck. It works over ssh too (it draws on the Deck's
+screen), uses the nix dev shell if nix is installed, and labels results
+`deck-<label>` (default: the commit hash).
+
 CPU profiling uses [Tracy](https://github.com/wolfpld/tracy). The dev shell
 pins Tracy 0.14.1, the protocol version Bevy 0.20's client speaks
 (`nix/tracy.nix`). The app only records while Tracy is connected, so
