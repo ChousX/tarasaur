@@ -8,12 +8,12 @@ build a continuous, persistent environment. It should run well on low-end
 hardware such as a Steam Deck.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ChousX/tarasaur/main/docs/media/editing.gif" alt="Digging into the terrain with the cursor brush" width="400">
+  <img src="docs/media/editing.gif" alt="Digging into the terrain with the cursor brush" width="400">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ChousX/tarasaur/main/docs/media/terrain.png" alt="Streamed terrain with grass and sand materials and the brush cursor" width="360">
-  <img src="https://raw.githubusercontent.com/ChousX/tarasaur/main/docs/media/crater.png" alt="A crater dug with the brush" width="360">
+  <img src="docs/media/terrain.png" alt="Streamed terrain with grass and sand materials and the brush cursor" width="360">
+  <img src="docs/media/crater.png" alt="A crater dug with the brush" width="360">
 </p>
 
 ## Features
