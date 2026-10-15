@@ -13,6 +13,7 @@ categories = ["game-development", "rendering"]
 exclude = [
     "/bench_results",
     "/saves",
+    "/captures",
     "/tools",
     "/nix",
     "/flake.nix",

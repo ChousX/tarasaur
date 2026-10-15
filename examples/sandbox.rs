@@ -4,10 +4,20 @@
 //! smooth, flatten, paint), Q/E the material, scroll the radius and Ctrl +
 //! scroll the strength; Ctrl + left mouse swaps dig and build, and R toggles
 //! flatten between level and along the slope.
+//!
+//! Capture: F12 saves a screenshot, F10 starts and stops recording frames
+//! (turn them into a GIF with `tools/make-gif.sh`), H hides the HUD. Both
+//! write under `captures/`.
 
 mod common;
 
-use bevy::{input::mouse::MouseWheel, prelude::*};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use bevy::{
+    input::mouse::MouseWheel,
+    prelude::*,
+    render::view::screenshot::{Screenshot, save_to_disk},
+};
 use common::{
     FlyCam, TerrainMaterial, fly_cam_system, register_terrain, render_plugin, setup_terrain_palette,
 };
@@ -32,6 +42,7 @@ fn main() {
         radius: 4.0,
         ..default()
     })
+    .init_resource::<Recording>()
     .add_systems(Startup, (spawn_player, spawn_hud, setup_terrain_palette))
     .add_systems(
         Update,
@@ -39,6 +50,7 @@ fn main() {
             fly_cam_system,
             brush_controls.before(FieldSet::Brush),
             update_hud.after(brush_controls),
+            capture_controls,
         ),
     )
     .run();
@@ -177,5 +189,97 @@ fn update_hud(brush: Res<CursorBrush>, mut hud: Query<&mut Text, With<Hud>>) {
              LMB apply, ctrl+LMB swaps dig/build, RMB look",
             brush.radius, brush.strength, brush.flatten
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capture
+// ---------------------------------------------------------------------------
+
+/// Frames per second while recording; `tools/make-gif.sh` plays them back at
+/// the same rate.
+const RECORD_FPS: f32 = 15.0;
+
+/// An active recording: the folder its frames go to and the next frame number.
+#[derive(Resource)]
+struct Recording {
+    dir: Option<String>,
+    frame: u32,
+    timer: Timer,
+}
+
+impl Default for Recording {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            frame: 0,
+            timer: Timer::from_seconds(RECORD_FPS.recip(), TimerMode::Repeating),
+        }
+    }
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// F12 saves a screenshot, F10 toggles recording, H toggles the HUD.
+fn capture_controls(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut rec: ResMut<Recording>,
+    mut hud: Query<&mut Visibility, With<Hud>>,
+) {
+    if keys.just_pressed(KeyCode::KeyH) {
+        for mut vis in &mut hud {
+            vis.toggle_visible_hidden();
+        }
+    }
+
+    if keys.just_pressed(KeyCode::F12) {
+        if let Err(e) = std::fs::create_dir_all("captures") {
+            warn!("Can't create captures/: {e}");
+        }
+        let path = format!("captures/shot-{}.png", unix_secs());
+        info!("Screenshot: {path}");
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
+    }
+
+    if keys.just_pressed(KeyCode::F10) {
+        if let Some(dir) = rec.dir.take() {
+            info!(
+                "Recorded {} frames to {dir}; make a GIF with: tools/make-gif.sh {dir}",
+                rec.frame
+            );
+        } else {
+            let dir = format!("captures/rec-{}", unix_secs());
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => {
+                    info!("Recording to {dir} (F10 to stop)");
+                    rec.dir = Some(dir);
+                    rec.frame = 0;
+                    rec.timer.reset();
+                }
+                Err(e) => warn!("Can't create {dir}: {e}"),
+            }
+        }
+    }
+
+    let Some(dir) = rec.dir.clone() else {
+        return;
+    };
+    rec.timer.tick(time.delta());
+    // One frame per tick, even after a hitch, so playback stays at the
+    // recorded speed except for the hitch itself.
+    if rec.timer.just_finished() {
+        let path = format!("{dir}/frame-{:05}.png", rec.frame);
+        rec.frame = rec.frame.saturating_add(1);
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
     }
 }

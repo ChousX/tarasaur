@@ -205,7 +205,7 @@ cargo run --release --example sandbox
 
 | Example | What it shows |
 |---|---|
-| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-5 pick dig, build, smooth, flatten or paint, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening |
+| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-5 pick dig, build, smooth, flatten or paint, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening. F12 saves a screenshot, F10 starts and stops a recording (`tools/make-gif.sh` turns it into a GIF), H hides the HUD |
 | `lod_streaming` | The smallest streaming setup |
 | `edit_sphere` | Hand-spawned chunks and a resizable SDF sphere |
 | `normal_check` | Headless comparison of normal-estimation methods |
