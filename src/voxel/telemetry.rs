@@ -14,6 +14,9 @@ use crate::voxel::arena::VoxelChunkArenaSet;
 #[derive(Resource)]
 pub struct GuardTelemetry(pub bool);
 
+// Not derivable in debug builds (it defaults to on there); clippy only sees
+// the release value.
+#[allow(clippy::derivable_impls)]
 impl Default for GuardTelemetry {
     fn default() -> Self {
         Self(cfg!(debug_assertions))

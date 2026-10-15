@@ -8,8 +8,8 @@ use bevy::shape::{Cuboid, Sphere};
 use crate::chunk::NewChunkSpawned;
 use crate::field::editor::{EditFieldMessage, SdfCsgSphere, SdfSphereStamp};
 use crate::field::systems::{
-    clear_dirty, detect_topology_desync, process_sdf_csg_spheres, process_sdf_sphere_stamps,
-    process_shape_edits, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
+    clear_dirty, process_sdf_csg_spheres, process_sdf_sphere_stamps, process_shape_edits,
+    resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
 };
 use crate::field::{Field, LOD, TargetLOD, VoxelField};
 
@@ -36,13 +36,17 @@ impl Plugin for FieldsPlugin {
         );
         app.add_systems(
             Update,
-            (
-                detect_topology_desync,
-                spawn_sdf_reinit_tasks,
-                resolve_sdf_reinit_tasks,
-            )
+            (spawn_sdf_reinit_tasks, resolve_sdf_reinit_tasks)
                 .chain()
                 .in_set(FieldSet::Reinit),
+        );
+        // A development aid only: release builds neither run nor compile it.
+        #[cfg(debug_assertions)]
+        app.add_systems(
+            Update,
+            crate::field::systems::detect_topology_desync
+                .in_set(FieldSet::Reinit)
+                .before(spawn_sdf_reinit_tasks),
         );
 
         app.add_message::<SdfSphereStamp>()

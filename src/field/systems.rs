@@ -12,10 +12,10 @@ use super::{
     ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
 };
 use crate::{
-    chunk::{CHUNK_SIZE, ChunkPosition},
+    chunk::CHUNK_SIZE,
     chunk::{ChunkManager, overlapping_chunks},
     field::{
-        DirtyField, MaxEditLod, VisibilityField,
+        DirtyField, MaxEditLod,
         editor::{SdfCsgSphere, SdfSphereStamp},
         ops::{FieldSphereOps, ShapeEditOps},
     },
@@ -225,26 +225,32 @@ pub fn resolve_sdf_reinit_tasks(
 }
 
 /// (entity, SDF edited, visibility edited).
+#[cfg(debug_assertions)]
 type EditedFields = (
     Entity,
     Has<DirtyField<SDF, f32>>,
-    Has<DirtyField<VisibilityField, bool>>,
+    Has<DirtyField<crate::field::VisibilityField, bool>>,
 );
 
 /// Chunks with both fields, at least one edited, and no reinit in flight.
+#[cfg(debug_assertions)]
 type DesyncCandidate = (
     With<SDF>,
-    With<VisibilityField>,
+    With<crate::field::VisibilityField>,
     Without<SdfReinitTask>,
     Or<(
         With<DirtyField<SDF, f32>>,
-        With<DirtyField<VisibilityField, bool>>,
+        With<DirtyField<crate::field::VisibilityField, bool>>,
     )>,
 );
 
+/// Debug builds only: warns when an edit cycle changed a chunk's SDF or its
+/// visibility but not both. Often deliberate (hiding a region), so it's a
+/// development aid, and release builds don't pay for it.
+#[cfg(debug_assertions)]
 pub fn detect_topology_desync(
     query: Query<EditedFields, DesyncCandidate>,
-    positions: Query<&ChunkPosition>,
+    positions: Query<&crate::chunk::ChunkPosition>,
 ) {
     for (entity, sdf_dirty, vis_dirty) in query.iter() {
         if sdf_dirty != vis_dirty {
