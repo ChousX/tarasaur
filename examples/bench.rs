@@ -4,7 +4,7 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas]
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! ```
 //!
@@ -48,7 +48,7 @@
 mod common;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -73,7 +73,10 @@ use common::{
 use renderdoc::{RenderDoc, V141};
 use tarasaur::{
     MaterialFieldPlugin, TarasaurPlugin,
-    chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, overlapping_chunks, world_pos_to_chunk_pos},
+    chunk::{
+        CHUNK_SIZE, ChunkLoader, ChunkManager, ChunkPosition, overlapping_chunks,
+        world_pos_to_chunk_pos,
+    },
     field::{
         Field, LOD, MaterialField, SDF, SDF_BAND, VisibilityField, VoxelField, VoxelMaterial,
         editor::{SdfCsgSphere, WorldEditor},
@@ -453,6 +456,7 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
     }
     app.insert_resource(probe)
         .insert_resource(mesh_probe)
+        .insert_resource(GapProbes(std::env::args().any(|a| a == "--gap-probes")))
         .insert_resource(SmallArenas(small_arenas))
         .init_resource::<QueryWatch>()
         .add_systems(
@@ -1133,12 +1137,25 @@ fn read_back_slots(
 /// When meshes are read back: fresh from load (`hold`), straight after
 /// streaming while moving (near `fly`'s end), and after sitting still at
 /// the fly's end (near `edit`'s end, skipping the edited chunks). The
-/// readback takes a few frames, so each is checked on its phase's last.
+/// readback takes a few frames and the crack check over a second (on its own
+/// thread), so each is checked on its phase's last frame.
 const MESH_PROBES: [(Phase, u32); 3] = [
     (Phase::Hold, 10),
-    (Phase::Fly, FLY_FRAMES - 30),
-    (Phase::Edit, EDIT_FRAMES - 30),
+    (Phase::Fly, FLY_FRAMES - 200),
+    (Phase::Edit, EDIT_FRAMES - 200),
 ];
+/// With `--gap-probes`, meshes are also read back this often while flying,
+/// to catch cracks that only last until both sides of a LOD change have
+/// re-meshed. Each probe reads every mesh back, so it slows `fly` ~10x.
+const FLY_GAP_PROBE_EVERY: u32 = 15;
+/// Vertex positions are matched across chunks at this resolution (world
+/// units): chunks that share a seam vertex compute it from the same data.
+const MESH_WELD: f32 = 1.0 / 1024.0;
+/// An open edge whose midpoint is within this many of its chunk's voxels of
+/// another chunk's surface is closed off; further is a visible gap.
+const MESH_GAP: f32 = 0.02;
+/// Cell size of the triangle grid for gap distances, in world units.
+const MESH_GAP_CELL: f32 = 1.0;
 /// A vertex further than this from the heightfield, in its chunk's voxels,
 /// is off the surface. Surface nets keeps a vertex inside its cell, and a
 /// seam cell spans at most a few of this chunk's voxels.
@@ -1165,8 +1182,17 @@ struct MeshProbeState {
     pending: usize,
     /// Chunks to skip: edited on purpose.
     exclude: Vec<IVec3>,
+    /// Chunks with data when the probe was asked for, meshed or not: an
+    /// open edge beside one of these is a gap, beside anything else the edge
+    /// of the loaded world.
+    loaded: HashSet<IVec3>,
+    /// The frame the current probe was asked for.
+    current_frame: u32,
+    requested_frame: u32,
     report: MeshReport,
     done: Vec<(Phase, MeshReport)>,
+    /// Cracks found by each probe: (phase, frame, cracks).
+    gaps: Vec<(Phase, u32, CrackReport)>,
     /// The apron audit of `hold`'s flagged chunks: started, readbacks still
     /// pending, and the error per texel class.
     apron_started: bool,
@@ -1223,6 +1249,40 @@ struct MeshReport {
     max_off: [f32; LOD::COUNT],
     /// Every resident chunk's LOD, to describe the neighbours of a flag.
     lods: HashMap<IVec3, LOD>,
+    /// Every triangle, in world space, with its chunk: for the crack check
+    /// across chunks once every arena is in. Emptied after it.
+    world_triangles: Vec<(IVec3, LOD, [Vec3; 3])>,
+    /// See `MeshProbeState::loaded`.
+    loaded: HashSet<IVec3>,
+    /// Each meshed chunk's seam ranks, as last uploaded.
+    ranks: HashMap<IVec3, [u32; 2]>,
+}
+
+/// Edges of the whole terrain mesh used by one triangle only (or by more
+/// than two). Every edge between chunks is shared, so those are cracks,
+/// unless they lie on a chunk face with nothing meshed across it: the edge
+/// of the loaded world.
+#[derive(Default, Clone)]
+struct CrackReport {
+    open_edges: usize,
+    /// Open edges along the loaded world's edge, not cracks.
+    border: usize,
+    /// Open edges beside a chunk that has data but no mesh: the whole chunk
+    /// is missing from the frame. (chunk with no mesh, the one beside it.)
+    missing: Vec<(IVec3, IVec3)>,
+    /// Edges used by three or more triangles.
+    overused: usize,
+    /// Cracks where this chunk's stored seam rank for the chunk across
+    /// doesn't match that chunk's LOD (it stitched to a LOD it doesn't have
+    /// any more), or where the chunk across has stale ranks for this one.
+    stale_here: usize,
+    stale_across: usize,
+    /// Open edges whose midpoint another chunk's surface covers (within
+    /// `MESH_GAP` of its voxel): seams that don't share vertices, not holes.
+    covered: usize,
+    /// Cracks: (chunk, LOD, local midpoint, the chunk face or "interior",
+    /// gap to the nearest other chunk's triangle in this chunk's voxels).
+    cracks: Vec<(IVec3, LOD, Vec3, String, f32)>,
 }
 
 impl MeshReport {
@@ -1236,6 +1296,8 @@ impl MeshReport {
         self.folds.extend(part.folds);
         self.fold_corners.extend(part.fold_corners);
         self.bad_normals.extend(part.bad_normals);
+        self.world_triangles.extend(part.world_triangles);
+        self.ranks.extend(part.ranks);
         for (m, p) in self.max_off.iter_mut().zip(part.max_off) {
             *m = m.max(p);
         }
@@ -1246,12 +1308,27 @@ impl MeshReport {
 #[derive(Resource, Clone, Default)]
 struct MeshProbe(Arc<Mutex<MeshProbeState>>);
 
-fn drive_mesh_probe(bench: Res<Bench>, probe: Res<MeshProbe>) {
-    if !MESH_PROBES.contains(&(bench.phase, bench.frame_in_phase)) {
+/// `--gap-probes`: probe meshes every `FLY_GAP_PROBE_EVERY` frames of `fly`.
+#[derive(Resource, Clone, Copy)]
+struct GapProbes(bool);
+
+fn drive_mesh_probe(
+    bench: Res<Bench>,
+    probe: Res<MeshProbe>,
+    gap_probes: Res<GapProbes>,
+    chunks: Query<&ChunkPosition, With<LOD>>,
+) {
+    let fly_gap = gap_probes.0
+        && bench.phase == Phase::Fly
+        && bench.frame_in_phase > 0
+        && bench.frame_in_phase.is_multiple_of(FLY_GAP_PROBE_EVERY);
+    if !fly_gap && !MESH_PROBES.contains(&(bench.phase, bench.frame_in_phase)) {
         return;
     }
     if let Ok(mut s) = probe.0.lock() {
         s.requested = Some(bench.phase);
+        s.requested_frame = bench.frame_in_phase;
+        s.loaded = chunks.iter().map(|c| c.0).collect();
         s.exclude = if bench.phase == Phase::Edit {
             let margin = Vec3::splat(EDIT_RADIUS + CHUNK_SIZE);
             overlapping_chunks(edit_target(), margin).collect()
@@ -1303,11 +1380,13 @@ fn read_back_meshes(
             return;
         };
         s.current = Some(phase);
+        s.current_frame = s.requested_frame;
         s.report = MeshReport {
             lods: arenas
                 .resident_chunks()
                 .map(|(pos, lod, _)| (pos, lod))
                 .collect(),
+            loaded: std::mem::take(&mut s.loaded),
             ..default()
         };
         let mesh_arenas = arenas.mesh_arenas();
@@ -1320,9 +1399,10 @@ fn read_back_meshes(
             &arena.index_buffer,
             &arena.indirect_args_buffer,
             &arena.vertex_count_buffer,
+            &arena.chunk_meta_buffer,
         ];
         let sizes = sources.map(|b| b.size());
-        let mut offsets = [0u64; 4];
+        let mut offsets = [0u64; 5];
         let mut total = 0u64;
         for (offset, size) in offsets.iter_mut().zip(sizes) {
             *offset = total;
@@ -1365,21 +1445,13 @@ fn read_back_meshes(
                             indices: piece(1),
                             args: piece(2),
                             counts: piece(3),
+                            meta: piece(4),
                         };
                         check_arena_meshes(&arena, &exclude, &mesh, &mut part);
                     }
                     readback.unmap();
                 }
-                if let Ok(mut s) = state.lock() {
-                    s.report.merge(part);
-                    s.pending = s.pending.saturating_sub(1);
-                    if s.pending == 0
-                        && let Some(phase) = s.current.take()
-                    {
-                        let report = std::mem::take(&mut s.report);
-                        s.done.push((phase, report));
-                    }
-                }
+                finish_arena(&state, part);
             });
     }
 }
@@ -1607,12 +1679,51 @@ impl ApronChunk {
     }
 }
 
+/// Adds one arena's results to the probe; after the last, files the report
+/// and starts its crack check.
+fn finish_arena(state: &Arc<Mutex<MeshProbeState>>, part: MeshReport) {
+    let Ok(mut s) = state.lock() else {
+        return;
+    };
+    s.report.merge(part);
+    s.pending = s.pending.saturating_sub(1);
+    if s.pending != 0 {
+        return;
+    }
+    let Some(phase) = s.current.take() else {
+        return;
+    };
+    let mut report = std::mem::take(&mut s.report);
+    // Off the render thread: hashing every edge of the terrain takes over a
+    // second.
+    let input = MeshReport {
+        world_triangles: std::mem::take(&mut report.world_triangles),
+        lods: report.lods.clone(),
+        loaded: std::mem::take(&mut report.loaded),
+        ranks: report.ranks.clone(),
+        ..default()
+    };
+    let frame = s.current_frame;
+    let state = state.clone();
+    std::thread::spawn(move || {
+        let cracks = find_cracks(&input);
+        if let Ok(mut s) = state.lock() {
+            s.gaps.push((phase, frame, cracks));
+        }
+    });
+    // The scheduled probe of each phase is its last.
+    s.done.retain(|(p, _)| *p != phase);
+    s.done.push((phase, report));
+}
+
 /// One arena's read-back buffers.
 struct ArenaBytes<'a> {
     vertices: &'a [u8],
     indices: &'a [u8],
     args: &'a [u8],
     counts: &'a [u8],
+    /// `ChunkMeta` per slot, 32 bytes; seam ranks at words 4 and 5.
+    meta: &'a [u8],
 }
 
 impl ArenaBytes<'_> {
@@ -1660,19 +1771,27 @@ fn check_arena_meshes(
     report: &mut MeshReport,
 ) {
     for &(pos, slot, base) in &arena.slots {
-        if exclude.contains(&pos) {
-            continue;
-        }
+        let checked = !exclude.contains(&pos);
         let count = read_u32(mesh.counts, u64::from(slot)).unwrap_or(0);
-        report.chunks = report.chunks.saturating_add(1);
-        report.vertices = report.vertices.saturating_add(usize_from(count));
+        let word = u64::from(slot).saturating_mul(8);
+        if let (Some(r0), Some(r1)) = (
+            read_u32(mesh.meta, word.saturating_add(4)),
+            read_u32(mesh.meta, word.saturating_add(5)),
+        ) {
+            report.ranks.insert(pos, [r0, r1]);
+        }
         let chunk = ChunkMesh {
             pos,
             lod: arena.lod,
             base,
             count,
+            checked,
         };
-        check_vertices(&chunk, mesh, report);
+        if checked {
+            report.chunks = report.chunks.saturating_add(1);
+            report.vertices = report.vertices.saturating_add(usize_from(count));
+            check_vertices(&chunk, mesh, report);
+        }
         let index_count = read_u32(mesh.args, u64::from(slot) * MESH_ARGS_BYTES / 4).unwrap_or(0);
         check_triangles(&chunk, index_count, mesh, report);
     }
@@ -1684,6 +1803,9 @@ struct ChunkMesh {
     lod: LOD,
     base: u32,
     count: u32,
+    /// False for chunks edited on purpose: their triangles still count for
+    /// the crack check, but aren't checked against the heightfield.
+    checked: bool,
 }
 
 impl ChunkMesh {
@@ -1734,7 +1856,9 @@ fn check_triangles(
     let voxel = chunk.lod.voxel_size();
     let first = u64::from(chunk.base).saturating_mul(u64::from(MESH_INDICES_PER_VERTEX));
     for t in 0..u64::from(index_count / 3) {
-        report.triangles = report.triangles.saturating_add(1);
+        if chunk.checked {
+            report.triangles = report.triangles.saturating_add(1);
+        }
         let at = first.saturating_add(t.saturating_mul(3));
         let ids = [0, 1, 2].map(|k| read_u32(mesh.indices, at.saturating_add(k)));
         let [Some(i0), Some(i1), Some(i2)] = ids else {
@@ -1748,6 +1872,12 @@ fn check_triangles(
         else {
             continue;
         };
+        report
+            .world_triangles
+            .push((chunk.pos, chunk.lod, [a, b, c]));
+        if !chunk.checked {
+            continue;
+        }
         let centroid = (a + b + c) / 3.0;
         let longest = a.distance(b).max(b.distance(c)).max(c.distance(a)) / voxel;
         if exceeds(longest, MESH_MAX_EDGE) {
@@ -1766,6 +1896,284 @@ fn check_triangles(
                 .push([a, b, c].map(|p| chunk.flag(0.0, p).local));
         }
     }
+}
+
+/// A world position, snapped to `MESH_WELD`.
+fn weld(p: Vec3) -> IVec3 {
+    (p / MESH_WELD).round().as_ivec3()
+}
+
+/// Counts how many triangles use each edge of the whole mesh, and sorts the
+/// edges used once into the loaded world's border and cracks.
+/// The 27 offsets of a cell and its neighbours.
+fn around() -> impl Iterator<Item = IVec3> {
+    (0u32..27).map(|k| {
+        UVec3::new(k % 3, k / 3 % 3, k / 9)
+            .as_ivec3()
+            .wrapping_sub(IVec3::ONE)
+    })
+}
+
+/// The report's triangles by `MESH_GAP_CELL` grid cell.
+fn surface_grid(r: &MeshReport) -> HashMap<IVec3, Vec<usize>> {
+    let mut grid: HashMap<IVec3, Vec<usize>> = HashMap::new();
+    for (i, (_, _, t)) in r.world_triangles.iter().enumerate() {
+        let lo = (t[0].min(t[1]).min(t[2]) / MESH_GAP_CELL)
+            .floor()
+            .as_ivec3();
+        let hi = (t[0].max(t[1]).max(t[2]) / MESH_GAP_CELL)
+            .floor()
+            .as_ivec3();
+        for z in lo.z..=hi.z {
+            for y in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
+                    grid.entry(IVec3::new(x, y, z)).or_default().push(i);
+                }
+            }
+        }
+    }
+    grid
+}
+
+/// Distance from `point` to the nearest triangle not of chunk `own`.
+fn gap_to_others(
+    grid: &HashMap<IVec3, Vec<usize>>,
+    r: &MeshReport,
+    point: Vec3,
+    own: IVec3,
+) -> f32 {
+    let cell = (point / MESH_GAP_CELL).floor().as_ivec3();
+    let mut best = f32::INFINITY;
+    for d in around() {
+        for &i in grid.get(&cell.saturating_add(d)).into_iter().flatten() {
+            if let Some((pos, _, tri)) = r.world_triangles.get(i)
+                && *pos != own
+            {
+                best = best.min(point_triangle_distance(point, *tri));
+            }
+        }
+    }
+    best
+}
+
+/// How many triangles use each welded edge, and the first one that does.
+fn edge_uses(r: &MeshReport) -> HashMap<(IVec3, IVec3), (u32, usize)> {
+    let mut edges: HashMap<(IVec3, IVec3), (u32, usize)> = HashMap::new();
+    for (i, (_, _, [a, b, c])) in r.world_triangles.iter().enumerate() {
+        for (p, q) in [(a, b), (b, c), (c, a)] {
+            let (p, q) = (weld(*p), weld(*q));
+            let key = if p.to_array() < q.to_array() {
+                (p, q)
+            } else {
+                (q, p)
+            };
+            let e = edges.entry(key).or_insert((0, i));
+            e.0 = e.0.saturating_add(1);
+        }
+    }
+    edges
+}
+
+fn find_cracks(r: &MeshReport) -> CrackReport {
+    let grid = surface_grid(r);
+    let gap_at = |p: Vec3, own: IVec3| gap_to_others(&grid, r, p, own);
+    let edges = edge_uses(r);
+    let mut out = CrackReport::default();
+    for ((p, q), (uses, tri)) in edges {
+        if uses > 2 {
+            out.overused = out.overused.saturating_add(1);
+        }
+        if uses != 1 {
+            continue;
+        }
+        out.open_edges = out.open_edges.saturating_add(1);
+        let Some(&(pos, lod, _)) = r.world_triangles.get(tri) else {
+            continue;
+        };
+        let voxel = lod.voxel_size();
+        let origin = pos.as_vec3() * CHUNK_SIZE;
+        let local = |w: IVec3| (w.as_vec3() * MESH_WELD - origin) / voxel;
+        let (lp, lq) = (local(p), local(q));
+        let n = f32_from_u32(lod.size());
+        let eps = 0.01;
+        // The chunk faces the edge lies on, and whether anything is meshed
+        // across each.
+        // The chunks across the faces the edge lies on (or, along a low
+        // face, the half-cell strip that the neighbour across finishes).
+        let mut faces = Vec::new();
+        let mut across = Vec::new();
+        for (axis, unit) in [IVec3::X, IVec3::Y, IVec3::Z].into_iter().enumerate() {
+            let (a, b) = (lp[axis], lq[axis]);
+            if a <= 1.0 && b <= 1.0 {
+                across.push(pos.saturating_sub(unit));
+            }
+            let side = if a <= eps && b <= eps {
+                -1
+            } else if a >= n - eps && b >= n - eps {
+                1
+            } else {
+                continue;
+            };
+            across.push(if side > 0 {
+                pos.saturating_add(unit)
+            } else {
+                pos.saturating_sub(unit)
+            });
+            faces.push((axis, side));
+        }
+        if across.iter().any(|c| !r.loaded.contains(c)) {
+            out.border = out.border.saturating_add(1);
+            continue;
+        }
+        if let Some(&gone) = across.iter().find(|c| !r.lods.contains_key(*c)) {
+            out.missing.push((gone, pos));
+            continue;
+        }
+        let mid = (p.as_vec3() + q.as_vec3()) * MESH_WELD / 2.0;
+        let gap = gap_at(mid, pos) / voxel;
+        if gap <= MESH_GAP {
+            out.covered = out.covered.saturating_add(1);
+            continue;
+        }
+        let face = if faces.is_empty() {
+            "interior".to_string()
+        } else {
+            faces
+                .iter()
+                .map(|&(axis, side)| {
+                    let name = ["x", "y", "z"].get(axis).copied().unwrap_or("?");
+                    format!("{name}{}", if side > 0 { "+" } else { "-" })
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let stored = |of: IVec3, at: IVec3| {
+            r.ranks.get(&of).map(|ranks| {
+                let k = at
+                    .saturating_sub(of)
+                    .saturating_add(IVec3::ONE)
+                    .dot(IVec3::new(1, 3, 9));
+                let k = k.unsigned_abs();
+                ranks
+                    .get(usize_from(k / 16))
+                    .copied()
+                    .unwrap_or(0)
+                    .wrapping_shr((k % 16).wrapping_mul(2))
+                    & 3
+            })
+        };
+        for &c in &across {
+            if let Some(&l) = r.lods.get(&c) {
+                if stored(pos, c).is_some_and(|s| s != l.rank()) {
+                    out.stale_here = out.stale_here.saturating_add(1);
+                }
+                if stored(c, pos).is_some_and(|s| s != lod.rank()) {
+                    out.stale_across = out.stale_across.saturating_add(1);
+                }
+            }
+        }
+        out.cracks.push((pos, lod, (lp + lq) / 2.0, face, gap));
+    }
+    out.cracks.sort_by(|a, b| b.4.total_cmp(&a.4));
+    out
+}
+
+/// Distance from `p` to the triangle `t` (Ericson, Real-Time Collision
+/// Detection 5.1.5).
+fn point_triangle_distance(point: Vec3, tri: [Vec3; 3]) -> f32 {
+    let [va, vb, vc] = tri;
+    let (ab, ac, ap) = (vb - va, vc - va, point - va);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return point.distance(va);
+    }
+    let bp = point - vb;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return point.distance(vb);
+    }
+    let wc = d1.mul_add(d4, -(d3 * d2));
+    if wc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return point.distance(va + ab * (d1 / (d1 - d3)));
+    }
+    let cp = point - vc;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return point.distance(vc);
+    }
+    let wb = d5.mul_add(d2, -(d1 * d6));
+    if wb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return point.distance(va + ac * (d2 / (d2 - d6)));
+    }
+    let wa = d3.mul_add(d6, -(d5 * d4));
+    if wa <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return point.distance(vb + (vc - vb) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))));
+    }
+    let denom = 1.0 / (wa + wb + wc);
+    if !denom.is_finite() {
+        return point
+            .distance(va)
+            .min(point.distance(vb))
+            .min(point.distance(vc));
+    }
+    point.distance(va + ab * (wb * denom) + ac * (wc * denom))
+}
+
+/// The cracks every probe found, as report lines.
+fn gap_report_lines(probe: &MeshProbe, phase: Phase) -> Vec<String> {
+    let Ok(s) = probe.0.lock() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for (p, frame, c) in s.gaps.iter().filter(|(p, _, _)| *p == phase) {
+        let mut by_face: HashMap<String, usize> = HashMap::new();
+        let mut chunks: Vec<IVec3> = Vec::new();
+        for (pos, lod, _, face, _) in &c.cracks {
+            let key = format!("{lod:?} {face}");
+            let n = by_face.entry(key).or_default();
+            *n = n.saturating_add(1);
+            if !chunks.contains(pos) {
+                chunks.push(*pos);
+            }
+        }
+        lines.push(format!(
+            "{} frame {frame}: {} gaps in {} chunks ({} with stale ranks here, {} across), widest {:.2} voxels; {} open edges beside {} loaded chunks with no mesh ({} open edges: {} on the loaded border, {} covered by a neighbour; {} edges used 3+ times) {by_face:?}",
+            p.name(),
+            c.cracks.len(),
+            chunks.len(),
+            c.stale_here,
+            c.stale_across,
+            c.cracks.first().map_or(0.0, |x| x.4),
+            c.missing.len(),
+            {
+                let mut gone: Vec<IVec3> = c.missing.iter().map(|m| m.0).collect();
+                gone.sort_by_key(IVec3::to_array);
+                gone.dedup();
+                gone.len()
+            },
+            c.open_edges,
+            c.border,
+            c.covered,
+            c.overused
+        ));
+        for (pos, lod, mid, face, gap) in c.cracks.iter().take(4) {
+            lines.push(format!(
+                "    gap {gap:.2}: chunk {pos} {lod:?} {face} at local ({:.2}, {:.2}, {:.2}); {}",
+                mid.x,
+                mid.y,
+                mid.z,
+                describe_neighbours(
+                    &s.done
+                        .iter()
+                        .find(|(q, _)| q == p)
+                        .map(|(_, r)| r.lods.clone())
+                        .unwrap_or_default(),
+                    *pos
+                )
+            ));
+        }
+    }
+    lines
 }
 
 /// The LODs of the chunks around `pos`, as "dx,dy,dz:LOD" for each one that
@@ -1926,6 +2334,13 @@ fn check_meshes(mut bench: ResMut<Bench>, probe: Res<MeshProbe>) {
         }
     };
     bench.checks.record(phase, "mesh_on_surface", pass, detail);
+    let gaps = gap_report_lines(&probe, phase);
+    if !gaps.is_empty() {
+        // Report-only until the transient cracks are understood.
+        bench
+            .checks
+            .record(phase, "mesh_cracks", true, gaps.join("\n"));
+    }
     if phase == Phase::Hold {
         let lines = apron_report_lines(&probe);
         bench

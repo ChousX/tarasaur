@@ -209,6 +209,172 @@ pub struct ArenaGpu<'w> {
     render_queue: Res<'w, RenderQueue>,
 }
 
+/// This frame's uploads, in `pending`'s order (oldest wait first).
+///
+/// Pending chunks already on screen that touch (26-neighbours) form a
+/// cluster, and a cluster updates all in one frame or waits whole: a chunk
+/// re-extracted to stitch to its neighbour's new LOD must not show before
+/// that neighbour's new mesh does, nor after. Showing one side first cracked
+/// the seam until the other landed (the brief black lines next to fresh
+/// LODs). A chunk loading in for the first time has no old mesh to clash
+/// with, so it stands alone: clustering those too made the whole first load
+/// one cluster too big to ever fit, and nothing loaded.
+///
+/// Clusters go oldest first while they fit the budget, which paces new
+/// placements (fresh loads, LOD changes), and their LODs' re-mesh scratch.
+/// The first cluster of a frame goes even over the budget, and if it needs
+/// more scratch than is left, as much of it as fits goes, so nothing waits
+/// forever. Waiting new placements go in `deferred`.
+fn admit<'a, F: VoxelField>(
+    arena_set: &mut VoxelChunkArenaSet,
+    cells_per_frame: u32,
+    pending: Vec<Pending>,
+    extracted: &'a Query<(Entity, &ExtractedChunkField<F>)>,
+) -> Vec<(Pending, &'a ExtractedChunkField<F>)> {
+    let items: Vec<_> = pending
+        .into_iter()
+        .filter_map(|p| {
+            let (_, x) = extracted.get(p.entity).ok()?;
+            let new = !x.meta_only && arena_set.find_slot(x.lod, x.main_entity).is_none();
+            let shown = LOD::ALL
+                .iter()
+                .any(|&l| arena_set.find_slot(l, x.main_entity).is_some());
+            Some((p, x, new, shown))
+        })
+        .collect();
+    let cluster = clusters(
+        &items
+            .iter()
+            .map(|(_, x, _, shown)| shown.then_some(x.chunk_pos))
+            .collect::<Vec<_>>(),
+    );
+
+    // Re-mesh scratch left per LOD this frame, over its arenas. A LOD with
+    // none yet makes one with room.
+    let mut scratch_left = arena_set.arenas.each_ref().map(|arenas| {
+        if arenas.is_empty() {
+            return usize::MAX;
+        }
+        arenas
+            .iter()
+            .map(|a| usize_from(a.scratch_chunks).saturating_sub(a.dirty_slots.len()))
+            .sum()
+    });
+    let mut cells_left = cells_per_frame;
+    let mut admitted_any = false;
+    let mut admitted = vec![false; items.len()];
+    // Clusters in order of their oldest member, which comes first.
+    let mut order = Vec::new();
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &c) in cluster.iter().enumerate() {
+        members.entry(c).or_insert_with(|| {
+            order.push(c);
+            Vec::new()
+        });
+        if let Some(m) = members.get_mut(&c) {
+            m.push(i);
+        }
+    }
+    for c in order {
+        let members = members.remove(&c).unwrap_or_default();
+        let mut cells = 0u32;
+        let mut scratch = [0usize; LOD::COUNT];
+        for &i in &members {
+            let Some((_, x, new, _)) = items.get(i) else {
+                continue;
+            };
+            if *new {
+                cells = cells.saturating_add(x.size.saturating_sub(1).saturating_pow(3));
+            }
+            if let Some(n) = scratch.get_mut(VoxelChunkArenaSet::lod_index(x.lod)) {
+                *n = n.saturating_add(1);
+            }
+        }
+        let fits_scratch = scratch
+            .iter()
+            .zip(&scratch_left)
+            .all(|(need, left)| need <= left);
+        if fits_scratch && !(admitted_any && cells > cells_left) {
+            cells_left = cells_left.saturating_sub(cells);
+            for (left, need) in scratch_left.iter_mut().zip(scratch) {
+                *left = left.saturating_sub(need);
+            }
+        } else if admitted_any {
+            continue;
+        } else {
+            // Too big for this frame's scratch even alone: as much as fits.
+            for &i in &members {
+                let lod_idx = items
+                    .get(i)
+                    .map(|(_, x, _, _)| VoxelChunkArenaSet::lod_index(x.lod));
+                let left = lod_idx.and_then(|l| scratch_left.get_mut(l));
+                let go = left.is_some_and(|left| {
+                    let room = *left > 0;
+                    *left = left.saturating_sub(1);
+                    room
+                });
+                if let Some(a) = admitted.get_mut(i) {
+                    *a = go;
+                }
+            }
+            admitted_any = true;
+            continue;
+        }
+        admitted_any = true;
+        for i in members {
+            if let Some(a) = admitted.get_mut(i) {
+                *a = true;
+            }
+        }
+    }
+    items
+        .into_iter()
+        .zip(admitted)
+        .filter_map(|((p, x, new, _), go)| {
+            if !go && new {
+                arena_set.deferred.insert(x.main_entity);
+            }
+            go.then_some((p, x))
+        })
+        .collect()
+}
+
+/// Each position's cluster: the index of the first position it connects to
+/// through a chain of 26-neighbours. `None` stands alone.
+fn clusters(positions: &[Option<IVec3>]) -> Vec<usize> {
+    let index: HashMap<IVec3, usize> = positions
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(i, p)| p.map(|p| (p, i)))
+        .collect();
+    let mut cluster = vec![usize::MAX; positions.len()];
+    for start in 0..positions.len() {
+        if cluster.get(start) != Some(&usize::MAX) {
+            continue;
+        }
+        let mut stack = vec![start];
+        while let Some(i) = stack.pop() {
+            match cluster.get_mut(i) {
+                Some(c) if *c == usize::MAX => *c = start,
+                _ => continue,
+            }
+            let Some(&Some(pos)) = positions.get(i) else {
+                continue;
+            };
+            for k in 0u32..27 {
+                let d = UVec3::new(k % 3, k / 3 % 3, k / 9)
+                    .as_ivec3()
+                    .wrapping_sub(IVec3::ONE);
+                if let Some(&j) = index.get(&pos.saturating_add(d)) {
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    cluster
+}
+
 /// The `GpuChannel::Shape` upload: changed chunks' SDF, each given a slot
 /// and an exact-size vertex range.
 ///
@@ -228,31 +394,18 @@ pub fn prepare_shape_upload<F: VoxelField>(
     arena_set.reslotted.clear();
     let pending = newest_pending(&arena_set, &extracted_chunks, &mut commands);
 
-    // Chunks already resident at this LOD (edits, neighbour apron changes)
-    // always update this frame so edits stay continuous. The budget only
-    // paces new placements (fresh loads, LOD changes), oldest first and
-    // always at least one.
-    let mut cells_left = budget.cells_per_frame;
-    let mut placed_new = false;
     let mut batch = Vec::new();
-    for p in pending {
-        let Ok((_, x)) = extracted_chunks.get(p.entity) else {
-            continue;
-        };
+    for (p, x) in admit(
+        &mut arena_set,
+        budget.cells_per_frame,
+        pending,
+        &extracted_chunks,
+    ) {
         if x.meta_only {
             if restitch(&mut arena_set, &gpu.render_queue, x, p.seam_ranks) {
                 commands.entity(p.entity).despawn();
             }
             continue;
-        }
-        if arena_set.find_slot(x.lod, x.main_entity).is_none() {
-            let cells = x.size.saturating_sub(1).saturating_pow(3);
-            if placed_new && cells > cells_left {
-                arena_set.deferred.insert(x.main_entity);
-                continue;
-            }
-            placed_new = true;
-            cells_left = cells_left.saturating_sub(cells);
         }
         batch.push((p, x));
     }
