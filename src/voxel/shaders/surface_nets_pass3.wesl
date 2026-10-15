@@ -296,13 +296,14 @@ fn cell_surface_vertex(sdf_base: u32, lo: vec3<u32>, step: vec3<u32>) -> vec4<f3
     return vec4<f32>((pos[0] + pos[7]) * 0.5, 0.0);
 }
 
-// An `axis` edge at `id` whose cells all lie in a finer +neighbour's apron
-// slab: that neighbour meshes the slab, snapping its border cells to ours.
-fn in_finer_apron_slab(id: vec3<u32>, axis: u32) -> bool {
-    let n = uniforms.cell_count - 1u;
-    var others = id;
-    others[axis] = 0u;
-    return id[axis] == n && all(others < vec3<u32>(n)) && texel_lod_shift(id) < 0;
+// An `axis` edge at id[axis] == n runs from the +axis neighbour's first
+// voxel layer to its second: that neighbour emits it as its own
+// id[axis] == 0 edge (snapped to our grid if it is finer). Emitting it here
+// too drew every such quad twice, from two chunks whose vertices and
+// normals differ slightly, so they z-fought; across a LOD seam the normals
+// differ a lot and it showed.
+fn owns_edge(id: vec3<u32>, axis: u32) -> bool {
+    return id[axis] < uniforms.cell_count - 1u;
 }
 
 // One invocation per active cell (pass1's list), not per cell: only a few
@@ -402,7 +403,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let id_x = id + vec3<u32>(1u, 0u, 0u);
     let sdf_x = sample_sdf(sdf_base, vec3<i32>(id_x));
     if (curr_inside != (sdf_x <= 0.0)) {
-        if (id.y > 0u && id.z > 0u && !in_finer_apron_slab(id, 0u)) {
+        if (id.y > 0u && id.z > 0u && owns_edge(id, 0u)) {
             let idx_0 = get_cell_index(id, cell_base);
             let idx_1 = get_cell_index(id - vec3<u32>(0u, 1u, 0u), cell_base);
             let idx_2 = get_cell_index(id - vec3<u32>(0u, 1u, 1u), cell_base);
@@ -436,7 +437,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let id_y = id + vec3<u32>(0u, 1u, 0u);
     let sdf_y = sample_sdf(sdf_base, vec3<i32>(id_y));
     if (curr_inside != (sdf_y <= 0.0)) {
-        if (id.x > 0u && id.z > 0u && !in_finer_apron_slab(id, 1u)) {
+        if (id.x > 0u && id.z > 0u && owns_edge(id, 1u)) {
             let idx_0 = get_cell_index(id, cell_base);
             let idx_1 = get_cell_index(id - vec3<u32>(0u, 0u, 1u), cell_base);
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 0u, 1u), cell_base);
@@ -470,7 +471,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let id_z = id + vec3<u32>(0u, 0u, 1u);
     let sdf_z = sample_sdf(sdf_base, vec3<i32>(id_z));
     if (curr_inside != (sdf_z <= 0.0)) {
-        if (id.x > 0u && id.y > 0u && !in_finer_apron_slab(id, 2u)) {
+        if (id.x > 0u && id.y > 0u && owns_edge(id, 2u)) {
             let idx_0 = get_cell_index(id, cell_base);
             let idx_1 = get_cell_index(id - vec3<u32>(1u, 0u, 0u), cell_base);
             let idx_2 = get_cell_index(id - vec3<u32>(1u, 1u, 0u), cell_base);
