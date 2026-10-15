@@ -38,19 +38,23 @@ const AUDIT_INTERVAL: u32 = 120;
 
 /// What a chunk's upload depends on: its LOD, its own version, each
 /// `NEIGHBORS_MASK` neighbour's (border) version with that neighbour's LOD
-/// folded in, and its `seam_lod_ranks` (which add the -face neighbours'
-/// LODs). Unchanged key = unchanged upload.
-type ExtractKey = (LOD, [u64; 8], u32);
+/// folded in, and its `seam_lod_ranks` (every neighbour's LOD). Unchanged
+/// key = unchanged upload.
+type ExtractKey = (LOD, [u64; 8], [u32; 2]);
 
 type FieldQuery<'w, 's, T> =
     Query<'w, 's, (Entity, &'static ChunkPosition, &'static T, &'static LOD)>;
 
-/// Marks `pos`, every chunk whose apron reads `pos` (`pos - offset`), and
-/// the `+x/+y/+z` neighbours, whose seam stitching depends on its LOD.
+/// Marks `pos` and its 26 neighbours: those whose apron reads `pos`
+/// (`pos - offset`), and all of them stitch seams by its LOD.
 fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
-    dirty.insert(pos);
-    dirty.extend(NEIGHBORS_MASK.iter().map(|off| pos.wrapping_sub(*off)));
-    dirty.extend([IVec3::X, IVec3::Y, IVec3::Z].map(|axis| pos.wrapping_add(axis)));
+    for z in -1..=1 {
+        for y in -1..=1 {
+            for x in -1..=1 {
+                dirty.insert(pos.wrapping_add(IVec3::new(x, y, z)));
+            }
+        }
+    }
 }
 
 /// Registers the hand-off of field `T`: the main-world padding system and
@@ -130,7 +134,7 @@ pub struct PaddedChunk {
     pub pos: IVec3,
     pub lod: LOD,
     /// See `seam_lod_ranks`.
-    pub lod_ranks: u32,
+    pub seam_ranks: [u32; 2],
     /// Shared with the render world rather than copied.
     pub bytes: Arc<[u8]>,
     /// Main-world frame it was built in.
@@ -202,13 +206,28 @@ fn extract_key<T: VoxelField>(
     if let Some(own) = own.first_mut() {
         *own = field.version();
     }
+    // Per axis, whether the face neighbour across it is coarser: then the
+    // apron steps by its voxel along that axis (see `fill_apron_with`).
+    let coarse_face = [IVec3::X, IVec3::Y, IVec3::Z].map(|axis| {
+        chunk_manager
+            .get_chunk(&pos.wrapping_add(axis))
+            .and_then(|e| query.get(e).ok())
+            .filter(|(_, _, f, l)| f.data_slice().len() == l.volume())
+            .is_some_and(|(_, _, _, l)| l.size() < lod.size())
+    });
     for ((i, offset), slot) in NEIGHBORS_MASK.iter().enumerate().zip(neighbor_versions) {
         if let Some(n_entity) = chunk_manager.get_chunk(&pos.wrapping_add(*offset))
             && let Ok((_, _, n_field, n_lod)) = query.get(n_entity)
         {
-            // At equal LOD the apron reads only the neighbour's facing slab;
-            // across LODs it resamples more of it, so use the full version.
-            let v = if *n_lod == lod {
+            // At equal LOD with unit steps the apron reads only the
+            // neighbour's facing slab; otherwise it resamples more of it,
+            // so use the full version.
+            let unit_steps = offset
+                .to_array()
+                .iter()
+                .zip(coarse_face)
+                .all(|(d, coarse)| *d == 0 || !coarse);
+            let v = if *n_lod == lod && unit_steps {
                 n_field.border_version(i)
             } else {
                 n_field.version()
@@ -304,9 +323,9 @@ pub fn pad_dirty_chunks<T>(
         if last.get(&entity) == Some(&key) {
             continue;
         }
-        let lod_ranks = key.2;
+        let seam_ranks = key.2;
         last.insert(entity, key);
-        jobs.push((entity, *pos, field, *lod, lod_ranks));
+        jobs.push((entity, *pos, field, *lod, seam_ranks));
     }
 
     // Building the volumes: the expensive part, one task per chunk.
@@ -318,11 +337,11 @@ pub fn pad_dirty_chunks<T>(
     });
     built.sort_unstable_by_key(|b| b.0);
     outbox.chunks.extend(jobs.iter().zip(built).map(
-        |(&(entity, pos, _, lod, lod_ranks), (_, bytes))| PaddedChunk {
+        |(&(entity, pos, _, lod, seam_ranks), (_, bytes))| PaddedChunk {
             entity,
             pos,
             lod,
-            lod_ranks,
+            seam_ranks,
             bytes: bytes.into(),
             seq: frame.0,
         },
@@ -339,7 +358,7 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub size: u32,
     pub lod: LOD,
     /// See [`seam_lod_ranks`]; only the SDF upload uses it.
-    pub lod_ranks: u32,
+    pub seam_ranks: [u32; 2],
     /// Main-world frame it was extracted in. An upload can wait several
     /// frames; when a newer one for the same chunk arrives, the newest wins.
     pub seq: u32,
@@ -367,7 +386,7 @@ pub fn extract_removed<T: VoxelField>(
             padded_data: Arc::from([]),
             size: lod.size().wrapping_add(PADDING),
             lod: *lod,
-            lod_ranks: 0,
+            seam_ranks: [0; 2],
             seq: frame.0,
             _type: PhantomData,
         });
@@ -386,7 +405,7 @@ where
             padded_data: Arc::clone(&c.bytes),
             size: c.lod.size().wrapping_add(PADDING),
             lod: c.lod,
-            lod_ranks: c.lod_ranks,
+            seam_ranks: c.seam_ranks,
             seq: c.seq,
             _type: PhantomData,
         });

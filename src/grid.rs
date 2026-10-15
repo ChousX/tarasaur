@@ -29,7 +29,7 @@ pub const fn flatten_cube(x: u32, y: u32, z: u32, size: u32) -> usize {
 pub(crate) const PADDING: u32 = 2;
 
 /// The +x/+y/+z neighbours (faces, edges, corner) whose voxels fill a
-/// chunk's apron. Indexes `border_versions` and `lod_ranks` too.
+/// chunk's apron. Indexes `border_versions` too.
 pub(crate) const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 0, 0),
     ivec3(0, 1, 0),

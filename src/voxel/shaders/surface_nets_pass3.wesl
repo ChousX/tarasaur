@@ -3,8 +3,8 @@
 // emits quads into the slot's fixed vertex/index range.
 
 import tarasaur::voxel::shaders::voxel_common::{
-    BatchUniforms, ChunkMeta, apron_source_rank, below_rank, decode_sdf, flatten_sdf_idx,
-    rank_log2_size,
+    BatchUniforms, ChunkMeta, apron_unit_shift, decode_sdf, flatten_sdf_idx,
+    rank_log2_size, seam_rank,
 };
 
 struct Vertex {
@@ -62,54 +62,49 @@ fn cell_offset_for(chunk_idx: u32) -> u32 {
 
 // --- LOD seams ---
 // Apron voxels from a neighbour at another LOD hold that neighbour's voxel
-// units, and a coarser neighbour's two apron layers are its first two
-// voxels, so along that axis layer n+1 sits a whole coarse voxel past n.
-// The functions below turn texels back into this chunk's units and
-// positions. Set from ChunkMeta at the top of cs_main.
-var<private> lod_ranks: u32;
+// units. Along each apron axis the second layer sits one step past the
+// boundary, a step being a voxel of the coarser of this chunk and the face
+// neighbour across that axis (see fill_apron_with). The functions below
+// turn texels back into this chunk's units and positions. Set from
+// ChunkMeta at the top of cs_main.
+var<private> seam_ranks: vec2<u32>;
+var<private> own_log2: i32;
+// Per axis, log2 of this chunk's voxels per apron step.
+var<private> face_shift: vec3<i32>;
+
+fn init_seams(ranks: vec2<u32>) {
+    seam_ranks = ranks;
+    own_log2 = seam_log2(vec3<i32>(0));
+    let axes = array<vec3<i32>, 3>(vec3<i32>(1, 0, 0), vec3<i32>(0, 1, 0), vec3<i32>(0, 0, 1));
+    for (var a = 0u; a < 3u; a++) {
+        face_shift[a] = max(own_log2 - seam_log2(axes[a]), 0);
+    }
+}
+
+// log2 of the voxels per edge of the chunk at `offset` (-1..1 per axis).
+// A chunk the apron can't read counts as this chunk's LOD (see
+// seam_lod_ranks).
+fn seam_log2(offset: vec3<i32>) -> i32 {
+    return rank_log2_size(seam_rank(seam_ranks, offset));
+}
 
 // log2(own size / source size) for the voxels at texel `t`: > 0 inside a
 // coarser neighbour's apron, < 0 inside a finer one's, else 0.
 fn texel_lod_shift(t: vec3<u32>) -> i32 {
-    let n = uniforms.cell_count - 1u;
-    let o = select(vec3<u32>(0u), vec3<u32>(1u), t >= vec3<u32>(n));
-    let bits = o.x | (o.y << 1u) | (o.z << 2u);
-    if (bits == 0u) {
-        return 0;
-    }
-    return rank_log2_size(lod_ranks) - rank_log2_size(apron_source_rank(lod_ranks, bits));
-}
-
-// Rank shift of the coarser -x/-y/-z face neighbour (0 if none).
-fn below_lod_shift(axis: u32) -> i32 {
-    return rank_log2_size(lod_ranks) - rank_log2_size(below_rank(lod_ranks, axis));
+    return apron_unit_shift(seam_ranks, uniforms.cell_count - 1u, t);
 }
 
 // Where texel `t` sits, in this chunk's voxels.
 fn texel_pos(t: vec3<u32>) -> vec3<f32> {
-    let p = vec3<f32>(t);
-    let shift = texel_lod_shift(t);
-    if (shift <= 0) {
-        return p;
-    }
     let n = uniforms.cell_count - 1u;
-    let far = vec3<f32>(f32(n) + ldexp(1.0, shift));
-    return select(p, far, t > vec3<u32>(n));
+    let far = f32(n) + ldexp(vec3<f32>(1.0), face_shift);
+    return select(vec3<f32>(t), far, t > vec3<u32>(n));
 }
 
 // Inverse of texel_pos, for continuous positions.
 fn texel_coord(p: vec3<f32>) -> vec3<f32> {
-    let n = f32(uniforms.cell_count - 1u);
-    if (all(p <= vec3<f32>(n))) {
-        return p;
-    }
-    let max_t = vec3<f32>(f32(uniforms.texture_size - 1u));
-    let shift = texel_lod_shift(vec3<u32>(clamp(p, vec3<f32>(0.0), max_t)));
-    if (shift <= 0) {
-        return p;
-    }
-    let q = vec3<f32>(n) + (p - vec3<f32>(n)) * ldexp(1.0, -shift);
-    return select(p, q, p > vec3<f32>(n));
+    let n = vec3<f32>(f32(uniforms.cell_count - 1u));
+    return select(p, n + ldexp(p - n, -face_shift), p > n);
 }
 
 // SDF at texel `t`, in this chunk's voxels.
@@ -296,6 +291,135 @@ fn cell_surface_vertex(sdf_base: u32, lo: vec3<u32>, step: vec3<u32>) -> vec4<f3
     return vec4<f32>((pos[0] + pos[7]) * 0.5, 0.0);
 }
 
+// --- Shared seam cells ---
+// A cell next to a coarser chunk takes the vertex of the coarse cell it
+// lies in, so every chunk that meshes a quad touching that spot uses the
+// same vertex and the meshes meet. Each chunk works it out in the frame of
+// the cell's owner O (the chunk whose voxels it lies in: this one, or the
+// +neighbour whose apron it is in), from the LODs of the chunks around O.
+//
+// "Below" O are the chunks at O + d, d in {-1, 0}^3 \ 0; one touches a
+// lattice cell of O if the cell starts at 0 on every axis where d = -1.
+
+// The 7 offsets d to O's below-neighbours.
+fn below_offset(i: u32) -> vec3<i32> {
+    return -vec3<i32>(vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u));
+}
+
+// The coarsest touching below-neighbour of the O cell starting at 0 on the
+// axes in `zero`, as log2(O size / its size), and 0 if none is coarser.
+fn seam_shift(o: vec3<i32>, o_log2: i32, zero: vec3<bool>) -> i32 {
+    var s = 0;
+    for (var i = 1u; i < 8u; i++) {
+        let d = below_offset(i);
+        if (any((d < vec3<i32>(0)) & !zero)) {
+            continue;
+        }
+        s = max(s, o_log2 - seam_log2(o + d));
+    }
+    return s;
+}
+
+// Axes the shared cell (lattice 2^s, starting at 0 on `zero`) is flattened
+// on: onto its low face along b when a touching below-neighbour across b
+// can't see one lattice step past that face. Its apron along b steps by
+// its own voxel or its face neighbour's, whichever is coarser (see
+// fill_apron_with), so it sees the step only if that is the lattice's. The
+// face it flattens onto lies at the boundary every one of them can read.
+fn seam_collapse(o: vec3<i32>, o_log2: i32, zero: vec3<bool>, s: i32) -> vec3<bool> {
+    var collapse = vec3<bool>(false);
+    for (var i = 1u; i < 8u; i++) {
+        let d = below_offset(i);
+        if (any((d < vec3<i32>(0)) & !zero)) {
+            continue;
+        }
+        let l = seam_log2(o + d);
+        for (var b = 0u; b < 3u; b++) {
+            if (d[b] == 0) {
+                continue;
+            }
+            var across = d;
+            across[b] = 0;
+            let seen = o_log2 - min(l, seam_log2(o + across));
+            if (seen != s) {
+                collapse[b] = true;
+            }
+        }
+    }
+    return collapse;
+}
+
+struct SeamCell {
+    lo: vec3<u32>,
+    step: vec3<u32>,
+    vert: vec4<f32>, // .w = 0: none, use the cell's own corners
+}
+
+// The shared vertex for cell `id`, in this chunk's texels (see above).
+fn seam_cell(sdf_base: u32, id: vec3<u32>) -> SeamCell {
+    var out = SeamCell(id, vec3<u32>(1u), vec4<f32>(0.0));
+    let n = uniforms.cell_count - 1u;
+    let o = vec3<i32>(id >= vec3<u32>(n));
+    let o_log2 = seam_log2(o);
+    // > 0: O is coarser than this chunk.
+    let up = own_log2 - o_log2;
+    let up_u = u32(max(up, 0));
+    let down_u = u32(max(-up, 0));
+    // The O voxel this cell starts at (the lowest, if it spans several).
+    var id_o = (id >> vec3<u32>(up_u)) << vec3<u32>(down_u);
+    id_o = select(id_o, vec3<u32>(0u), o == vec3<i32>(1));
+
+    // The lattice: grows until the cell it starts touches no coarser chunk.
+    var s = seam_shift(o, o_log2, id_o == vec3<u32>(0u));
+    var lo = (id_o >> vec3<u32>(u32(s))) << vec3<u32>(u32(s));
+    for (var k = 0u; k < 3u; k++) {
+        let s2 = seam_shift(o, o_log2, lo == vec3<u32>(0u));
+        if (s2 == s) {
+            break;
+        }
+        s = s2;
+        lo = (id_o >> vec3<u32>(u32(s))) << vec3<u32>(u32(s));
+    }
+    let collapse = seam_collapse(o, o_log2, lo == vec3<u32>(0u), s);
+    if (s == 0 && up == 0 && !any(collapse)) {
+        return out; // an ordinary cell of our own
+    }
+
+    // To our texels. Along O's apron axes our two layers are its boundary
+    // and one of our apron steps past it, which must be the lattice step
+    // unless flattened.
+    var lo_t = vec3<u32>(0u);
+    var full = vec3<u32>(0u);
+    var full_fits = true;
+    let r = 1u << u32(s);
+    for (var a = 0u; a < 3u; a++) {
+        if (o[a] == 1) {
+            lo_t[a] = n;
+            full[a] = 1u;
+            if (face_shift[a] - own_log2 != s - o_log2) {
+                if (!collapse[a]) {
+                    return out;
+                }
+                full_fits = false;
+            }
+        } else {
+            lo_t[a] = (lo[a] << up_u) >> down_u;
+            full[a] = (r << up_u) >> down_u;
+        }
+    }
+    let step = select(full, vec3<u32>(0u), collapse);
+    out.vert = cell_surface_vertex(sdf_base, lo_t, step);
+    out.lo = lo_t;
+    out.step = step;
+    // Flattened onto a face the surface doesn't cross: the whole cell, if
+    // we can see it.
+    if (out.vert.w == 0.0 && any(collapse) && full_fits) {
+        out.vert = cell_surface_vertex(sdf_base, lo_t, full);
+        out.step = full;
+    }
+    return out;
+}
+
 // An `axis` edge at id[axis] == n runs from the +axis neighbour's first
 // voxel layer to its second: that neighbour emits it as its own
 // id[axis] == 0 edge (snapped to our grid if it is finer). Emitting it here
@@ -340,7 +464,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cc = uniforms.cell_count;
     let id = vec3<u32>(cell % cc, (cell / cc) % cc, cell / (cc * cc));
     let cmeta = chunk_meta[real_slot];
-    lod_ranks = cmeta.lod_ranks;
+    init_seams(cmeta.seam_ranks);
     let sdf_base = sdf_offset_for(real_slot);
     let vbase = slot_vertex_base[real_slot];
     let idx_base = vbase * 18u;
@@ -349,32 +473,13 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     {
         let vert_idx = vbase + vertex;
 
-        // Next to a coarser chunk the vertex is the coarse cell's, so both
-        // sides of the seam share it. Cells at our +faces lie in a coarser
-        // neighbour's apron and already span one of its cells; cells
-        // against a coarser -face neighbour lie inside one of its +face
-        // border cells, which it meshes from our voxels on its own grid.
-        let n = cc - 1u;
-        let up = texel_lod_shift(id);
-        var shift = max(up, 0);
-        for (var a = 0u; a < 3u; a++) {
-            if (id[a] == 0u) {
-                shift = max(shift, below_lod_shift(a));
-            }
-        }
-        var lo = id;
-        var step = vec3<u32>(1u);
-        var vert = vec4<f32>(0.0);
-        // Apron axes span the coarse cell only if that apron is at `shift`.
-        if (shift > 0 && (all(id < vec3<u32>(n)) || up == shift)) {
-            let r = 1u << u32(shift);
-            let at_apron = id == vec3<u32>(n);
-            lo = select((id / r) * r, id, at_apron);
-            step = select(vec3<u32>(r), vec3<u32>(1u), at_apron);
-            vert = cell_surface_vertex(sdf_base, lo, step);
-        }
-        // Not snapped, or the coarse cell has no crossing (a feature finer
-        // than the coarse grid): use our own cell.
+        // Next to a coarser chunk, the coarse cell's vertex (see seam_cell);
+        // else, or if the surface misses that cell (a feature finer than
+        // the coarse grid), our own cell's.
+        let seam = seam_cell(sdf_base, id);
+        var lo = seam.lo;
+        var step = seam.step;
+        var vert = seam.vert;
         if (vert.w == 0.0) {
             lo = id;
             step = vec3<u32>(1u);
@@ -386,7 +491,8 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let world_pos = cmeta.chunk_world_origin + (vert_pos * uniforms.voxel_size);
 
         let p_lo = texel_pos(lo);
-        let frac = (vert_pos - p_lo) / (texel_pos(lo + step) - p_lo);
+        let span = texel_pos(lo + step) - p_lo; // 0 on flattened axes
+        let frac = select(vec3<f32>(0.0), (vert_pos - p_lo) / span, span > vec3<f32>(0.0));
         let blend = tally_corner_materials(sdf_base, lo, step, frac);
 
         vertex_buffer[vert_idx] = Vertex(

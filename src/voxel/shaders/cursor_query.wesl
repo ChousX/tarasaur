@@ -3,7 +3,7 @@
 // See raycast/gpu.rs.
 
 import tarasaur::voxel::shaders::voxel_common::{
-    ChunkMeta, apron_source_rank, decode_sdf, flatten_sdf_idx, rank_log2_size,
+    ChunkMeta, apron_unit_shift, decode_sdf, flatten_sdf_idx,
 };
 
 struct RayQuery {
@@ -104,13 +104,8 @@ fn sdf_index(base: u32, x: u32, y: u32, z: u32, s: u32) -> u32 {
 
 // Apron voxels from a neighbour at another LOD hold that neighbour's voxel
 // units (see seam_lod_ranks in field/apron.rs): factor to this chunk's.
-fn apron_scale(lod_ranks: u32, n: u32, x: u32, y: u32, z: u32) -> f32 {
-    let bits = u32(x >= n) | (u32(y >= n) << 1u) | (u32(z >= n) << 2u);
-    if (bits == 0u) {
-        return 1.0;
-    }
-    let source = apron_source_rank(lod_ranks, bits);
-    return ldexp(1.0, rank_log2_size(lod_ranks) - rank_log2_size(source));
+fn apron_scale(seam_ranks: vec2<u32>, n: u32, x: u32, y: u32, z: u32) -> f32 {
+    return ldexp(1.0, apron_unit_shift(seam_ranks, n, vec3<u32>(x, y, z)));
 }
 
 // Trilinear sample, parameterized over which buffer/texture_size to hit —
@@ -127,7 +122,7 @@ fn sample_sdf(rank: u32, slot: u32, texture_size: u32, local_pos: vec3<f32>) -> 
     let z1 = min(z0 + 1u, texture_size - 1u);
     let s = texture_size;
     let base = slot * s * s * s;
-    let ranks = chunk_meta_at(rank, slot).lod_ranks;
+    let ranks = chunk_meta_at(rank, slot).seam_ranks;
     let n = s - 2u;
 
     let c000 = read_sdf(rank, sdf_index(base, x0, y0, z0, s)) * apron_scale(ranks, n, x0, y0, z0);

@@ -286,7 +286,8 @@ fn upload_chunk<F: Send + Sync + 'static>(
 
     let meta = ChunkMeta {
         chunk_world_origin: (x.chunk_pos.as_vec3() * CHUNK_SIZE).into(),
-        lod_ranks: x.lod_ranks,
+        seam_ranks: x.seam_ranks,
+        ..ChunkMeta::default()
     };
     render_queue.write_buffer(
         &arena.chunk_meta_buffer,

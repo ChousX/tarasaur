@@ -114,8 +114,10 @@ fn max_chunks(
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub struct ChunkMeta {
     pub chunk_world_origin: [f32; 3],
+    pub _pad0: u32,
     /// Neighbour LODs for seam stitching; see `field::apron::seam_lod_ranks`.
-    pub lod_ranks: u32,
+    pub seam_ranks: [u32; 2],
+    pub _pad1: [u32; 2],
 }
 
 /// First-fit allocator over a range of vertex cells, with coalescing frees.

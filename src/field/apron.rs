@@ -8,7 +8,7 @@ use crate::{
     chunk::{ChunkManager, ChunkPosition},
     field::{LOD, VoxelField},
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
-    num::f32_from_u32,
+    num::{f32_from_u32, usize_from},
 };
 
 /// Fills the `+x/+y/+z` apron of a padded volume from the 7 neighbours in
@@ -53,36 +53,38 @@ fn apron_source<'a, T: VoxelField>(
     field_at(pos, chunk_manager, query).filter(|(f, l)| f.data_slice().len() == l.volume())
 }
 
-/// The LODs pass3 needs to stitch seams, packed for `ChunkMeta::lod_ranks`:
+/// The LOD ranks pass3 needs to stitch seams, for `ChunkMeta::seam_ranks`:
+/// this chunk's and each of its 26 neighbours', 2 bits each, 16 per word.
+/// Neighbour `(dx, dy, dz)` is entry `(dx + 1) + 3 (dy + 1) + 9 (dz + 1)`,
+/// so this chunk is entry 13.
 ///
-/// - bits 0-1: this chunk's LOD rank;
-/// - bits `2 + 2k`: the rank whose voxel units apron region `k`
-///   (`NEIGHBORS_MASK` order) holds: the neighbour's, or this chunk's own
-///   where the apron fell back to its edge;
-/// - bits `16 + 2a`: the rank of the `-a` face neighbour if it is coarser
-///   than this chunk, else this chunk's own.
+/// A neighbour the apron can't read (missing, or mid-LOD-change) gets this
+/// chunk's rank: the apron falls back to this chunk's own edge there, which
+/// is what a same-LOD neighbour looks like. That also keeps a neighbour
+/// loading in at this chunk's LOD from changing the ranks, and so from
+/// re-meshing every chunk around it.
 ///
 /// Keep in sync with `fill_apron` (which neighbours it reads) and the
-/// decoding in `surface_nets_pass3.wesl` and `cursor_query.wesl`.
+/// decoding in `voxel_common.wesl`.
 #[must_use]
 pub fn seam_lod_ranks<T: VoxelField>(
     chunk_pos: IVec3,
     lod: LOD,
     chunk_manager: &ChunkManager,
     query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
-) -> u32 {
-    let mut ranks = lod.rank();
-    for (shift, offset) in (2u32..).step_by(2).zip(NEIGHBORS_MASK) {
-        let source = apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
-            .map_or(lod, |(_, l)| l);
-        ranks |= source.rank() << shift;
-    }
-    for (shift, axis) in (16u32..).step_by(2).zip([IVec3::X, IVec3::Y, IVec3::Z]) {
-        let below = apron_source(chunk_pos.wrapping_sub(axis), chunk_manager, query)
-            .map(|(_, l)| l)
-            .filter(|l| l.size() < lod.size())
-            .unwrap_or(lod);
-        ranks |= below.rank() << shift;
+) -> [u32; 2] {
+    let mut ranks = [0u32; 2];
+    for i in 0u32..27 {
+        let offset = UVec3::new(i % 3, (i / 3) % 3, i / 9)
+            .as_ivec3()
+            .wrapping_sub(IVec3::ONE);
+        // `apron_source` would read this chunk itself at offset 0.
+        let rank = apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
+            .map_or(lod, |(_, l)| l)
+            .rank();
+        if let Some(word) = ranks.get_mut(usize_from(i / 16)) {
+            *word |= rank << (i % 16).wrapping_mul(2);
+        }
     }
     ranks
 }
@@ -90,9 +92,16 @@ pub fn seam_lod_ranks<T: VoxelField>(
 /// [`fill_apron`] over plain data: `neighbor(offset)` gives that neighbour's
 /// voxels and size, or `None` to fall back to this chunk's edge.
 ///
-/// Same-LOD neighbours are copied as-is. Other LODs are resampled at this
-/// chunk's spacing but keep the neighbour's voxel units, so SDF values never
-/// clip at `SDF_BAND`; pass3 rescales them (see [`seam_lod_ranks`]).
+/// Off the apron's axes, neighbours are resampled at this chunk's spacing.
+/// Along an apron axis, the two layers are the face neighbour's boundary
+/// and one step past it, where a step is this chunk's voxel or, if the face
+/// neighbour across that axis is coarser, its voxel. So a coarser face
+/// neighbour's layers are its first two voxels, and every region sharing
+/// that axis (the edge and corner regions too) uses the same spacing:
+/// pass3 then sees one grid per axis wherever its cells cross the boundary.
+///
+/// Values keep the neighbour's voxel units, so SDF values never clip at
+/// `SDF_BAND`; pass3 rescales them (see [`seam_lod_ranks`]).
 pub fn fill_apron_with<'a, T>(
     vol: &mut [T::Elem],
     size: u32,
@@ -105,37 +114,42 @@ pub fn fill_apron_with<'a, T>(
     let idx = |c: UVec3| flatten_cube(c.x, c.y, c.z, padded);
     let edge = UVec3::splat(size.saturating_sub(1));
     let size3 = UVec3::splat(size);
+    // Per axis, this chunk's voxels per apron step (see above).
+    let step = [IVec3::X, IVec3::Y, IVec3::Z].map(|axis| {
+        neighbor(axis)
+            .and_then(|(_, n_size)| size.checked_div(n_size))
+            .map_or(1.0, |r| f32_from_u32(r.max(1)))
+    });
+    let step = Vec3::from_array(step);
 
     for offset in NEIGHBORS_MASK {
         let dir = offset.as_uvec3();
+        let is_dir = dir.cmpeq(UVec3::ONE);
         // Axes with dir = 1 cover the apron (n..n+PADDING), the rest 0..n.
         let origin = dir.wrapping_mul(size3);
         let end = size3.wrapping_add(dir.wrapping_mul(UVec3::splat(PADDING)));
         let source = neighbor(offset);
+        // Same LOD with unit steps: every sample lands exactly on a voxel.
+        let direct = source.is_some_and(|(_, n_size)| n_size == size)
+            && Vec3::select(is_dir, step, Vec3::ONE) == Vec3::ONE;
+        let scale = Vec3::select(is_dir, step, Vec3::ONE);
         for z in origin.z..end.z {
             for y in origin.y..end.y {
                 for x in origin.x..end.x {
                     let cell = UVec3::new(x, y, z);
                     let local = cell.wrapping_sub(origin);
                     let value = match source {
-                        // Same LOD: the sample lands exactly on a voxel, so
-                        // read it. Equal to the interpolated path below (an
+                        // Read it: equal to the interpolated path below (an
                         // exact lerp by 0), which costs 8 reads per voxel.
-                        Some((data, n_size)) if n_size == size => T::rescale(
+                        Some((data, n_size)) if direct => T::rescale(
                             data.get(flatten_cube(local.x, local.y, local.z, n_size))
                                 .copied()
                                 .unwrap_or_default(),
                             1.0,
                         ),
-                        // A coarser neighbour's 2 apron layers are its first
-                        // 2 voxels, so a border cell spans one of its cells
-                        // and pass3 can snap it to the coarse vertex.
                         Some((data, n_size)) => {
                             let ratio = f32_from_u32(n_size) / f32_from_u32(size);
-                            let mut at = local.as_vec3() * ratio;
-                            if n_size < size {
-                                at = Vec3::select(dir.cmpeq(UVec3::ONE), local.as_vec3(), at);
-                            }
+                            let at = local.as_vec3() * scale * ratio;
                             T::sample_apron(data, n_size, at.x, at.y, at.z)
                         }
                         None => vol.get(idx(cell.min(edge))).copied().unwrap_or_default(),
@@ -161,7 +175,9 @@ mod tests {
     /// Each `NEIGHBORS_MASK` neighbour's voxels and size, if present.
     type Neighbors<E> = [Option<(Vec<E>, u32)>; 7];
 
-    /// The original apron fill: always the interpolating `sample_apron`.
+    /// The apron fill done the slow way: always the interpolating
+    /// `sample_apron`, with each apron axis stepping by the face neighbour's
+    /// voxel where that is coarser.
     fn reference_apron<T: VoxelField>(
         vol: &mut [T::Elem],
         size: u32,
@@ -172,6 +188,12 @@ mod tests {
         let padded = size.wrapping_add(PADDING);
         let idx = |c: UVec3| flatten_cube(c.x, c.y, c.z, padded);
         let edge = UVec3::splat(size.wrapping_sub(1));
+        // NEIGHBORS_MASK starts with the +x, +y, +z faces.
+        let step = |axis: usize| match &neighbors[axis] {
+            Some((_, n_size)) if *n_size < size => size.checked_div(*n_size).map_or(1.0, f32_from_u32),
+            _ => 1.0,
+        };
+        let step = Vec3::new(step(0), step(1), step(2));
         for (offset, n) in NEIGHBORS_MASK.iter().zip(neighbors) {
             let dir = offset.as_uvec3();
             let origin = dir.wrapping_mul(UVec3::splat(size));
@@ -184,12 +206,8 @@ mod tests {
                             Some((data, n_size)) => {
                                 let ratio = f32_from_u32(*n_size) / f32_from_u32(size);
                                 let local = cell.wrapping_sub(origin).as_vec3();
-                                // coarser: apron layers are its own voxels 0 and 1
-                                let at = if *n_size < size {
-                                    Vec3::select(dir.cmpeq(UVec3::ONE), local, local * ratio)
-                                } else {
-                                    local * ratio
-                                };
+                                let scale = Vec3::select(dir.cmpeq(UVec3::ONE), step, Vec3::ONE);
+                                let at = local * scale * ratio;
                                 T::sample_apron(data, *n_size, at.x, at.y, at.z)
                             }
                             None => vol[idx(cell.min(edge))],
@@ -265,6 +283,17 @@ mod tests {
                 Some(16),
             ],
             [None; 7],
+            // Same-LOD edge/corner regions beside coarser faces: their apron
+            // axes step by the coarse voxel, so they can't take the fast path.
+            [
+                Some(4),
+                Some(16),
+                Some(8),
+                Some(16),
+                Some(16),
+                Some(16),
+                Some(16),
+            ],
         ];
         // Includes exact zeros of both signs: the fast path must not change
         // what the GPU gets for them.

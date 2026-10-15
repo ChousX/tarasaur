@@ -28,7 +28,7 @@ struct BatchUniforms {
 // Per slot (see ChunkMeta in voxel/arena.rs).
 struct ChunkMeta {
     chunk_world_origin: vec3<f32>,
-    lod_ranks: u32, // see seam_lod_ranks in field/apron.rs
+    seam_ranks: vec2<u32>, // see seam_lod_ranks in field/apron.rs
 }
 
 // log2 of a LOD's voxels per chunk edge, by rank: 4, 16, 32, 64.
@@ -37,17 +37,15 @@ fn rank_log2_size(rank: u32) -> i32 {
     return log2_sizes[rank & 3u];
 }
 
-// The rank whose voxel units a texel holds, for a texel past the chunk's
-// last voxel on the axes in `bits` (x = 1, y = 2, z = 4; non-zero): that
-// apron region's source, from `ChunkMeta::lod_ranks`.
-fn apron_source_rank(lod_ranks: u32, bits: u32) -> u32 {
-    // (past-the-edge axes) -> NEIGHBORS_MASK index
-    let region = array<u32, 8>(0u, 0u, 1u, 3u, 2u, 4u, 5u, 6u);
-    return (lod_ranks >> (2u + 2u * region[bits & 7u])) & 3u;
+// LOD rank of the chunk at `offset` (-1..1 per axis; 0 = this chunk).
+fn seam_rank(seam_ranks: vec2<u32>, offset: vec3<i32>) -> u32 {
+    let k = u32(offset.x + 1 + 3 * (offset.y + 1) + 9 * (offset.z + 1));
+    return (seam_ranks[k / 16u] >> (2u * (k % 16u))) & 3u;
 }
 
-// The rank of the chunk's -x/-y/-z face neighbour (`axis` 0, 1, 2) if it is
-// coarser, else the chunk's own.
-fn below_rank(lod_ranks: u32, axis: u32) -> u32 {
-    return (lod_ranks >> (16u + 2u * axis)) & 3u;
+// log2(own size / source size) for the values at texel `t` of an
+// `n`-voxel chunk: apron texels hold their source neighbour's voxel units.
+fn apron_unit_shift(seam_ranks: vec2<u32>, n: u32, t: vec3<u32>) -> i32 {
+    let source = seam_rank(seam_ranks, vec3<i32>(t >= vec3<u32>(n)));
+    return rank_log2_size(seam_rank(seam_ranks, vec3<i32>(0))) - rank_log2_size(source);
 }
