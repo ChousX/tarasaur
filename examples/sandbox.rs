@@ -18,7 +18,9 @@ use tarasaur::{
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(render_plugin()))
-        // TarasaurPlugin now includes PalettePlugin.
+        // The default save directory (./saves/chunks): the sandbox is the
+        // main playground, so its world is the one kept there. Other
+        // examples save under saves/<example>.
         .add_plugins(TarasaurPlugin::default())
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
     register_terrain(&mut app);

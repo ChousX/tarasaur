@@ -17,8 +17,11 @@ use tarasaur::{chunk::Chunk, field::SDF};
 fn main() {
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins)
-        .add_plugins(TarasaurPlugin::default());
+    app.add_plugins(DefaultPlugins).add_plugins(TarasaurPlugin {
+        // Its own saves, so other examples' chunks never load here.
+        save_dir: "saves/lod_streaming".into(),
+        ..default()
+    });
 
     app.add_systems(Update, debug_stages);
     // Registered once, up front. Every chunk the ChunkLoader spawns or

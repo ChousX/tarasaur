@@ -10,7 +10,11 @@ use tarasaur::{
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(TarasaurPlugin::default())
+        .add_plugins(TarasaurPlugin {
+            // Its own saves, so other examples' chunks never load here.
+            save_dir: "saves/edit_sphere".into(),
+            ..default()
+        })
         .add_systems(Startup, (setup_scene, spawn_chunk_grid))
         .add_systems(
             Update,
