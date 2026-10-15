@@ -354,21 +354,22 @@ impl ArenaBuffers {
                 per_chunk(sdf_elems.saturating_mul(2)),
                 STORAGE_DST,
             ),
-            // COPY_SRC: lets tests read a slot back.
             material: dev.storage(
                 "arena_material_buffer",
                 per_chunk(sdf_elems),
                 STORAGE_DST | BufferUsages::COPY_SRC,
             ),
+            // COPY_SRC on these and the material buffer: lets tests read a
+            // slot back (see voxel::inspect).
             visibility_mask: dev.storage(
                 "arena_visibility_mask_buffer",
                 per_chunk(mask_words_per_chunk.saturating_mul(4)),
-                STORAGE_DST,
+                STORAGE_DST | BufferUsages::COPY_SRC,
             ),
             chunk_has_mask: dev.storage(
                 "arena_chunk_has_mask_buffer",
                 has_mask_words.saturating_mul(4),
-                STORAGE_DST,
+                STORAGE_DST | BufferUsages::COPY_SRC,
             ),
             active_cells: dev.storage(
                 "arena_active_cells_buffer",

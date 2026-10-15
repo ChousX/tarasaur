@@ -22,6 +22,9 @@
 //! - `reslot`: chunks filled solid (no mesh, slot released) and dug out again
 //!   (a new slot), every 60 frames. Checks their material slots are
 //!   refilled, by reading them back from the GPU.
+//! - `visibility`: a hidden box across a chunk boundary, a sphere toggled
+//!   hidden and visible, and one chunk's mask removed. Checks every touched
+//!   chunk's mask on the GPU against the main world.
 //!
 //! A failed check is printed, written to the summary as `check:<name>` = 0,
 //! and makes the bench exit with an error.
@@ -68,7 +71,7 @@ use tarasaur::{
     MaterialFieldPlugin, TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, overlapping_chunks, world_pos_to_chunk_pos},
     field::{
-        Field, LOD, MaterialField, SDF, VoxelField, VoxelMaterial,
+        Field, LOD, MaterialField, SDF, VisibilityField, VoxelField, VoxelMaterial,
         editor::{SdfCsgSphere, WorldEditor},
     },
     grid::flatten_cube,
@@ -129,6 +132,16 @@ const RESLOT_FILL_RADIUS: f32 = 9.5;
 const RESLOT_DIG_RADIUS: f32 = 3.0;
 /// When the material slots are read back (after the last dig has landed).
 const RESLOT_PROBE_AT: u32 = 280;
+const VIS_FRAMES: u32 = 300;
+/// The visibility sphere flips hidden <-> visible this often, until
+/// `VIS_TOGGLE_UNTIL`, ending visible.
+const VIS_TOGGLE_PERIOD: u32 = 30;
+const VIS_TOGGLE_UNTIL: u32 = 200;
+const VIS_SPHERE_RADIUS: f32 = 1.5;
+/// When one chunk's `VisibilityField` is removed.
+const VIS_REMOVE_AT: u32 = 120;
+/// When the masks are read back (well after the last edit has landed).
+const VIS_PROBE_AT: u32 = 260;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
@@ -140,6 +153,7 @@ enum Phase {
     BoxEdit,
     Query,
     Reslot,
+    Visibility,
     Done,
 }
 
@@ -154,6 +168,7 @@ impl Phase {
             Self::BoxEdit => "box",
             Self::Query => "query",
             Self::Reslot => "reslot",
+            Self::Visibility => "visibility",
             Self::Done => "done",
         }
     }
@@ -167,7 +182,8 @@ impl Phase {
             Self::Edit => Self::BoxEdit,
             Self::BoxEdit => Self::Query,
             Self::Query => Self::Reslot,
-            Self::Reslot | Self::Done => Self::Done,
+            Self::Reslot => Self::Visibility,
+            Self::Visibility | Self::Done => Self::Done,
         }
     }
 
@@ -182,6 +198,7 @@ impl Phase {
             Self::BoxEdit => Some(BOX_FRAMES),
             Self::Query => Some(QUERY_FRAMES),
             Self::Reslot => Some(RESLOT_FRAMES),
+            Self::Visibility => Some(VIS_FRAMES),
             Self::Done => Some(0),
         }
     }
@@ -195,7 +212,7 @@ impl Phase {
     }
 }
 
-const PHASES: [Phase; 8] = [
+const PHASES: [Phase; 9] = [
     Phase::Load,
     Phase::Hold,
     Phase::Spin,
@@ -204,6 +221,7 @@ const PHASES: [Phase; 8] = [
     Phase::BoxEdit,
     Phase::Query,
     Phase::Reslot,
+    Phase::Visibility,
 ];
 
 // ---------------------------------------------------------------------------
@@ -397,7 +415,7 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.insert_resource(probe.clone()).add_systems(
             Render,
-            (read_back_slots, report_arenas).in_set(RenderSystems::Cleanup),
+            (read_back_slots, read_back_masks, report_arenas).in_set(RenderSystems::Cleanup),
         );
     }
     app.insert_resource(probe)
@@ -409,10 +427,12 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
                 drive_box_edits,
                 drive_queries,
                 drive_reslots,
+                drive_visibility,
                 watch_queries,
                 check_material_box,
                 check_queries,
                 check_reslots,
+                check_visibility,
             ),
         );
 }
@@ -459,7 +479,12 @@ fn drive_camera(bench: Res<Bench>, mut cams: Query<&mut Transform, With<BenchCam
                 Transform::from_translation(pos)
                     .looking_at(pos + Vec3::new(1.0, -0.4, 0.0), Vec3::Y)
             }
-            Phase::Edit | Phase::BoxEdit | Phase::Query | Phase::Reslot | Phase::Done => {
+            Phase::Edit
+            | Phase::BoxEdit
+            | Phase::Query
+            | Phase::Reslot
+            | Phase::Visibility
+            | Phase::Done => {
                 let pos = fly_end();
                 Transform::from_translation(pos).looking_at(edit_target(), Vec3::Y)
             }
@@ -947,6 +972,9 @@ struct ProbeState {
     requests: Vec<SlotRequest>,
     /// One line per request, ending in ": ok" when the slot matched.
     results: Vec<String>,
+    /// Visibility masks to read back, and one result line per request.
+    mask_requests: Vec<MaskRequest>,
+    mask_results: Vec<(IVec3, String)>,
     /// Set by the main world to ask for an `ArenaReport`.
     arena_request: bool,
     arena_report: Option<ArenaReport>,
@@ -1053,6 +1081,275 @@ fn read_back_slots(
                 }
             });
     }
+}
+
+// ---------------------------------------------------------------------------
+// visibility: mask edits, mask removal, and the masks on the GPU
+// ---------------------------------------------------------------------------
+
+/// The hidden box: on the x = 240 chunk boundary, 0.45 of a High voxel off
+/// the grid like the material box, so it covers parts of two chunks.
+fn vis_box_center() -> Vec3 {
+    let voxel = LOD::High.voxel_size();
+    ((surface(240.0, START.z + 25.0) / voxel).floor() + 0.45) * voxel
+}
+
+/// The sphere toggled hidden and visible, in a chunk of its own.
+fn vis_sphere_center() -> Vec3 {
+    surface(230.0, START.z + 32.0)
+}
+
+/// The box's -x chunk, whose `VisibilityField` is removed mid-phase.
+fn vis_removed_chunk() -> IVec3 {
+    world_pos_to_chunk_pos(&(vis_box_center() - Vec3::X * MATERIAL_BOX_HALF))
+}
+
+/// Every chunk the phase's edits touch: the ones whose masks are checked.
+fn vis_chunks() -> Vec<IVec3> {
+    let mut chunks: Vec<IVec3> =
+        overlapping_chunks(vis_box_center(), Vec3::splat(MATERIAL_BOX_HALF))
+            .chain(overlapping_chunks(
+                vis_sphere_center(),
+                Vec3::splat(VIS_SPHERE_RADIUS),
+            ))
+            .collect();
+    chunks.sort_unstable_by_key(|c| (c.x, c.y, c.z));
+    chunks.dedup();
+    chunks
+}
+
+fn drive_visibility(
+    bench: Res<Bench>,
+    mut visibility: WorldEditor<VisibilityField, bool>,
+    chunks: Res<ChunkManager>,
+    fields: Query<&VisibilityField>,
+    probe: Res<SlotProbe>,
+    mut commands: Commands,
+) {
+    if bench.phase != Phase::Visibility {
+        return;
+    }
+    let f = bench.frame_in_phase;
+    if f == 0 {
+        visibility.fill_box(vis_box_center(), Vec3::splat(MATERIAL_BOX_HALF), false);
+    }
+    // Hidden on odd toggles, so it ends visible: an all-visible chunk sends
+    // no mask at all.
+    if f < VIS_TOGGLE_UNTIL && f.is_multiple_of(VIS_TOGGLE_PERIOD) {
+        let hide = (f / VIS_TOGGLE_PERIOD) % 2 == 1;
+        visibility.fill_sphere(vis_sphere_center(), VIS_SPHERE_RADIUS, !hide);
+    }
+    if f == VIS_REMOVE_AT
+        && let Some(entity) = chunks.get_chunk(&vis_removed_chunk())
+    {
+        commands.entity(entity).remove::<VisibilityField>();
+    }
+    if f != VIS_PROBE_AT {
+        return;
+    }
+    let Ok(mut state) = probe.0.lock() else {
+        return;
+    };
+    for pos in vis_chunks() {
+        let Some(entity) = chunks.get_chunk(&pos) else {
+            state
+                .mask_results
+                .push((pos, format!("chunk {pos} isn't loaded")));
+            continue;
+        };
+        let field = fields.get(entity).ok();
+        state.mask_requests.push(MaskRequest {
+            pos,
+            entity,
+            // Edits load chunks at max LOD; a chunk's mask slot is there too.
+            lod: field.map_or(LOD::High, VoxelField::lod),
+            expected: field
+                .filter(|f| f.should_extract())
+                .map(|f| f.data_slice().into()),
+        });
+    }
+}
+
+/// A chunk whose GPU mask to read back. `expected` is the main world's
+/// mask (`lod.size()`^3 bytes, 0 = hidden), or `None` when the GPU should
+/// hold no mask for it (no field, or all visible).
+struct MaskRequest {
+    pos: IVec3,
+    entity: Entity,
+    lod: LOD,
+    expected: Option<Arc<[u8]>>,
+}
+
+/// Copies each requested chunk's mask words and its "has a mask" word into
+/// one mappable buffer and compares them with the main world.
+fn read_back_masks(
+    probe: Res<SlotProbe>,
+    arenas: ArenaInspector,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    let requests = match probe.0.lock() {
+        Ok(mut s) => std::mem::take(&mut s.mask_requests),
+        Err(_) => return,
+    };
+    for req in requests {
+        let pos = req.pos;
+        // A chunk that meshes to nothing holds no slot, so no GPU mask:
+        // nothing is drawn there for a mask to hide.
+        let Some(slot) = arenas.mask_slot(req.lod, req.entity) else {
+            if let Ok(mut s) = probe.0.lock() {
+                s.mask_results
+                    .push((pos, format!("chunk {pos} (no geometry, no slot): ok")));
+            }
+            continue;
+        };
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("bench_mask_readback"),
+            size: slot.bytes.saturating_add(4),
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("bench_mask_readback"),
+        });
+        encoder.copy_buffer_to_buffer(&slot.buffer, slot.offset, &readback, 0, slot.bytes);
+        encoder.copy_buffer_to_buffer(
+            &slot.has_mask_buffer,
+            slot.has_mask_offset,
+            &readback,
+            slot.bytes,
+            4,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let (padded, n) = (slot.padded_size, req.lod.size());
+        let (bit, mask_words) = (
+            slot.has_mask_bit,
+            usize::try_from(slot.bytes / 4).unwrap_or(0),
+        );
+        let state = probe.0.clone();
+        readback
+            .clone()
+            .slice(..)
+            .map_async(MapMode::Read, move |result| {
+                let line = if result.is_err() {
+                    format!("chunk {pos}: map failed")
+                } else {
+                    let line = readback.slice(..).get_mapped_range().ok().map(|gpu| {
+                        let words: &[u32] = bytemuck::cast_slice(&gpu);
+                        let has_mask = words.get(mask_words).is_some_and(|w| (w >> bit) & 1 == 1);
+                        compare_mask(pos, words, has_mask, req.expected.as_deref(), padded, n)
+                    });
+                    readback.unmap();
+                    line.unwrap_or_else(|| format!("chunk {pos}: unreadable"))
+                };
+                if let Ok(mut s) = state.lock() {
+                    s.mask_results.push((pos, line));
+                }
+            });
+    }
+}
+
+/// One result line: ": ok" when the GPU's flag and bits match the main
+/// world for every interior voxel.
+fn compare_mask(
+    pos: IVec3,
+    words: &[u32],
+    has_mask: bool,
+    expected: Option<&[u8]>,
+    padded: u32,
+    n: u32,
+) -> String {
+    let Some(expected) = expected else {
+        return if has_mask {
+            format!("chunk {pos}: GPU still flags a mask, expected none")
+        } else {
+            format!("chunk {pos} (no mask): ok")
+        };
+    };
+    if !has_mask {
+        return format!("chunk {pos}: GPU flags no mask, expected one");
+    }
+    let mut wrong = 0usize;
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let i = flatten_cube(x, y, z, padded);
+                let got = words.get(i / 32).is_some_and(|w| (w >> (i % 32)) & 1 == 1);
+                let want = expected
+                    .get(flatten_cube(x, y, z, n))
+                    .is_some_and(|&b| b != 0);
+                if got != want {
+                    wrong = wrong.saturating_add(1);
+                }
+            }
+        }
+    }
+    let hidden: usize = expected.iter().map(|&b| usize::from(b == 0)).sum();
+    if wrong == 0 {
+        format!("chunk {pos} ({hidden} hidden): ok")
+    } else {
+        format!(
+            "chunk {pos}: {wrong} of {} mask bits wrong",
+            usize_from(n).pow(3)
+        )
+    }
+}
+
+/// Every touched chunk's GPU mask matches the main world, both the masked
+/// and the mask-free path ran, and the removed field's mask is gone.
+fn check_visibility(
+    mut bench: ResMut<Bench>,
+    probe: Res<SlotProbe>,
+    chunks: Res<ChunkManager>,
+    fields: Query<&VisibilityField>,
+) {
+    if !Phase::Visibility.last_frame(&bench) {
+        return;
+    }
+    let results = probe
+        .0
+        .lock()
+        .map_or_else(|_| Vec::new(), |s| s.mask_results.clone());
+    let expected = vis_chunks().len();
+    let ok = results.iter().filter(|(_, l)| l.ends_with(": ok")).count();
+    let masked = results
+        .iter()
+        .filter(|(_, l)| l.contains("hidden): ok"))
+        .count();
+    let unmasked = results
+        .iter()
+        .filter(|(_, l)| l.contains("(no mask): ok"))
+        .count();
+    let detail = if results.is_empty() {
+        "no readback finished".into()
+    } else {
+        results
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    bench.checks.record(
+        Phase::Visibility,
+        "visibility_mask_slots",
+        ok == expected && results.len() == expected && masked > 0 && unmasked > 0,
+        detail,
+    );
+
+    let removed = vis_removed_chunk();
+    let field_gone = chunks
+        .get_chunk(&removed)
+        .is_some_and(|e| fields.get(e).is_err());
+    let gpu_cleared = results
+        .iter()
+        .any(|(p, l)| *p == removed && l.ends_with("(no mask): ok"));
+    bench.checks.record(
+        Phase::Visibility,
+        "visibility_removed",
+        field_gone && gpu_cleared,
+        format!("chunk {removed}: field removed {field_gone}, GPU mask cleared {gpu_cleared}"),
+    );
 }
 
 fn record_frame(

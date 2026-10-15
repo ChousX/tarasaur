@@ -19,6 +19,25 @@ pub struct MaterialSlot {
     pub padded_size: u32,
 }
 
+/// Where a resident chunk's visibility mask lives on the GPU.
+pub struct MaskSlot {
+    /// The arena's mask buffer: one bit per padded voxel, 32 per `u32`,
+    /// x fastest (`COPY_SRC`).
+    pub buffer: Buffer,
+    /// Byte offset of the chunk's mask words in `buffer`.
+    pub offset: u64,
+    /// Bytes of mask words per chunk (a multiple of 4).
+    pub bytes: u64,
+    /// The arena's per-slot "has a mask" bits, 32 per `u32` (`COPY_SRC`).
+    pub has_mask_buffer: Buffer,
+    /// Byte offset of the `u32` holding this slot's "has a mask" bit.
+    pub has_mask_offset: u64,
+    /// That bit's index within the word.
+    pub has_mask_bit: u32,
+    /// Edge of the padded volume: the chunk's voxels plus the apron.
+    pub padded_size: u32,
+}
+
 /// Render-world system param: which arenas exist and which chunks they hold.
 #[derive(SystemParam)]
 pub struct ArenaInspector<'w> {
@@ -61,6 +80,32 @@ impl ArenaInspector<'_> {
         Some(MaterialSlot {
             buffer: arena.material_buffer.clone(),
             offset: u64::from(found.slot).saturating_mul(bytes),
+            padded_size: arena.texture_size,
+        })
+    }
+
+    /// The visibility-mask slot of `chunk` (a main-world entity) at `lod`,
+    /// if it holds one.
+    #[must_use]
+    pub fn mask_slot(&self, lod: LOD, chunk: Entity) -> Option<MaskSlot> {
+        let found = self.arenas.find_slot(lod, MainEntity::from(chunk))?;
+        let arena = self
+            .arenas
+            .arenas
+            .get(VoxelChunkArenaSet::lod_index(lod))?
+            .get(found.arena_idx)?;
+        // Same layout as `prepare_mask_upload`: a word-aligned region per slot.
+        let bytes = u64::from(arena.sdf_elems_per_chunk)
+            .div_ceil(32)
+            .saturating_mul(4);
+        let slot = u64::from(found.slot);
+        Some(MaskSlot {
+            buffer: arena.visibility_mask_buffer.clone(),
+            offset: slot.saturating_mul(bytes),
+            bytes,
+            has_mask_buffer: arena.chunk_has_mask_buffer.clone(),
+            has_mask_offset: (slot / 32).saturating_mul(4),
+            has_mask_bit: found.slot % 32,
             padded_size: arena.texture_size,
         })
     }
