@@ -6,7 +6,11 @@
 //! storage-binding limit; `VoxelChunkArenaSet` adds arenas per LOD up to
 //! `ArenaConfig` and moves chunks between them as their LOD changes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    any::TypeId,
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use bevy::{
     prelude::*,
@@ -713,6 +717,9 @@ pub struct GpuChunkLookupEntry {
     pub packed_slot_and_rank: u32,
 }
 
+/// One channel's latest upload per chunk: (LOD it was built at, padded bytes).
+pub type SideChannelCache = HashMap<MainEntity, (LOD, Arc<[u8]>)>;
+
 #[derive(Resource, Default)]
 pub struct VoxelChunkArenaSet {
     pub arenas: [Vec<VoxelChunkArena>; LOD::COUNT],
@@ -724,8 +731,16 @@ pub struct VoxelChunkArenaSet {
     /// Their material/visibility uploads wait too, so the three stay in step.
     pub deferred: HashSet<MainEntity>,
     /// Live chunks whose latest SDF meshes to nothing (exact CPU count of 0).
-    /// They hold no slot; their material/visibility uploads are dropped.
+    /// They hold no slot; their material/visibility uploads are only cached.
     pub empty: HashSet<MainEntity>,
+    /// Chunks whose SDF went into a different slot this frame (a new
+    /// placement, or a move to another arena). The main world only re-sends
+    /// a field when it changes, so their material/visibility slots are
+    /// refilled from `side_data`.
+    pub reslotted: HashSet<MainEntity>,
+    /// Latest material/visibility upload of every live chunk, per channel
+    /// type.
+    pub side_data: HashMap<TypeId, SideChannelCache>,
 }
 
 impl VoxelChunkArenaSet {

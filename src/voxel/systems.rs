@@ -3,7 +3,12 @@
 //! packing, active-cell counting).
 
 use super::util::dispatch;
-use std::{collections::HashMap, marker::PhantomData, sync::atomic::Ordering};
+use std::{
+    any::TypeId,
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    sync::{Arc, atomic::Ordering},
+};
 
 use crate::field::flatten_cube;
 use crate::num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from};
@@ -48,7 +53,7 @@ use super::pipeline::VoxelComputePipeline;
 pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub main_entity: MainEntity,
     pub chunk_pos: IVec3,
-    pub padded_data: std::sync::Arc<[u8]>,
+    pub padded_data: Arc<[u8]>,
     pub size: u32,
     pub lod: LOD,
     /// See [`seam_lod_ranks`]; only the SDF upload uses it.
@@ -186,6 +191,7 @@ pub fn prepare_voxel_arena(
     mut out_of_room: Local<bool>,
 ) {
     arena_set.deferred.clear();
+    arena_set.reslotted.clear();
     let pending = newest_pending(&arena_set, &extracted_chunks, &mut commands);
 
     // Chunks already resident at this LOD (edits, neighbour apron changes)
@@ -231,7 +237,8 @@ pub fn prepare_voxel_arena(
         }
         arena_set.empty.remove(&x.main_entity);
         let cell_count = size.saturating_sub(1);
-        let Some(ArenaSlot { arena_idx, slot }) =
+        let before = arena_set.find_slot(lod, x.main_entity);
+        let Some(placed @ ArenaSlot { arena_idx, slot }) =
             arena_set.place(lod, x.main_entity, count, || {
                 info!(
                     "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
@@ -258,6 +265,9 @@ pub fn prepare_voxel_arena(
             any_out_of_room = true;
             continue;
         };
+        if before != Some(placed) {
+            arena_set.reslotted.insert(x.main_entity);
+        }
         let Some(arena) = arena_set.arena_mut(lod, arena_idx) else {
             continue;
         };
@@ -328,16 +338,30 @@ fn upload_chunk(
     arena.mark_dirty(slot);
 }
 
-/// Pending uploads for a channel that rides along with a chunk's SDF
-/// (material, visibility), paired with the slot `prepare_voxel_arena` gave
-/// it. Ones whose SDF is waiting stay queued; ones whose chunk meshes to
-/// nothing or has no slot are despawned.
+/// One side-channel write into a chunk's slot. `extracted` is the upload it
+/// came from, despawned once written; `None` when refilled from the cache.
+struct SideUpload {
+    lod: LOD,
+    slot: ArenaSlot,
+    data: Arc<[u8]>,
+    extracted: Option<Entity>,
+}
+
+/// This frame's writes for a channel that rides along with a chunk's SDF
+/// (material, visibility).
+///
+/// Every upload not waiting on its SDF (`deferred`) is cached in
+/// `side_data`, then written if the chunk holds a slot; a chunk that meshes
+/// to nothing, or isn't placed yet, gets it from the cache once it is.
+/// Chunks that moved slot this frame (`reslotted`) with no fresh upload are
+/// refilled from the cache, since the main world only re-sends a field when
+/// it changes.
 fn side_channel_uploads<T: Send + Sync + 'static>(
-    arena_set: &VoxelChunkArenaSet,
+    arena_set: &mut VoxelChunkArenaSet,
     extracted: &Query<(Entity, &ExtractedChunkField<T>)>,
     commands: &mut Commands,
-) -> Vec<(Entity, ArenaSlot)> {
-    let mut out = Vec::new();
+) -> Vec<SideUpload> {
+    let mut fresh = Vec::new();
     for (_, e) in newest_pending(arena_set, extracted, commands) {
         let Ok((_, x)) = extracted.get(e) else {
             continue;
@@ -345,59 +369,72 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
         if arena_set.deferred.contains(&x.main_entity) {
             continue; // waits with its SDF
         }
-        if arena_set.empty.contains(&x.main_entity) {
-            commands.entity(e).despawn(); // no geometry to texture or mask
-            continue;
-        }
-        let Some(slot) = arena_set.find_slot(x.lod, x.main_entity) else {
-            if !x.padded_data.is_empty() {
-                warn!(
-                    "[{}] no slot yet for chunk {:?}, dropping this frame's upload",
-                    std::any::type_name::<T>(),
-                    x.chunk_pos
-                );
-            }
-            commands.entity(e).despawn();
+        fresh.push((e, x.main_entity, x.lod, Arc::clone(&x.padded_data)));
+    }
+    let cache = arena_set.side_data.entry(TypeId::of::<T>()).or_default();
+    for (_, main, lod, data) in &fresh {
+        cache.insert(*main, (*lod, Arc::clone(data)));
+    }
+
+    let mut out = Vec::new();
+    let mut written = HashSet::new();
+    for (e, main, lod, data) in fresh {
+        let Some(slot) = arena_set.find_slot(lod, main) else {
+            commands.entity(e).despawn(); // cached; written once the chunk has a slot
             continue;
         };
-        debug_assert_eq!(
-            Some(x.size),
-            arena_set
-                .arenas
-                .get(VoxelChunkArenaSet::lod_index(x.lod))
-                .and_then(|arenas| arenas.get(slot.arena_idx))
-                .map(|arena| arena.texture_size),
-            "mixed LOD in one arena — bucket by LOD"
-        );
-        out.push((e, slot));
+        written.insert(main);
+        out.push(SideUpload {
+            lod,
+            slot,
+            data,
+            extracted: Some(e),
+        });
+    }
+    if let Some(cache) = arena_set.side_data.get(&TypeId::of::<T>()) {
+        for main in arena_set.reslotted.iter().filter(|m| !written.contains(*m)) {
+            let Some((lod, data)) = cache.get(main) else {
+                continue;
+            };
+            let Some(slot) = arena_set.find_slot(*lod, *main) else {
+                continue; // cached at another LOD: that LOD's upload is on its way
+            };
+            out.push(SideUpload {
+                lod: *lod,
+                slot,
+                data: Arc::clone(data),
+                extracted: None,
+            });
+        }
     }
     out
 }
 
 /// Sibling to `prepare_voxel_arena`: uploads material ids into the slot it
-/// placed. Must run after it, so `deferred` and new slots are current.
+/// placed. Must run after it, so `deferred`, `reslotted` and new slots are
+/// current.
 pub fn prepare_material_for_arena<M: VoxelMaterial>(
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<MaterialField<M>>)>,
     mut commands: Commands,
 ) {
-    for (e, ArenaSlot { arena_idx, slot }) in
-        side_channel_uploads(&arena_set, &extracted_chunks, &mut commands)
-    {
-        let Ok((_, x)) = extracted_chunks.get(e) else {
+    for up in side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands) {
+        let slot = up.slot.slot;
+        let Some(arena) = arena_set.arena_mut(up.lod, up.slot.arena_idx) else {
             continue;
         };
-        let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
-            continue;
-        };
+        // A reslotted chunk's slot was just marked dirty by its SDF upload,
+        // so only fresh uploads can be turned away here.
         if !arena.can_mark_dirty(slot) {
             continue; // no scratch left this frame; retried next frame
         }
         let offset = u64::from(slot).wrapping_mul(u64::from(arena.sdf_elems_per_chunk));
-        render_queue.write_buffer(&arena.material_buffer, offset, &x.padded_data);
+        render_queue.write_buffer(&arena.material_buffer, offset, &up.data);
         arena.mark_dirty(slot); // pass3 bakes materials into vertices
-        commands.entity(e).despawn();
+        if let Some(e) = up.extracted {
+            commands.entity(e).despawn();
+        }
     }
 }
 
@@ -407,24 +444,20 @@ pub fn prepare_visibility_for_arena(
     extracted_chunks: Query<(Entity, &ExtractedChunkField<VisibilityField>)>,
     mut commands: Commands,
 ) {
-    for (e, ArenaSlot { arena_idx, slot }) in
-        side_channel_uploads(&arena_set, &extracted_chunks, &mut commands)
-    {
-        let Ok((_, x)) = extracted_chunks.get(e) else {
-            continue;
-        };
-        let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
+    for up in side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands) {
+        let slot = up.slot.slot;
+        let Some(arena) = arena_set.arena_mut(up.lod, up.slot.arena_idx) else {
             continue;
         };
         // Empty = the chunk went uniform: clear the flag so the raster stops
         // consulting the now-stale mask.
-        let has_mask = !x.padded_data.is_empty();
+        let has_mask = !up.data.is_empty();
         if has_mask {
             // One byte per voxel -> 1 bit. Each slot gets its own word-aligned
             // region, like sdf/material_buffer, so adjacent slots' writes can't
             // clobber each other's boundary words.
             let words_per_chunk = u64::from(arena.sdf_elems_per_chunk).div_ceil(32);
-            let packed = pack_bits(x.padded_data.iter().map(|&b| b != 0));
+            let packed = pack_bits(up.data.iter().map(|&b| b != 0));
             render_queue.write_buffer(
                 &arena.visibility_mask_buffer,
                 u64::from(slot)
@@ -434,7 +467,9 @@ pub fn prepare_visibility_for_arena(
             );
         }
         arena.set_slot_has_mask(slot, has_mask);
-        commands.entity(e).despawn();
+        if let Some(e) = up.extracted {
+            commands.entity(e).despawn();
+        }
     }
     for arena in arena_set.iter_mut() {
         let packed = pack_bits(arena.mask_slots.iter().copied());
@@ -759,7 +794,7 @@ pub fn extract_visibility_removed(
         commands.spawn(ExtractedChunkField::<VisibilityField> {
             main_entity: entity.into(),
             chunk_pos: pos.0,
-            padded_data: std::sync::Arc::from([]),
+            padded_data: Arc::from([]),
             size: lod.size().wrapping_add(PADDING),
             lod: *lod,
             lod_ranks: 0,

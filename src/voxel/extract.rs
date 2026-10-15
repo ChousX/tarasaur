@@ -477,6 +477,9 @@ pub fn release_despawned_chunks(
 fn drop_chunk(arena_set: &mut VoxelChunkArenaSet, e: MainEntity) {
     arena_set.live.remove(&e);
     arena_set.empty.remove(&e);
+    for cache in arena_set.side_data.values_mut() {
+        cache.remove(&e);
+    }
     arena_set.release(e);
 }
 
