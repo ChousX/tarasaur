@@ -194,7 +194,6 @@ cargo run --release --example sandbox
 |---|---|
 | `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse digs, Ctrl + left mouse builds, scroll resizes the brush |
 | `lod_streaming` | The smallest streaming setup |
-| `textured_terrain_test` | A fixed grid at mixed LODs with a palette |
 | `terrain_test` | Seam check and a valley carved across a chunk border |
 | `edit_sphere` | Hand-spawned chunks and a resizable SDF sphere |
 | `cursor_collision_test` | GPU ray-query hits on a sphere |
