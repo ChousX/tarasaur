@@ -16,10 +16,7 @@ use bevy::{
 };
 use std::collections::VecDeque;
 
-use crate::{
-    field::{LOD, TargetLOD},
-    voxel::cursor::CursorHit,
-};
+use crate::field::{LOD, TargetLOD};
 
 pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
@@ -37,9 +34,9 @@ impl Plugin for ChunkPlugin {
                 (
                     chunk_loader_boundary_checker,
                     expire_edit_pins,
-                    update_cursor_focus, // must run before plan_chunk_ops
-                    plan_chunk_ops.run_if(loaders_dirty),
-                    apply_chunk_ops,
+                    (plan_chunk_ops.run_if(loaders_dirty), apply_chunk_ops)
+                        .chain()
+                        .in_set(ChunkSet::Plan),
                 )
                     .chain(),
             )
@@ -48,6 +45,14 @@ impl Plugin for ChunkPlugin {
                 chunk_boundary_visualizer.run_if(resource_exists::<ShowChunkBounds>),
             );
     }
+}
+
+/// Ordering points in the chunk systems.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ChunkSet {
+    /// Plans and applies spawns, despawns and LOD changes. Anything that
+    /// moves `CursorFocusChunk` or a loader should run before it.
+    Plan,
 }
 
 /// Chunk edge length in world units, at every LOD.
@@ -59,8 +64,9 @@ pub const FOCUS_RADIUS: i32 = 1;
 #[derive(Resource, Default)]
 pub struct ShowChunkBounds;
 
-/// Written by `update_cursor_focus` from the resolved `CursorHit`. Only
-/// assign when the chunk actually changes so `is_changed` stays meaningful.
+/// The chunk the player is looking at; chunks around it count as near.
+/// Written by `raycast::cursor::update_cursor_focus`. Only assign when the
+/// chunk actually changes so `is_changed` stays meaningful.
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
 pub struct CursorFocusChunk(pub Option<IVec3>);
 
@@ -534,25 +540,6 @@ pub(crate) fn expire_edit_pins(
             replan.0 = true; // loader decides what LOD this chunk goes back to
         }
     }
-}
-
-/// Keeps `CursorFocusChunk` pointing at the chunk under the cursor.
-///
-/// Backend-agnostic: reads the resolved `CursorHit` (CPU, GPU or Auto, see
-/// `CursorQueryMode`). Sticky: the focus only moves once the hit leaves the
-/// current `FOCUS_RADIUS` window, and a miss keeps the last focus. Otherwise a
-/// LOD upgrade that nudges the hit into the next chunk (or a grazing ray
-/// flickering between hit and miss) replans and reloads every frame.
-pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChunk>) {
-    let Some(h) = hit.0.as_ref() else {
-        return;
-    };
-    // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
-    let new = world_pos_to_chunk_pos(&(h.pos - h.normal * 0.05));
-    let inside_window = focus.0.is_some_and(|f| chebyshev(new, f) <= FOCUS_RADIUS);
-    if !inside_window {
-        focus.0 = Some(new);
-    } // assign only on change, so is_changed stays meaningful
 }
 
 #[cfg(test)]

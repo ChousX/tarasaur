@@ -19,7 +19,7 @@
 //!    multi-draw per arena, triplanar-textured from a [`texture_palette`].
 //!
 //! Persistence ([`storage::persistence`]) saves edited max-LOD chunks to
-//! `./saves/chunks/`. Cursor ray queries ([`voxel::cursor`]) run on the CPU
+//! `./saves/chunks/`. Cursor ray queries ([`raycast::cursor`]) run on the CPU
 //! SDF or on the GPU arenas.
 
 #![recursion_limit = "256"]
@@ -30,6 +30,7 @@ pub mod grid;
 pub mod num;
 mod plugin;
 pub mod prelude;
+pub mod raycast;
 pub mod storage;
 pub mod texture_palette;
 pub mod voxel;

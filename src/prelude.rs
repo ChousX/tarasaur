@@ -19,11 +19,11 @@ pub use crate::field::{
 pub use crate::storage::persistence::{AutosaveIntervalSecs, SaveChunkMessage, SaveDirectory};
 
 // Rendering, palettes and ray casts
-pub use crate::texture_palette::{
-    PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette,
-};
-pub use crate::voxel::{
-    VoxelDepthPrepass,
+pub use crate::raycast::{
     cursor::{CursorBrush, CursorHit, CursorQueryMode},
     terrain_ray::TerrainRay,
 };
+pub use crate::texture_palette::{
+    PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette,
+};
+pub use crate::voxel::VoxelDepthPrepass;

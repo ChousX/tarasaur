@@ -12,7 +12,7 @@ use tarasaur::{
     MaterialFieldPlugin, TarasaurPlugin,
     chunk::ChunkLoader,
     field::{LOD, SDF, editor::WorldEditor},
-    voxel::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
+    raycast::cursor::{CursorBrush, CursorHit, resolve_cursor_hit},
 };
 
 fn main() {

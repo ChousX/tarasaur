@@ -12,22 +12,19 @@
 //!   then one `multi_draw_indexed_indirect` per arena (`voxel_raster.wesl`:
 //!   triplanar albedo + ARM, per-pixel visibility discard, Bevy PBR
 //!   lighting), optionally after a depth-only prepass (`VoxelDepthPrepass`).
-//! - **Query** ([`query`]): optional GPU ray casts against the arenas, read
-//!   back a few frames later.
+//!
+//! GPU ray queries against the arenas live in `raycast::gpu`.
 
 pub mod arena;
-pub mod cursor;
 pub(crate) mod draw;
 pub(crate) mod extract;
 pub(crate) mod mesh;
 pub(crate) mod pipeline;
-pub mod query;
 pub(crate) mod raster;
 pub(crate) mod resident;
 pub mod stats;
 pub(crate) mod telemetry;
-pub mod terrain_ray;
-pub mod types;
+pub(crate) mod types;
 pub(crate) mod upload;
 pub(crate) mod util;
 
@@ -49,7 +46,6 @@ use crate::{
     field::{GpuChannel, VoxelField},
     voxel::{
         arena::VoxelChunkArenaSet,
-        cursor::CursorPlugin,
         draw::{
             DRAW_COMPACTION_SHADER_HANDLE, VoxelDrawPipeline, VoxelViewDraws,
             prepare_voxel_view_draws,
@@ -59,12 +55,6 @@ use crate::{
         pipeline::{
             VoxelMaterialBindGroup, VoxelRasterPipeline, queue_voxel_raster_pipelines,
             update_voxel_material_bind_group,
-        },
-        query::{
-            ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries, VoxelQueryBuffers,
-            VoxelQueryResultChannel, VoxelQueryResultReceiver, VoxelQueryResults,
-            clear_pending_voxel_queries, dispatch_voxel_query_pass, drain_voxel_query_results,
-            extract_voxel_queries, map_voxel_query_results, prepare_voxel_queries,
         },
         raster::voxel_raster_pass,
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
@@ -191,15 +181,6 @@ impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         load_shaders(app);
 
-        let (query_tx, query_rx) = crossbeam_channel::unbounded();
-        app.insert_resource(VoxelQueryResultReceiver { receiver: query_rx });
-        app.insert_resource(PendingVoxelQueries::default());
-        app.insert_resource(VoxelQueryResults::default());
-        app.add_systems(
-            First,
-            (clear_pending_voxel_queries, drain_voxel_query_results),
-        );
-
         app.init_resource::<VoxelDepthPrepass>()
             .add_plugins(ExtractResourcePlugin::<VoxelDepthPrepass>::default())
             .init_resource::<ForceResident>()
@@ -208,23 +189,16 @@ impl Plugin for VoxelRenderPlugin {
             .init_resource::<LiveOutbox>()
             .add_systems(Last, track_live_chunks);
 
-        app.add_plugins(CursorPlugin);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.insert_resource(VoxelQueryResultChannel { sender: query_tx });
         render_app.init_resource::<VoxelViewDraws>();
-        render_app.init_resource::<ExtractedVoxelQueries>();
-        render_app.init_resource::<NextQuerySlot>();
 
         render_app
             .init_resource::<VoxelChunkArenaSet>()
             .init_resource::<RemeshBudget>()
             .init_resource::<GuardTelemetry>()
-            .add_systems(
-                ExtractSchedule,
-                (release_despawned_chunks, extract_voxel_queries).chain(),
-            )
+            .add_systems(ExtractSchedule, release_despawned_chunks)
             .configure_sets(
                 Render,
                 (VoxelPrepareSet::Upload, VoxelPrepareSet::Dispatch)
@@ -247,14 +221,7 @@ impl Plugin for VoxelRenderPlugin {
                     prepare_voxel_view_draws
                         .in_set(RenderSystems::Prepare)
                         .after(VoxelPrepareSet::Upload),
-                    prepare_voxel_queries
-                        .in_set(VoxelPrepareSet::Upload)
-                        .after(UploadSet::Channels),
                     dispatch_voxel_compute_passes_batched.in_set(VoxelPrepareSet::Dispatch),
-                    dispatch_voxel_query_pass
-                        .in_set(VoxelPrepareSet::Dispatch)
-                        .after(dispatch_voxel_compute_passes_batched),
-                    map_voxel_query_results.in_set(RenderSystems::Cleanup),
                     map_guard_readbacks.in_set(RenderSystems::Cleanup),
                 ),
             )
@@ -271,7 +238,6 @@ impl Plugin for VoxelRenderPlugin {
             .init_resource::<VoxelMaterialBindGroup>()
             .init_resource::<VoxelPipelineLayouts>()
             .init_resource::<VoxelComputePipeline>()
-            .init_resource::<VoxelDrawPipeline>()
-            .init_resource::<VoxelQueryBuffers>();
+            .init_resource::<VoxelDrawPipeline>();
     }
 }

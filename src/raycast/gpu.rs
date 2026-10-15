@@ -31,9 +31,31 @@ use crate::{
     voxel::{
         arena::VoxelChunkArenaSet,
         pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
-        types::{CreateStorage, HitResult, RayQuery, entries},
+        types::{CreateStorage, entries},
     },
 };
+
+/// One ray, as the query shader reads it (layout must match the WGSL).
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct RayQuery {
+    pub origin: [f32; 3],
+    pub max_distance: f32,
+    pub direction: [f32; 3],
+    pub user_id: u32,
+}
+
+/// One ray's result, as the query shader writes it (layout must match the WGSL).
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct HitResult {
+    pub hit_pos_world: [f32; 3],
+    pub hit_distance: f32,
+    pub hit_normal: [f32; 3],
+    pub did_hit: u32,
+    pub voxel_coord: [u32; 3],
+    pub chunk_slot: u32,
+}
 
 /// Ray queries per frame. Sizes the fixed query/hit/readback buffers;
 /// extraction drops anything past it, since writing more would overflow them.
@@ -199,7 +221,7 @@ impl FromWorld for VoxelQueryBuffers {
         });
         let dummy_meta_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_query_dummy_meta_buffer"),
-            contents: bytemuck::bytes_of(&super::arena::ChunkMeta::default()),
+            contents: bytemuck::bytes_of(&crate::voxel::arena::ChunkMeta::default()),
             usage: BufferUsages::STORAGE,
         });
 

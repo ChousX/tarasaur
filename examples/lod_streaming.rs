@@ -9,8 +9,8 @@ use tarasaur::{
     TarasaurPlugin,
     chunk::{CHUNK_SIZE, ChunkLoader, ShowChunkBounds},
     field::LOD,
+    raycast::cursor::{CursorHit, resolve_cursor_hit},
     storage::generator::ChunkGeneratorRegistry,
-    voxel::cursor::{CursorHit, resolve_cursor_hit},
 };
 use tarasaur::{chunk::Chunk, field::SDF};
 

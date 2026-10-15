@@ -8,7 +8,7 @@ use tarasaur::{
     TarasaurPlugin,
     chunk::{CHUNK_SIZE, Chunk, ChunkPosition},
     field::{Field, LOD, SDF},
-    voxel::cursor::{CursorBrush, CursorHit, CursorQueryMode, resolve_cursor_hit},
+    raycast::cursor::{CursorBrush, CursorHit, CursorQueryMode, resolve_cursor_hit},
 };
 
 const SPHERE_CENTER: Vec3 = Vec3::ZERO;

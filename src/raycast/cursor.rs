@@ -1,5 +1,6 @@
-//! The terrain point under the mouse (`CursorHit`) and a default CSG brush
-//! (left digs, right adds). F8 cycles the query backend.
+//! The terrain point under the mouse (`CursorHit`), the chunk focus it
+//! drives, and a default CSG brush (left digs, right adds). F8 cycles the
+//! query backend.
 
 use bevy::{
     ecs::message::MessageWriter,
@@ -8,12 +9,11 @@ use bevy::{
 };
 
 use crate::{
-    chunk::update_cursor_focus,
+    chunk::{CursorFocusChunk, FOCUS_RADIUS, chebyshev, world_pos_to_chunk_pos},
     field::editor::SdfCsgSphere,
-    voxel::{
-        query::{PendingVoxelQueries, VoxelQueryResults},
+    raycast::{
+        gpu::{PendingVoxelQueries, RayQuery, VoxelQueryResults},
         terrain_ray::TerrainRay,
-        types::RayQuery,
     },
 };
 
@@ -189,23 +189,21 @@ pub fn cursor_brush(
     }
 }
 
-pub struct CursorPlugin;
-impl Plugin for CursorPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<CursorQueryMode>()
-            .init_resource::<CursorHit>()
-            .init_resource::<CursorBrush>()
-            .add_systems(
-                Update,
-                (
-                    cycle_cursor_mode,
-                    resolve_cursor_hit
-                        .after(cycle_cursor_mode)
-                        .before(update_cursor_focus),
-                    cursor_brush
-                        .after(resolve_cursor_hit)
-                        .run_if(|b: Res<CursorBrush>| b.enabled),
-                ),
-            );
-    }
+/// Keeps `CursorFocusChunk` pointing at the chunk under the cursor.
+///
+/// Backend-agnostic: reads the resolved `CursorHit` (CPU, GPU or Auto, see
+/// `CursorQueryMode`). Sticky: the focus only moves once the hit leaves the
+/// current `FOCUS_RADIUS` window, and a miss keeps the last focus. Otherwise a
+/// LOD upgrade that nudges the hit into the next chunk (or a grazing ray
+/// flickering between hit and miss) replans and reloads every frame.
+pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChunk>) {
+    let Some(h) = hit.0.as_ref() else {
+        return;
+    };
+    // Nudge inside the solid so a hit on a chunk boundary doesn't flicker.
+    let new = world_pos_to_chunk_pos(&(h.pos - h.normal * 0.05));
+    let inside_window = focus.0.is_some_and(|f| chebyshev(new, f) <= FOCUS_RADIUS);
+    if !inside_window {
+        focus.0 = Some(new);
+    } // assign only on change, so is_changed stays meaningful
 }

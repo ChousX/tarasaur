@@ -140,7 +140,7 @@ Render world: upload into per-LOD arena slot ─► pass1 (active cells) ─► 
 | `voxel::upload`, `mesh`, `raster` | Arena uploads, the surface-nets dispatch, the raster pass |
 | `voxel::pipeline` | Meshing and query pipelines; PBR raster pipelines specialized per view; palette bind group |
 | `voxel::draw` | Per-view frustum culling and draw-argument compaction |
-| `voxel::query`, `cursor`, `terrain_ray` | GPU and CPU ray casts, `CursorHit`, the default brush |
+| `raycast::gpu`, `cursor`, `terrain_ray` | GPU and CPU ray casts, `CursorHit`, the default brush |
 | `texture_palette` | `TexturePalette` asset, builder, validation |
 | `num` | The checked numeric casts (the crate denies `as`) |
 

@@ -11,6 +11,7 @@ use crate::{
         Field, FieldsPlugin, MaterialField, SDF, VisibilityField, VoxelField, VoxelMaterial,
         register_edits, surface::SurfaceCullPlugin,
     },
+    raycast::RaycastPlugin,
     storage::{
         loading::ChunkLoadingPlugin,
         persistence::{ChunkPersistencePlugin, register_saveable},
@@ -36,6 +37,7 @@ impl Plugin for TarasaurPlugin {
             ChunkLoadingPlugin,
             PalettePlugin,
             SurfaceCullPlugin,
+            RaycastPlugin,
         ))
         .add_voxel_field::<SDF>()
         .add_voxel_field::<VisibilityField>();
