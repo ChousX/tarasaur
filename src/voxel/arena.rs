@@ -751,7 +751,7 @@ impl Default for ArenaConfig {
 /// Where a lookup entry keeps its arena index (8 bits, above the slot's 20).
 ///
 /// The LOD rank sits above both, at bit 28; keep in sync with
-/// `cursor_query.wgsl`.
+/// `cursor_query.wesl`.
 pub const LOOKUP_ARENA_SHIFT: u32 = 20;
 const LOOKUP_SLOT_MASK: u32 = (1 << LOOKUP_ARENA_SHIFT) - 1;
 const LOOKUP_MAX_ARENAS: usize = 1 << 8;

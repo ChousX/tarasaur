@@ -6,6 +6,7 @@
 // fog, light probes), bound by voxel_raster_pass; 2 is the palette, 3 the
 // per-arena chunk data.
 
+import tarasaur::voxel::shaders::voxel_common::{BatchUniforms, ChunkMeta, flatten_sdf_idx};
 import bevy_pbr::render::{
     mesh_view_bindings::view,
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
@@ -99,22 +100,10 @@ struct MaterialProperties {
 @group(2) @binding(2) var<storage, read> material_properties: array<MaterialProperties>;
 
 // --- Group 3: per-arena visibility data, fragment-stage only. ---
-struct ChunkMeta {
-    chunk_world_origin: vec3<f32>,
-    lod_ranks: u32,
-}
-
-struct VisBatchUniforms {
-    cell_count: u32,
-    texture_size: u32,
-    wg_per_chunk_z: u32, // unused here — reusing pass3's uniform buffer as-is
-    voxel_size: f32,
-}
-
 @group(3) @binding(0) var<storage, read> chunk_meta: array<ChunkMeta>;
 @group(3) @binding(1) var<storage, read> visibility_mask_buffer: array<u32>;
 @group(3) @binding(2) var<storage, read> chunk_has_mask_buffer: array<u32>;
-@group(3) @binding(3) var<uniform> vis_uniforms: VisBatchUniforms;
+@group(3) @binding(3) var<uniform> vis_uniforms: BatchUniforms; // pass3's, reused
 
 struct VertexInput {
     @location(0) position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
@@ -181,10 +170,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 }
 
 // --- Visibility sampling ---
-fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
-    return coord.z * texture_size * texture_size + coord.y * texture_size + coord.x;
-}
-
 fn mask_words_per_chunk() -> u32 {
     let elems = vis_uniforms.texture_size * vis_uniforms.texture_size * vis_uniforms.texture_size;
     return (elems + 31u) / 32u;

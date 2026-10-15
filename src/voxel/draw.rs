@@ -41,7 +41,7 @@ use crate::{
 pub const DRAW_COMPACTION_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("6f708192-a3b4-c5d6-e7f8-091a2b3c4d5e");
 
-/// Must match `WORKGROUP_SIZE` in `draw_compaction.wgsl`.
+/// Must match `WORKGROUP_SIZE` in `draw_compaction.wesl`.
 const WORKGROUP_SIZE: u32 = 64;
 
 const ARGS_BYTES: u64 = u64_from_usize(std::mem::size_of::<DrawIndexedIndirectArgs>());

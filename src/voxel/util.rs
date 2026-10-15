@@ -11,7 +11,7 @@ use bevy::{
     },
 };
 
-/// Must match `hash_chunk` in `cursor_query.wgsl` exactly.
+/// Must match `hash_chunk` in `cursor_query.wesl` exactly.
 #[must_use]
 pub const fn hash_chunk_pos(pos: IVec3) -> u32 {
     // Bit reinterpretation, as WGSL's `bitcast<u32>` does.

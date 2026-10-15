@@ -39,6 +39,7 @@ use bevy::{
     core_pipeline::{Core3d, Core3dSystems},
     prelude::*,
     render::{Render, RenderApp, RenderSystems, extract_resource::ExtractResourcePlugin},
+    shader::load_shader_library,
 };
 
 use extract::{LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks};
@@ -145,25 +146,28 @@ pub(crate) fn register_field_upload<F: VoxelField>(app: &mut App) {
 /// Extraction, arenas, meshing, drawing, ray queries and the cursor.
 pub struct VoxelRenderPlugin;
 
-/// Embeds the voxel shaders.
+/// Embeds the voxel shaders. `voxel_common` is a shader library the others
+/// import as `tarasaur::voxel::shaders::voxel_common`; registering it as an
+/// embedded asset is what gives it that path.
 fn load_shaders(app: &mut App) {
+    load_shader_library!(app, "shaders/voxel_common.wesl");
     load_internal_asset!(
         app,
         DRAW_COMPACTION_SHADER_HANDLE,
-        "shaders/draw_compaction.wgsl",
-        Shader::from_wgsl
+        "shaders/draw_compaction.wesl",
+        Shader::from_wesl
     );
     load_internal_asset!(
         app,
         SURFACE_NETS_PASS1_SHADER_HANDLE,
-        "shaders/surface_nets_pass1.wgsl",
-        Shader::from_wgsl
+        "shaders/surface_nets_pass1.wesl",
+        Shader::from_wesl
     );
     load_internal_asset!(
         app,
         SURFACE_NETS_PASS3_SHADER_HANDLE,
-        "shaders/surface_nets_pass3.wgsl",
-        Shader::from_wgsl
+        "shaders/surface_nets_pass3.wesl",
+        Shader::from_wesl
     );
     load_internal_asset!(
         app,
@@ -174,8 +178,8 @@ fn load_shaders(app: &mut App) {
     load_internal_asset!(
         app,
         CURSOR_QUERY_SHADER_HANDLE,
-        "shaders/cursor_query.wgsl",
-        Shader::from_wgsl
+        "shaders/cursor_query.wesl",
+        Shader::from_wesl
     );
 }
 

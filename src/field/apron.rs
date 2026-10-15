@@ -63,7 +63,7 @@ fn apron_source<'a, T: VoxelField>(
 ///   than this chunk, else this chunk's own.
 ///
 /// Keep in sync with `fill_apron` (which neighbours it reads) and the
-/// decoding in `surface_nets_pass3.wgsl` and `cursor_query.wgsl`.
+/// decoding in `surface_nets_pass3.wesl` and `cursor_query.wesl`.
 #[must_use]
 pub fn seam_lod_ranks<T: VoxelField>(
     chunk_pos: IVec3,

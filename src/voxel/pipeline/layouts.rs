@@ -110,7 +110,7 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
     ]
 }
 
-/// Binding layout for the cursor/raycast query pass (`cursor_query.wgsl`).
+/// Binding layout for the cursor/raycast query pass (`cursor_query.wesl`).
 /// Binding 1 (hits) is `read_write` since the shader writes results in
 /// place. Everything else is read-only from the shader's perspective.
 pub fn query_entries() -> Vec<BindGroupLayoutEntry> {

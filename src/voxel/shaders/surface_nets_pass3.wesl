@@ -2,6 +2,11 @@
 // vertex, computes its normal and material blend, stitches LOD seams, and
 // emits quads into the slot's fixed vertex/index range.
 
+import tarasaur::voxel::shaders::voxel_common::{
+    BatchUniforms, ChunkMeta, apron_source_rank, below_rank, decode_sdf, flatten_sdf_idx,
+    rank_log2_size,
+};
+
 struct Vertex {
     position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
     normal: vec4<f32>,   // .xyz = normal, .w = bitcast-packed material_id_b (low byte) + real_slot (next 15 bits)
@@ -13,18 +18,6 @@ struct IndirectDrawArgs {
     first_index: u32,
     base_vertex: i32,
     first_instance: u32,
-}
-
-struct BatchUniforms {
-    cell_count: u32,
-    texture_size: u32,
-    wg_per_chunk_z: u32,
-    voxel_size: f32, // per-arena constant — every chunk here shares one LOD
-}
-
-struct ChunkMeta {
-    chunk_world_origin: vec3<f32>,
-    lod_ranks: u32, // see seam_lod_ranks in field/apron.rs
 }
 
 @group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;
@@ -52,14 +45,6 @@ fn get_cell_index(local_coord: vec3<u32>, cell_offset: u32) -> u32 {
         + (local_coord.z * uniforms.cell_count * uniforms.cell_count);
 }
 
-// snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
-const SDF_BAND: f32 = 8.0; // keep in sync with field::sdf::SDF_BAND
-
-fn decode_sdf(word: u32, idx: u32) -> f32 {
-    let v = unpack2x16snorm(word);
-    return select(v.x, v.y, (idx & 1u) == 1u) * SDF_BAND;
-}
-
 fn sdf_offset_for(slot: u32) -> u32 {
     return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
 }
@@ -75,10 +60,6 @@ fn cell_offset_for(chunk_idx: u32) -> u32 {
     return chunk_idx * uniforms.cell_count * uniforms.cell_count * uniforms.cell_count;
 }
 
-fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
-    return coord.z * texture_size * texture_size + coord.y * texture_size + coord.x;
-}
-
 // --- LOD seams ---
 // Apron voxels from a neighbour at another LOD hold that neighbour's voxel
 // units, and a coarser neighbour's two apron layers are its first two
@@ -86,11 +67,6 @@ fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
 // The functions below turn texels back into this chunk's units and
 // positions. Set from ChunkMeta at the top of cs_main.
 var<private> lod_ranks: u32;
-
-fn rank_log2_size(rank: u32) -> i32 {
-    let log2_sizes = array<i32, 4>(2, 4, 5, 6); // LOD sizes 4, 16, 32, 64
-    return log2_sizes[rank & 3u];
-}
 
 // log2(own size / source size) for the voxels at texel `t`: > 0 inside a
 // coarser neighbour's apron, < 0 inside a finer one's, else 0.
@@ -101,16 +77,12 @@ fn texel_lod_shift(t: vec3<u32>) -> i32 {
     if (bits == 0u) {
         return 0;
     }
-    // (t >= n) bits -> NEIGHBORS_MASK index
-    let region = array<u32, 8>(0u, 0u, 1u, 3u, 2u, 4u, 5u, 6u);
-    let source = (lod_ranks >> (2u + 2u * region[bits])) & 3u;
-    return rank_log2_size(lod_ranks) - rank_log2_size(source);
+    return rank_log2_size(lod_ranks) - rank_log2_size(apron_source_rank(lod_ranks, bits));
 }
 
 // Rank shift of the coarser -x/-y/-z face neighbour (0 if none).
 fn below_lod_shift(axis: u32) -> i32 {
-    let below = (lod_ranks >> (16u + 2u * axis)) & 3u;
-    return rank_log2_size(lod_ranks) - rank_log2_size(below);
+    return rank_log2_size(lod_ranks) - rank_log2_size(below_rank(lod_ranks, axis));
 }
 
 // Where texel `t` sits, in this chunk's voxels.

@@ -1,6 +1,10 @@
 // GPU ray queries, one invocation per ray: DDA across chunks via a hashed
 // chunk lookup table, sphere tracing inside each resident chunk.
-// See voxel/query.rs.
+// See raycast/gpu.rs.
+
+import tarasaur::voxel::shaders::voxel_common::{
+    ChunkMeta, apron_source_rank, decode_sdf, flatten_sdf_idx, rank_log2_size,
+};
 
 struct RayQuery {
     origin: vec3<f32>,
@@ -18,10 +22,6 @@ struct HitResult {
     chunk_slot: u32,
 };
  
-struct ChunkMetaGpu {
-    chunk_world_origin: vec3<f32>,
-    lod_ranks: u32,
-};
 
 struct QueryUniforms {
     query_count: u32,
@@ -43,13 +43,13 @@ struct QueryUniforms {
 @group(0) @binding(3) var<storage, read> chunk_lookup: array<vec4<u32>>; // x,y,z,packed (see below)
 
 @group(0) @binding(4)  var<storage, read> sdf_buffer_0: array<u32>;
-@group(0) @binding(5)  var<storage, read> chunk_meta_0: array<ChunkMetaGpu>;
+@group(0) @binding(5)  var<storage, read> chunk_meta_0: array<ChunkMeta>;
 @group(0) @binding(6)  var<storage, read> sdf_buffer_1: array<u32>;
-@group(0) @binding(7)  var<storage, read> chunk_meta_1: array<ChunkMetaGpu>;
+@group(0) @binding(7)  var<storage, read> chunk_meta_1: array<ChunkMeta>;
 @group(0) @binding(8)  var<storage, read> sdf_buffer_2: array<u32>;
-@group(0) @binding(9)  var<storage, read> chunk_meta_2: array<ChunkMetaGpu>;
+@group(0) @binding(9)  var<storage, read> chunk_meta_2: array<ChunkMeta>;
 @group(0) @binding(10) var<storage, read> sdf_buffer_3: array<u32>;
-@group(0) @binding(11) var<storage, read> chunk_meta_3: array<ChunkMetaGpu>;
+@group(0) @binding(11) var<storage, read> chunk_meta_3: array<ChunkMeta>;
 
 // The query runs once per arena index; the bindings above are arena
 // `arena` of each LOD, and only chunks stored there are traced.
@@ -89,21 +89,17 @@ fn lookup_chunk(cx: i32, cy: i32, cz: i32) -> vec3<u32> { // (lod_rank, arena, s
     return vec3<u32>(0u, 0u, EMPTY_SLOT);
 }
 
-// snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
-const SDF_BAND: f32 = 8.0; // keep in sync with field::sdf::SDF_BAND
-
 fn read_sdf(rank: u32, idx: u32) -> f32 {
     var word: u32;
     if (rank == 0u) { word = sdf_buffer_0[idx >> 1u]; }
     else if (rank == 1u) { word = sdf_buffer_1[idx >> 1u]; }
     else if (rank == 2u) { word = sdf_buffer_2[idx >> 1u]; }
     else { word = sdf_buffer_3[idx >> 1u]; }
-    let v = unpack2x16snorm(word);
-    return select(v.x, v.y, (idx & 1u) == 1u) * SDF_BAND;
+    return decode_sdf(word, idx);
 }
 
 fn sdf_index(base: u32, x: u32, y: u32, z: u32, s: u32) -> u32 {
-    return base + (z * s + y) * s + x;
+    return base + flatten_sdf_idx(vec3<u32>(x, y, z), s);
 }
 
 // Apron voxels from a neighbour at another LOD hold that neighbour's voxel
@@ -113,10 +109,8 @@ fn apron_scale(lod_ranks: u32, n: u32, x: u32, y: u32, z: u32) -> f32 {
     if (bits == 0u) {
         return 1.0;
     }
-    let log2_sizes = array<i32, 4>(2, 4, 5, 6); // LOD sizes 4, 16, 32, 64
-    let region = array<u32, 8>(0u, 0u, 1u, 3u, 2u, 4u, 5u, 6u); // -> NEIGHBORS_MASK index
-    let source = (lod_ranks >> (2u + 2u * region[bits])) & 3u;
-    return ldexp(1.0, log2_sizes[lod_ranks & 3u] - log2_sizes[source]);
+    let source = apron_source_rank(lod_ranks, bits);
+    return ldexp(1.0, rank_log2_size(lod_ranks) - rank_log2_size(source));
 }
 
 // Trilinear sample, parameterized over which buffer/texture_size to hit —
@@ -162,7 +156,7 @@ fn compute_normal(rank: u32, slot: u32, texture_size: u32, local_pos: vec3<f32>)
     return normalize(vec3<f32>(dx, dy, dz));
 }
 
-fn chunk_meta_at(rank: u32, slot: u32) -> ChunkMetaGpu {
+fn chunk_meta_at(rank: u32, slot: u32) -> ChunkMeta {
     if (rank == 0u) { return chunk_meta_0[slot]; }
     if (rank == 1u) { return chunk_meta_1[slot]; }
     if (rank == 2u) { return chunk_meta_2[slot]; }

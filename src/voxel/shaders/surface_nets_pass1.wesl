@@ -4,19 +4,14 @@
 // with one atomic. Vertex order within a chunk is therefore arbitrary; pass3
 // only needs the cell <-> vertex mapping, which this writes both ways.
 
+import tarasaur::voxel::shaders::voxel_common::{BatchUniforms, decode_sdf, flatten_sdf_idx};
+
 @group(0) @binding(0) var<storage, read> sdf_buffer: array<u32>;
 // Per-dispatch scratch, indexed by the chunk's position in the dispatch:
 @group(0) @binding(1) var<storage, read_write> active_cells: array<u32>; // [vertex] -> cell
 @group(0) @binding(2) var<storage, read_write> cell_vertex: array<u32>;  // [cell] -> vertex (active cells only)
 @group(0) @binding(3) var<storage, read_write> chunk_counts: array<atomic<u32>>; // [chunk] -> active cells; zeroed before each dispatch
 
-// snorm16 SDF, 2 voxels per word (see quantize_sdf in field/sdf.rs).
-const SDF_BAND: f32 = 8.0; // keep in sync with field::sdf::SDF_BAND
-
-fn decode_sdf(word: u32, idx: u32) -> f32 {
-    let v = unpack2x16snorm(word);
-    return select(v.x, v.y, (idx & 1u) == 1u) * SDF_BAND;
-}
 struct IndirectDrawArgs {
     index_count: atomic<u32>,
     instance_count: u32,
@@ -26,22 +21,12 @@ struct IndirectDrawArgs {
 }
 @group(0) @binding(5) var<storage, read_write> indirect_args: array<IndirectDrawArgs>;
 
-struct BatchUniforms {
-    cell_count: u32,
-    texture_size: u32,
-    wg_per_chunk_z: u32,
-    voxel_size: f32, // unused here — kept for byte-layout parity with pass3's copy of this struct
-};
 @group(0) @binding(6) var<uniform> uniforms: BatchUniforms;
 
 @group(0) @binding(8) var<storage, read> active_slot_map: array<u32>;
 
 fn flatten_cell_idx(coord: vec3<u32>, cell_count: u32) -> u32 {
     return coord.z * cell_count * cell_count + coord.y * cell_count + coord.x;
-}
-
-fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
-    return coord.z * texture_size * texture_size + coord.y * texture_size + coord.x;
 }
 
 fn sdf_offset_for(slot: u32) -> u32 {

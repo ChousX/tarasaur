@@ -1,4 +1,4 @@
-//! GPU ray queries against the arenas (`cursor_query.wgsl`).
+//! GPU ray queries against the arenas (`cursor_query.wesl`).
 //!
 //! Push `RayQuery`s into `PendingVoxelQueries`; results land in
 //! `VoxelQueryResults` 2-3 frames later via a triple-buffered readback and
