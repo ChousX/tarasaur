@@ -27,7 +27,9 @@ use crate::{
     field::{LOD, VoxelField},
     voxel::extract::ExtractedChunkField,
     voxel::{
-        arena::{ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet},
+        arena::{
+            ARGS_BYTES, ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet,
+        },
         pipeline::VoxelPipelineLayouts,
         stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
@@ -528,7 +530,7 @@ fn upload_chunk<F: Send + Sync + 'static>(
     };
     render_queue.write_buffer(
         &arena.indirect_args_buffer,
-        slot64.wrapping_mul(ARGS_STRIDE),
+        slot64.wrapping_mul(ARGS_BYTES),
         bytemuck::bytes_of(&args),
     );
 
@@ -739,9 +741,6 @@ pub fn prepare_mask_upload<F: VoxelField>(
         );
     }
 }
-
-/// Byte stride of one slot's entry in `indirect_args_buffer`.
-const ARGS_STRIDE: u64 = u64_from_usize(std::mem::size_of::<DrawIndexedIndirectArgs>());
 
 fn pack_bits(bits: impl ExactSizeIterator<Item = bool>) -> Vec<u32> {
     let mut packed = vec![0u32; bits.len().div_ceil(32)];

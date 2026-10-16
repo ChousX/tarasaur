@@ -19,7 +19,7 @@ use bevy::{
 };
 
 use crate::voxel::{
-    arena::{PASS1_WORKGROUP_EDGE, VoxelChunkArena, VoxelChunkArenaSet},
+    arena::{ARGS_BYTES, GUARD_BYTES, PASS1_WORKGROUP_EDGE, VoxelChunkArena, VoxelChunkArenaSet},
     stats::VoxelFrameStats,
 };
 
@@ -35,7 +35,7 @@ pub fn dispatch_voxel_compute_passes_batched(
     pipeline: Res<VoxelComputePipeline>,
     mut arena_set: ResMut<VoxelChunkArenaSet>,
     telemetry: Res<GuardTelemetry>,
-    diagnostics: MeshDiagnostics,
+    mut diagnostics: MeshDiagnostics,
 ) {
     if !arena_set.iter().any(|a| !a.dirty_slots.is_empty()) {
         return;
@@ -77,6 +77,12 @@ pub fn dispatch_voxel_compute_passes_batched(
         meshed_cells =
             meshed_cells.saturating_add(u64::from(arena.total_cells).saturating_mul(u64::from(n)));
     }
+    if telemetry.0 && meshed_cells > *diagnostics.peak_cells {
+        *diagnostics.peak_cells = meshed_cells;
+        info!(
+            "[mesh] new peak: {meshed_chunks} chunk(s), {meshed_cells} cells re-meshed in one frame"
+        );
+    }
     if let Some(mut stats) = diagnostics.stats {
         stats.meshed_chunks = meshed_chunks;
         stats.meshed_cells = meshed_cells;
@@ -95,7 +101,15 @@ pub fn dispatch_voxel_compute_passes_batched(
                 0,
                 &arena.guard_readback_buffer,
                 0,
-                16,
+                u64::from(GUARD_BYTES),
+            );
+            // After pass3: the counts the raster pass draws this frame.
+            encoder.copy_buffer_to_buffer(
+                &arena.indirect_args_buffer,
+                0,
+                &arena.guard_readback_buffer,
+                u64::from(GUARD_BYTES),
+                u64::from(arena.max_chunks).saturating_mul(ARGS_BYTES),
             );
             encoder.clear_buffer(&arena.guard_debug_buffer, 0, None);
             arena.guard_state.store(GUARD_COPIED, Ordering::Release);
@@ -111,9 +125,11 @@ fn dirty_count(arena: &VoxelChunkArena) -> u32 {
 
 /// Optional instrumentation for the meshing dispatch.
 #[derive(SystemParam)]
-pub struct MeshDiagnostics<'w> {
+pub struct MeshDiagnostics<'w, 's> {
     recorder: Option<Res<'w, DiagnosticsRecorder>>,
     stats: Option<ResMut<'w, VoxelFrameStats>>,
+    /// Most cells re-meshed in one frame so far, logged when it grows.
+    peak_cells: Local<'s, u64>,
 }
 
 /// Must match pass3's `@workgroup_size`.

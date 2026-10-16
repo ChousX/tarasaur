@@ -34,7 +34,13 @@ fn main() {
         // The default save directory (./saves/chunks): the sandbox is the
         // main playground, so its world is the one kept there. Other
         // examples save under saves/<example>.
-        .add_plugins(TarasaurPlugin::default())
+        // TARASAUR_TELEMETRY=1 turns on the GPU guard readbacks in release
+        // builds too (they're on in debug builds).
+        .add_plugins(TarasaurPlugin {
+            guard_telemetry: std::env::var_os("TARASAUR_TELEMETRY").is_some()
+                || cfg!(debug_assertions),
+            ..default()
+        })
         .add_plugins(MaterialFieldPlugin::<TerrainMaterial>::new());
     register_terrain(&mut app);
 

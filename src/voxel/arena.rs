@@ -236,7 +236,8 @@ pub struct VoxelChunkArena {
     pub active_slot_map_buffer: Buffer,  // [dispatch idx] -> slot, CPU-written per dispatch
 
     // pass3 records [trips, slot, gpu_count, cpu_count] when its range guard
-    // fires; read back by `map_guard_readbacks` when `GuardTelemetry` is on.
+    // fires; read back by `map_guard_readbacks` when `GuardTelemetry` is on,
+    // with a copy of `indirect_args_buffer` after it (GUARD_BYTES on).
     pub guard_debug_buffer: Buffer,
     pub guard_readback_buffer: Buffer,
     pub guard_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
@@ -434,12 +435,17 @@ impl ArenaBuffers {
             ),
             guard_readback: dev.storage(
                 "arena_guard_readback_buffer",
-                16,
+                u64::from(GUARD_BYTES).saturating_add(per_chunk(ARGS_BYTES)),
                 BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             ),
         }
     }
 }
+
+/// Bytes of pass3's range guard at the start of `guard_readback_buffer`.
+pub const GUARD_BYTES: u32 = 16;
+/// Bytes of one slot's entry in `indirect_args_buffer`.
+pub const ARGS_BYTES: u64 = u64_from_usize(std::mem::size_of::<DrawIndexedIndirectArgs>());
 
 /// One draw per slot, all empty until the slot gets a vertex range.
 fn indirect_args_buffer(render_device: &RenderDevice, max_chunks: u32) -> Buffer {
