@@ -4,7 +4,7 @@ Smooth, editable voxel terrain for [Bevy](https://bevyengine.org) 0.20,
 meshed on the GPU.
 
 Tarasaur aims to be a minimal smooth-voxel engine with everything needed to
-build a continuous, persistent environment. It should run well on low-end
+build a continuous, persistent environment. With an aim to run well on low-end
 hardware such as a Steam Deck.
 
 <p align="center">
