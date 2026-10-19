@@ -4,6 +4,7 @@
 
 use super::{Field, IVec3, UVec3, Vec3};
 use crate::num::u8_from_f32;
+use bevy::tasks::{ComputeTaskPool, TaskPool};
 
 use bevy::shape::{Cuboid, Sphere};
 
@@ -104,6 +105,36 @@ fn sphere_range(center: Vec3, radius: f32, size: UVec3) -> Option<(UVec3, UVec3)
         .min(max_bound)
         .as_ivec3();
     grid_range(min, max)
+}
+
+/// Runs `work` over `lo..=hi` split into contiguous ranges on the compute task
+/// pool, returning the results in range order. Small ranges run inline.
+fn parallel_slabs<R: Send + 'static>(
+    lo: u32,
+    hi: u32,
+    work: impl Fn(std::ops::RangeInclusive<u32>) -> R + Sync,
+) -> Vec<R> {
+    let pool = ComputeTaskPool::get_or_init(TaskPool::default);
+    let n = hi.saturating_sub(lo).saturating_add(1);
+    let parts = u32::try_from(pool.thread_num())
+        .unwrap_or(1)
+        .clamp(1, n.div_ceil(4).max(1));
+    if parts == 1 {
+        return vec![work(lo..=hi)];
+    }
+    let per = n.div_ceil(parts);
+    let work = &work;
+    pool.scope(|s| {
+        let mut start = lo;
+        while start <= hi {
+            let end = start.saturating_add(per.saturating_sub(1)).min(hi);
+            s.spawn(async move { work(start..=end) });
+            start = end.saturating_add(1);
+            if end == hi {
+                break;
+            }
+        }
+    })
 }
 
 /// The slowest a speed-limited CSG edit moves (as a fraction of its step),
@@ -242,10 +273,11 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         reach: f32,
         subtract: bool,
         max_step: Option<f32>,
-        beyond: impl Fn(UVec3, usize, bool) -> Option<f32>,
+        beyond: impl Fn(UVec3, usize, bool) -> Option<f32> + Sync,
     ) -> Vec<UVec3>
     where
         T: SignedDistance,
+        Self: Sync,
     {
         let outer = radius + reach;
         let size = self.size();
@@ -285,48 +317,61 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             }
         };
 
-        let mut filled = Vec::new();
-        let mut out = Vec::new();
-        for z in min.z..=max.z {
-            for y in min.y..=max.y {
-                for x in min.x..=max.x {
-                    let dist = UVec3::new(x, y, z).as_vec3().distance(center);
-                    if dist > outer {
-                        continue;
+        // Every value is read before any is written, so z slabs are worked
+        // out in parallel, then written in order.
+        let slab = |zs: std::ops::RangeInclusive<u32>| {
+            let mut filled = Vec::new();
+            let mut out = Vec::new();
+            for z in zs {
+                for y in min.y..=max.y {
+                    for x in min.x..=max.x {
+                        let dist = UVec3::new(x, y, z).as_vec3().distance(center);
+                        if dist > outer {
+                            continue;
+                        }
+                        let s = dist - radius;
+                        let v = UVec3::new(x, y, z);
+                        let c = read(v);
+                        let target = if subtract { c.max(-s) } else { c.min(s) };
+                        let new = max_step.map_or(target, |step| {
+                            let rising = target >= c;
+                            // Behind the surface (air in a dig, rock in a
+                            // build) values only tidy up toward the target, at
+                            // the full step: there the upwind gradient can be 0
+                            // (a peak of the target) and would never get there.
+                            let behind = if rising { c > 0.0 } else { c < 0.0 };
+                            let grad = if behind {
+                                1.0
+                            } else {
+                                (0..3)
+                                    .map(|a| axis(c, neighbours(v, a), rising))
+                                    .sum::<f32>()
+                                    .sqrt()
+                                    .min(1.0)
+                            };
+                            let step =
+                                step * brush_falloff(dist, radius).max(MIN_STEP_WEIGHT) * grad;
+                            // Toward the target, never past it.
+                            c + (target - c).clamp(-step, step)
+                        });
+                        if c > 0.0 && new <= 0.0 {
+                            filled.push(v);
+                        }
+                        if new.to_bits() != c.to_bits() {
+                            out.push((v, new));
+                        }
                     }
-                    let s = dist - radius;
-                    let v = UVec3::new(x, y, z);
-                    let c = read(v);
-                    let target = if subtract { c.max(-s) } else { c.min(s) };
-                    let new = max_step.map_or(target, |step| {
-                        let rising = target >= c;
-                        // Behind the surface (air in a dig, rock in a
-                        // build) values only tidy up toward the target, at
-                        // the full step: there the upwind gradient can be 0
-                        // (a peak of the target) and would never get there.
-                        let behind = if rising { c > 0.0 } else { c < 0.0 };
-                        let grad = if behind {
-                            1.0
-                        } else {
-                            (0..3)
-                                .map(|a| axis(c, neighbours(v, a), rising))
-                                .sum::<f32>()
-                                .sqrt()
-                                .min(1.0)
-                        };
-                        let step = step * brush_falloff(dist, radius).max(MIN_STEP_WEIGHT) * grad;
-                        // Toward the target, never past it.
-                        c + (target - c).clamp(-step, step)
-                    });
-                    if c > 0.0 && new <= 0.0 {
-                        filled.push(v);
-                    }
-                    out.push((v, new));
                 }
             }
-        }
-        for (v, value) in out {
-            self.set(v.x, v.y, v.z, T::from_signed_distance(value));
+            (out, filled)
+        };
+        let slabs = parallel_slabs(min.z, max.z, slab);
+        let mut filled = Vec::new();
+        for (out, slab_filled) in slabs {
+            for (v, value) in out {
+                self.set(v.x, v.y, v.z, T::from_signed_distance(value));
+            }
+            filled.extend(slab_filled);
         }
         filled
     }
