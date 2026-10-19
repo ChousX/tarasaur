@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy::render::{Extract, ExtractSchedule, RenderApp};
 
 use super::asset::TexturePalette;
+use super::mipmaps::{can_generate_mipmaps, generate_mipmaps};
 use super::properties::PaletteMaterial;
 
 /// The end user's chosen palette.
@@ -35,6 +36,7 @@ impl PalettePlugin {
 impl Plugin for PalettePlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<TexturePalette>();
+        app.add_systems(PostUpdate, generate_palette_mipmaps);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -49,6 +51,22 @@ pub struct ExtractedPalette {
     pub arm: Option<Handle<Image>>,
     pub normal: Option<Handle<Image>>,
     pub materials: Vec<PaletteMaterial>,
+}
+
+/// Builds the missing mip chains of every palette that asks for them
+/// (`TexturePalette::generate_mipmaps`), once each image has loaded.
+fn generate_palette_mipmaps(palettes: Res<Assets<TexturePalette>>, mut images: ResMut<Assets<Image>>) {
+    for (_, palette) in palettes.iter().filter(|(_, p)| p.generate_mipmaps) {
+        let handles = [Some(&palette.albedo), palette.arm.as_ref(), palette.normal.as_ref()];
+        for handle in handles.into_iter().flatten() {
+            // Look before `get_mut`, which would mark the image changed.
+            if images.get(handle).is_some_and(can_generate_mipmaps)
+                && let Some(mut image) = images.get_mut(handle)
+            {
+                generate_mipmaps(&mut image);
+            }
+        }
+    }
 }
 
 fn extract_palette(

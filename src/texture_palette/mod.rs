@@ -3,6 +3,7 @@
 
 pub mod asset;
 pub mod builder;
+pub mod mipmaps;
 pub mod plugin;
 pub mod properties;
 pub mod validation;

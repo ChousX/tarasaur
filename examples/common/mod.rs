@@ -257,6 +257,9 @@ pub fn setup_terrain_palette(
     let palette = PaletteBuilder::new(albedo_handle)
         .with_arm(arm_handle)
         .with_normal(normal_handle)
+        // The generated textures are base level only: without mips, distant
+        // terrain shimmers.
+        .with_generate_mipmaps(true)
         .add_material(
             PaletteMaterial::new("grass")
                 .with_texture_scale(1.0)

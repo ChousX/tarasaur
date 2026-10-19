@@ -72,7 +72,11 @@ pub struct TexturePalette {
 
     /// Whether to generate mipmaps for textures that don't have them.
     ///
-    /// When using pre-mipmapped KTX2 textures (recommended), set this to `false`.
+    /// Built once on the CPU when each image has loaded, for uncompressed
+    /// `Rgba8Unorm`/`Rgba8UnormSrgb` arrays with only a base level (see
+    /// `mipmaps::generate_mipmaps`); other images are left as they are.
+    /// Without mips, distant terrain shimmers. When using pre-mipmapped KTX2
+    /// textures (recommended), set this to `false`.
     /// Default: `false`
     pub generate_mipmaps: bool,
 }
