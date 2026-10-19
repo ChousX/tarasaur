@@ -273,6 +273,15 @@ cargo run --release --example bench -- --compare bench_results/A.summary.csv ben
 cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 ```
 
+`tools/bench-ab/ab.sh <name> <bench-A> <bench-B> [pairs] [-- bench args]`
+runs two bench binaries in turn (`--quick` unless given other args) with a
+system sampler alongside: CPU (whole system, the bench, everything else), GPU
+busy time per DRM client and the GPU clock, and RAM. A run that other load
+disturbed is rerun, and the per-phase comparison, the system load and the
+screenshot diffs go to `target/bench-ab/exp/<name>.txt`. Copy each variant's
+binary out of `target/` before building the next; `tools/bench-ab/run.sh` is
+a single run.
+
 On a Steam Deck, run `tools/bench-deck.sh [label] [-- bench args]` from a
 checkout on the Deck. It builds in a distrobox (created on first run, with
 Rust and Bevy's deps), works over ssh too (it draws on the Deck's screen),
