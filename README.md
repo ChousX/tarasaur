@@ -307,13 +307,23 @@ captures one frame in the middle of its `hold` phase, and the summary
 script replays that frame headlessly:
 
 ```sh
-renderdoccmd capture -w target/release/examples/bench --renderdoc --label rdc
+WGPU_DEBUG=1 renderdoccmd capture -w target/release/examples/bench --renderdoc --label rdc
 RDC=bench_results/rdc_frameN.rdc RDC_OUT=summary.txt qrenderdoc --python tools/renderdoc_summary.py
 ```
 
-On tiling GPUs (Adreno, Mali), RenderDoc times each draw by replaying it on
-its own. Use its timings for proportions, and the bench's per-pass times
-for totals.
+`WGPU_DEBUG=1` is what puts the pass names in the capture: wgpu only emits
+debug markers with `InstanceFlags::DEBUG`, which it takes from that variable,
+and release builds leave it off. Without it the summary can only group draws
+by raw Vulkan call.
+
+RenderDoc times each action by replaying it on its own, so a pass made of many
+draws accumulates per-draw overhead and loses the overlap the GPU gets in a
+real frame. The more actions a pass has, the more its total is inflated: a
+224-draw `voxel_raster_pass` came out 2.1x the bench's own counter on a
+GTX 1070, while single-draw `upscaling` matched it exactly. It is worst on
+tiling GPUs (Adreno, Mali), but it is not only them. Use RenderDoc's timings
+for proportions within a pass and for ranking individual draws, and the
+bench's per-pass times for totals.
 
 ## License
 
