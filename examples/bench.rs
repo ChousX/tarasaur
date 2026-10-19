@@ -4,12 +4,15 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes]
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes] [--quick]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
+//! cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 //! ```
 //!
 //! Phases, in order:
 //! - `load`:  stream the world in from a still camera until nothing is pending.
+//! - `shots`: a screenshot of each of four views from the start, a quarter
+//!   turn apart, into `bench_results/shots/<label>-view<N>.png`.
 //! - `hold`:  the same view, nothing changing: steady-state render cost.
 //! - `spin`:  turn in place: view-dependent cost (culling).
 //! - `fly`:   fly a fixed distance per frame: streaming cost while moving.
@@ -29,6 +32,12 @@
 //!   on the surface every frame, like a player holding the mouse. Checks
 //!   the surface keeps a real distance field (no terraced, black crater)
 //!   and that the dig doesn't punch through.
+//!
+//! `--quick` (about a third of the run time) halves `hold`, `spin` and `fly`
+//! (turning and flying twice as fast, over the same path) and skips `box`,
+//! `query`, `reslot` and `dig`. Compare only runs made with the same setting.
+//! Results are written after every phase, so a run cut short keeps what it
+//! measured.
 //!
 //! A failed check is printed, written to the summary as `check:<name>` = 0,
 //! and makes the bench exit with an error.
@@ -51,18 +60,27 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bevy::{
+    asset::RenderAssetUsages,
     diagnostic::{DiagnosticPath, DiagnosticsStore, FrameCount},
+    image::{CompressedImageFormats, ImageSampler, ImageType},
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
         diagnostic::RenderDiagnosticsPlugin,
-        render_resource::{BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode},
+        render_resource::{
+            BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode, TextureDimension,
+            TextureFormat,
+        },
         renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
+        view::screenshot::{Screenshot, save_to_disk},
     },
     window::{PresentMode, WindowResolution},
 };
@@ -107,6 +125,25 @@ const SPIN_FRAMES: u32 = 360; // one degree per frame
 const FLY_FRAMES: u32 = 900;
 const FLY_STEP: f32 = 0.25; // world units per frame: 225 units, ~22 chunks
 const EDIT_FRAMES: u32 = 300;
+/// `shots`: frames per view; the screenshot is taken on the view's last frame.
+const SHOT_FRAMES_PER_VIEW: u32 = 30;
+/// `shots`: views of the loaded world from `START`, a quarter turn apart.
+const SHOT_VIEWS: u32 = 4;
+
+/// `--quick`: `hold`, `spin` and `fly` run half as many frames (`spin`
+/// turning and `fly` flying twice as far per frame, over the same path), and
+/// `box`, `query`, `reslot` and `dig` are skipped.
+static QUICK: AtomicBool = AtomicBool::new(false);
+
+fn quick() -> bool {
+    QUICK.load(Ordering::Relaxed)
+}
+
+/// How much faster `spin` and `fly` move per frame, and how many times fewer
+/// frames `hold`, `spin` and `fly` run.
+fn speed() -> u32 {
+    if quick() { 2 } else { 1 }
+}
 const EDIT_RADIUS: f32 = 3.0;
 const EDIT_DELTA: f32 = 0.15; // SDF change per frame; flips dig/build every 30 frames
 const BOX_FRAMES: u32 = 300;
@@ -164,6 +201,7 @@ const DIG_WEAK_GRADIENT: f32 = 0.5;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
     Load,
+    Shots,
     Hold,
     Spin,
     Fly,
@@ -180,6 +218,7 @@ impl Phase {
     const fn name(self) -> &'static str {
         match self {
             Self::Load => "load",
+            Self::Shots => "shots",
             Self::Hold => "hold",
             Self::Spin => "spin",
             Self::Fly => "fly",
@@ -193,12 +232,15 @@ impl Phase {
         }
     }
 
-    const fn next(self) -> Self {
+    fn next(self) -> Self {
         match self {
-            Self::Load => Self::Hold,
+            Self::Load => Self::Shots,
+            Self::Shots => Self::Hold,
             Self::Hold => Self::Spin,
             Self::Spin => Self::Fly,
             Self::Fly => Self::Edit,
+            Self::Edit if quick() => Self::Visibility,
+            Self::Visibility if quick() => Self::Done,
             Self::Edit => Self::BoxEdit,
             Self::BoxEdit => Self::Query,
             Self::Query => Self::Reslot,
@@ -209,12 +251,13 @@ impl Phase {
     }
 
     /// Fixed length, or `None` for `load` (runs until settled).
-    const fn frames(self) -> Option<u32> {
+    fn frames(self) -> Option<u32> {
         match self {
             Self::Load => None,
-            Self::Hold => Some(HOLD_FRAMES),
-            Self::Spin => Some(SPIN_FRAMES),
-            Self::Fly => Some(FLY_FRAMES),
+            Self::Shots => Some(SHOT_FRAMES_PER_VIEW * SHOT_VIEWS),
+            Self::Hold => HOLD_FRAMES.checked_div(speed()),
+            Self::Spin => SPIN_FRAMES.checked_div(speed()),
+            Self::Fly => FLY_FRAMES.checked_div(speed()),
             Self::Edit => Some(EDIT_FRAMES),
             Self::BoxEdit => Some(BOX_FRAMES),
             Self::Query => Some(QUERY_FRAMES),
@@ -234,8 +277,9 @@ impl Phase {
     }
 }
 
-const PHASES: [Phase; 10] = [
+const PHASES: [Phase; 11] = [
     Phase::Load,
+    Phase::Shots,
     Phase::Hold,
     Phase::Spin,
     Phase::Fly,
@@ -316,6 +360,12 @@ struct Output {
     depth_prepass: bool,
     /// `--small-arenas`: see `BENCH_ARENAS`.
     small_arenas: bool,
+    /// `--quick`: see `QUICK`.
+    quick: bool,
+    /// Seconds since the epoch at startup, in the result file names.
+    stamp: u64,
+    /// Short hash of the checked-out commit.
+    commit: String,
 }
 
 #[derive(Component)]
@@ -333,17 +383,36 @@ fn main() -> AppExit {
             .and_then(|i| args.get(i.saturating_add(1)))
             .cloned()
     };
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(i) = args.iter().position(|a| a == "--diff") {
+        return diff_args(
+            args.get(i.saturating_add(1)),
+            args.get(i.saturating_add(2)),
+            args.get(i.saturating_add(3)),
+        );
+    }
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let manifest = Path::new(manifest_dir);
     let out = Output {
         dir: flag("--out").map_or_else(|| manifest.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
         depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
         small_arenas: args.iter().any(|a| a == "--small-arenas"),
+        quick: args.iter().any(|a| a == "--quick"),
+        commit: std::process::Command::new("git")
+            .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map_or_else(|| "unknown".into(), |s| s.trim().to_string()),
+        stamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
     };
     let out = Output {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
         ..out
     };
+    QUICK.store(out.quick, Ordering::Relaxed);
 
     // An empty scratch save directory, so every run generates the same
     // terrain from scratch and your saves are never read or written.
@@ -420,6 +489,7 @@ fn main() -> AppExit {
             Update,
             (
                 drive_camera,
+                take_shots,
                 drive_edits,
                 ignore_cursor
                     .after(resolve_cursor_hit)
@@ -504,20 +574,46 @@ fn fly_end() -> Vec3 {
     START + Vec3::X * FLY_STEP * f32_from_u32(FLY_FRAMES)
 }
 
+/// `shots`: saves each view to `<out>/shots/<label>-view<N>.png`, to diff
+/// against another run's with `--diff`.
+fn take_shots(bench: Res<Bench>, mut commands: Commands) {
+    if bench.phase != Phase::Shots
+        || (bench.frame_in_phase.saturating_add(1)).rem_euclid(SHOT_FRAMES_PER_VIEW) != 0
+    {
+        return;
+    }
+    let view = bench.frame_in_phase / SHOT_FRAMES_PER_VIEW;
+    let dir = bench.out.dir.join("shots");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        error!("[bench] {}: {e}", dir.display());
+        return;
+    }
+    let path = dir.join(format!("{}-view{view}.png", bench.out.label));
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+}
+
 /// Positions the camera from the phase and frame alone.
 fn drive_camera(bench: Res<Bench>, mut cams: Query<&mut Transform, With<BenchCamera>>) {
     let f = f32_from_u32(bench.frame_in_phase);
     for mut t in &mut cams {
         *t = match bench.phase {
+            Phase::Shots => {
+                let view = bench.frame_in_phase / SHOT_FRAMES_PER_VIEW;
+                let turn = std::f32::consts::FRAC_PI_2 * f32_from_u32(view);
+                let base = Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y);
+                base.with_rotation(Quat::from_rotation_y(turn) * base.rotation)
+            }
             Phase::Load | Phase::Hold => {
                 Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y)
             }
             Phase::Spin => {
                 let base = Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y);
-                base.with_rotation(Quat::from_rotation_y(f.to_radians()) * base.rotation)
+                base.with_rotation(Quat::from_rotation_y((f * f32_from_u32(speed())).to_radians()) * base.rotation)
             }
             Phase::Fly => {
-                let pos = START + Vec3::X * FLY_STEP * f;
+                let pos = START + Vec3::X * FLY_STEP * f32_from_u32(speed()) * f;
                 Transform::from_translation(pos)
                     .looking_at(pos + Vec3::new(1.0, -0.4, 0.0), Vec3::Y)
             }
@@ -1139,11 +1235,14 @@ fn read_back_slots(
 /// the fly's end (near `edit`'s end, skipping the edited chunks). The
 /// readback takes a few frames and the crack check over a second (on its own
 /// thread), so each is checked on its phase's last frame.
-const MESH_PROBES: [(Phase, u32); 3] = [
-    (Phase::Hold, 10),
-    (Phase::Fly, FLY_FRAMES - 200),
-    (Phase::Edit, EDIT_FRAMES - 200),
-];
+fn mesh_probe_frame(phase: Phase) -> Option<u32> {
+    match phase {
+        Phase::Hold => Some(10),
+        Phase::Fly | Phase::Edit => phase.frames().map(|n| n.saturating_sub(200)),
+        _ => None,
+    }
+}
+
 /// With `--gap-probes`, meshes are also read back this often while flying,
 /// to catch cracks that only last until both sides of a LOD change have
 /// re-meshed. Each probe reads every mesh back, so it slows `fly` ~10x.
@@ -1322,7 +1421,7 @@ fn drive_mesh_probe(
         && bench.phase == Phase::Fly
         && bench.frame_in_phase > 0
         && bench.frame_in_phase.is_multiple_of(FLY_GAP_PROBE_EVERY);
-    if !fly_gap && !MESH_PROBES.contains(&(bench.phase, bench.frame_in_phase)) {
+    if !fly_gap && mesh_probe_frame(bench.phase) != Some(bench.frame_in_phase) {
         return;
     }
     if let Ok(mut s) = probe.0.lock() {
@@ -2311,7 +2410,7 @@ fn write_mesh_csv(phase: Phase, r: &MeshReport) {
 
 fn check_meshes(mut bench: ResMut<Bench>, probe: Res<MeshProbe>) {
     let phase = bench.phase;
-    if !MESH_PROBES.iter().any(|&(p, _)| p == phase) || !phase.last_frame(&bench) {
+    if mesh_probe_frame(phase).is_none() || !phase.last_frame(&bench) {
         return;
     }
     let (pass, detail) = {
@@ -2850,14 +2949,16 @@ fn record_frame(
         }
     }
     bench.phase = bench.phase.next();
+    let done = bench.phase == Phase::Done;
+    // Written after every phase, so a run cut short still leaves results.
+    let adapter = adapter.map_or_else(
+        || "unknown".to_string(),
+        |a| format!("{} ({:?}, {})", a.name, a.backend, a.driver_info),
+    );
+    write_results(&bench, &adapter, done);
     bench.frame_in_phase = 0;
     bench.phase_started = Instant::now();
-    if bench.phase == Phase::Done {
-        let adapter = adapter.map_or_else(
-            || "unknown".to_string(),
-            |a| format!("{} ({:?}, {})", a.name, a.backend, a.driver_info),
-        );
-        write_results(&bench, &adapter);
+    if done {
         for path in capture.iter().flat_map(|c| c.captures()) {
             println!("renderdoc: {}", path.display());
         }
@@ -2955,25 +3056,15 @@ fn summarize(phase: Phase, rows: &[&FrameRow], load_timed_out: bool) -> Vec<(Str
     out
 }
 
-fn write_results(bench: &Bench, adapter: &str) {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let base = bench.out.dir.join(format!("{}-{stamp}", bench.out.label));
-    let commit = std::process::Command::new("git")
-        .args([
-            "-C",
-            env!("CARGO_MANIFEST_DIR"),
-            "rev-parse",
-            "--short",
-            "HEAD",
-        ])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map_or_else(|| "unknown".into(), |s| s.trim().to_string());
+/// Writes the frames and summary so far; `print`s the tables too at the end.
+fn write_results(bench: &Bench, adapter: &str, print: bool) {
+    let base = bench
+        .out
+        .dir
+        .join(format!("{}-{}", bench.out.label, bench.out.stamp));
+    let commit = &bench.out.commit;
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} quick={}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
@@ -2982,6 +3073,7 @@ fn write_results(bench: &Bench, adapter: &str) {
         },
         bench.out.depth_prepass,
         bench.out.small_arenas,
+        bench.out.quick,
     );
 
     let mut frames = header.clone();
@@ -3008,6 +3100,9 @@ fn write_results(bench: &Bench, adapter: &str) {
     let mut table = String::new();
     for phase in PHASES {
         let rows: Vec<&FrameRow> = bench.rows.iter().filter(|r| r.phase == phase).collect();
+        if rows.is_empty() {
+            continue; // not run (yet, or skipped by `--quick`)
+        }
         let metrics = summarize(phase, &rows, bench.load_timed_out);
         for (metric, value) in &metrics {
             let _ = writeln!(summary, "{},{metric},{value}", phase.name());
@@ -3045,11 +3140,98 @@ fn write_results(bench: &Bench, adapter: &str) {
     if let Err(e) = written {
         error!("[bench] couldn't write results: {e}");
     }
+    if !print {
+        return;
+    }
     println!("\n{table}");
     print_gpu_passes(&bench.gpu_passes, Phase::Hold);
     bench.checks.print();
     println!("frames:  {}", frames_path.display());
     println!("summary: {}", summary_path.display());
+}
+
+/// A channel difference above this (of 255) counts the pixel as changed.
+const DIFF_CHANGED: u8 = 16;
+
+/// `--diff a.png b.png [heatmap.png]`: how far apart two screenshots are.
+/// Prints the mean channel difference (of 255), the share of changed
+/// pixels and the largest difference; the heatmap shows each pixel's
+/// largest channel difference, 4x brighter.
+fn diff_args(a: Option<&String>, b: Option<&String>, heatmap: Option<&String>) -> AppExit {
+    let (Some(a), Some(b)) = (a, b) else {
+        eprintln!("usage: bench --diff <a.png> <b.png> [heatmap.png]");
+        return AppExit::error();
+    };
+    let load = |p: &String| {
+        std::fs::read(p)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                Image::from_buffer(
+                    &bytes,
+                    ImageType::Extension("png"),
+                    CompressedImageFormats::NONE,
+                    true,
+                    ImageSampler::Default,
+                    RenderAssetUsages::default(),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .inspect_err(|e| eprintln!("{p}: {e}"))
+            .ok()
+    };
+    let (Some(ia), Some(ib)) = (load(a), load(b)) else {
+        return AppExit::error();
+    };
+    let (Some(da), Some(db)) = (ia.data.as_ref(), ib.data.as_ref()) else {
+        eprintln!("bench --diff: an image has no pixel data");
+        return AppExit::error();
+    };
+    if ia.size() != ib.size() || da.len() != db.len() {
+        eprintln!("bench --diff: sizes differ ({} vs {})", ia.size(), ib.size());
+        return AppExit::error();
+    }
+    let (mut sum, mut changed, mut max) = (0u32, 0u32, 0u8);
+    let mut heat = Vec::with_capacity(da.len());
+    for (pa, pb) in da.as_chunks::<4>().0.iter().zip(db.as_chunks::<4>().0) {
+        let d = pa
+            .iter()
+            .zip(pb)
+            .take(3)
+            .map(|(x, y)| x.abs_diff(*y))
+            .inspect(|d| sum = sum.saturating_add(u32::from(*d)))
+            .max()
+            .unwrap_or(0);
+        max = max.max(d);
+        if d > DIFF_CHANGED {
+            changed = changed.saturating_add(1);
+        }
+        let v = d.saturating_mul(4);
+        heat.extend([v, v, v, 255]);
+    }
+    let pixels = f64::from(u32::try_from(da.len() / 4).unwrap_or(u32::MAX).max(1));
+    let (mean, share) = (
+        f64::from(sum) / (pixels * 3.0),
+        100.0 * f64::from(changed) / pixels,
+    );
+    println!("diff mean {mean:.3} changed {share:.3}% max {max}");
+    if let Some(path) = heatmap {
+        let image = Image::new(
+            ia.texture_descriptor.size,
+            TextureDimension::D2,
+            heat,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        if let Err(e) = image
+            .try_into_dynamic()
+            .map_err(|e| e.to_string())
+            .and_then(|d| d.save(path).map_err(|e| e.to_string()))
+        {
+            eprintln!("{path}: {e}");
+            return AppExit::error();
+        }
+    }
+    AppExit::Success
 }
 
 /// `--compare a b`.
