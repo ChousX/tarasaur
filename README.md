@@ -117,6 +117,11 @@ with `CursorBrush { enabled: false, ..default() }` and edit from
    tangent-space normal map array (OpenGL convention, like Bevy's
    `StandardMaterial`; R and G only, so `Bc5RgUnorm` works). A palette
    without one skips the normal mapping shader code entirely.
+   `.with_generate_mipmaps(true)` builds mip chains for RGBA8 arrays that
+   come without them (without mips, distant terrain shimmers).
+   `PaletteMaterial::with_macro_variation` sets how much a large-scale
+   world-space noise brightens and darkens the albedo (default 0.12, 0 is
+   off), so a texture's tiling doesn't show over a wide area.
 
 `examples/common/mod.rs` does all four steps for a heightfield terrain,
 including generated ARM and normal map arrays.
@@ -195,7 +200,7 @@ app.add_plugins(TarasaurPlugin {
 | `max_loads_in_flight` | 64 | Load tasks running at once |
 | `remesh_cells_per_frame` | 4M | Cells re-meshed per frame. Past the budget, chunks keep their old mesh |
 | `arenas` | see below | GPU arena sizes and how many each LOD may have |
-| `depth_prepass` | `false` | Draw terrain depth before shading, so each pixel is shaded once. Slower on tile-based GPUs (+3.4 ms on Adreno); bench it on yours |
+| `depth_prepass` | `false` | Draw terrain depth before shading, so each pixel is shaded once. Much slower on tile-based GPUs (voxel raster +55-64% on an Adreno X1-85); bench it on yours |
 | `guard_telemetry` | debug builds | Log pass3's range guard (should never fire) |
 
 Each becomes a resource of the same name (`MaxEditLod`, `SaveDirectory`, ...);
@@ -241,8 +246,10 @@ cargo test -j 2      # full parallelism can run out of memory
 
 ## Benchmarking and profiling
 
-The bench runs repeatable phases (load, hold, spin, fly, edit, box, query,
-reslot, visibility, dig) and writes its results to `bench_results/`. The last
+The bench runs repeatable phases (load, shots, hold, spin, fly, edit, box,
+query, reslot, visibility, dig) and writes its results to `bench_results/`
+after every phase. `shots` saves four views to `bench_results/shots/`;
+`--diff` compares two of them. The last
 five also check correctness: box brushes stay inside the box, GPU ray queries
 return one result per ray and agree with the CPU ray, chunks that lose and
 regain their arena slot get their materials back (read back from the GPU),
@@ -255,9 +262,15 @@ also checks GPU queries against terrain past a LOD's first arena. More
 arenas cost frame time (~7-11% in hold, spin and fly), so only compare runs
 made with the same setting.
 
+`--quick` takes about a third of the time: `hold`, `spin` (turning twice as
+fast) and `fly` (stopping halfway) run half as many frames, and `box`,
+`query`, `reslot` and `dig` are skipped. It suits A/B runs of render
+changes; compare quick runs only with quick runs.
+
 ```sh
-cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas]
+cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--quick]
 cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
+cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 ```
 
 On a Steam Deck, run `tools/bench-deck.sh [label] [-- bench args]` from a
