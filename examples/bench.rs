@@ -33,9 +33,9 @@
 //!   the surface keeps a real distance field (no terraced, black crater)
 //!   and that the dig doesn't punch through.
 //!
-//! `--quick` (about a third of the run time) halves `hold`, `spin` and `fly`
-//! (turning and flying twice as fast, over the same path) and skips `box`,
-//! `query`, `reslot` and `dig`. Compare only runs made with the same setting.
+//! `--quick` (about a third of the run time) halves `hold`, `spin` (turning
+//! twice as fast) and `fly` (stopping halfway; the later phases happen there)
+//! and skips `box`, `query`, `reslot` and `dig`. Compare only runs made with the same setting.
 //! Results are written after every phase, so a run cut short keeps what it
 //! measured.
 //!
@@ -131,16 +131,17 @@ const SHOT_FRAMES_PER_VIEW: u32 = 30;
 const SHOT_VIEWS: u32 = 4;
 
 /// `--quick`: `hold`, `spin` and `fly` run half as many frames (`spin`
-/// turning and `fly` flying twice as far per frame, over the same path), and
-/// `box`, `query`, `reslot` and `dig` are skipped.
+/// turning twice as far per frame, `fly` stopping halfway, with everything
+/// after it placed from where it stops), and `box`, `query`, `reslot` and
+/// `dig` are skipped.
 static QUICK: AtomicBool = AtomicBool::new(false);
 
 fn quick() -> bool {
     QUICK.load(Ordering::Relaxed)
 }
 
-/// How much faster `spin` and `fly` move per frame, and how many times fewer
-/// frames `hold`, `spin` and `fly` run.
+/// How much faster `spin` turns per frame, and how many times fewer frames
+/// `hold`, `spin` and `fly` run.
 fn speed() -> u32 {
     if quick() { 2 } else { 1 }
 }
@@ -472,32 +473,32 @@ fn main() -> AppExit {
         enabled: false,
         ..default()
     })
-        .insert_resource(Bench {
-            phase: Phase::Load,
-            frame_in_phase: 0,
-            phase_started: Instant::now(),
-            idle_frames: 0,
-            load_timed_out: false,
-            rows: Vec::new(),
-            seen: HashMap::new(),
-            out,
-            gpu_passes: Vec::new(),
-            checks: Checks::default(),
-        })
-        .add_systems(Startup, (spawn_camera, setup_terrain_palette))
-        .add_systems(
-            Update,
-            (
-                drive_camera,
-                take_shots,
-                drive_edits,
-                ignore_cursor
-                    .after(resolve_cursor_hit)
-                    .before(update_cursor_focus),
-            ),
-        )
-        .add_systems(Last, record_frame)
-        .run()
+    .insert_resource(Bench {
+        phase: Phase::Load,
+        frame_in_phase: 0,
+        phase_started: Instant::now(),
+        idle_frames: 0,
+        load_timed_out: false,
+        rows: Vec::new(),
+        seen: HashMap::new(),
+        out,
+        gpu_passes: Vec::new(),
+        checks: Checks::default(),
+    })
+    .add_systems(Startup, (spawn_camera, setup_terrain_palette))
+    .add_systems(
+        Update,
+        (
+            drive_camera,
+            take_shots,
+            drive_edits,
+            ignore_cursor
+                .after(resolve_cursor_hit)
+                .before(update_cursor_focus),
+        ),
+    )
+    .add_systems(Last, record_frame)
+    .run()
 }
 
 /// Whether the run uses `BENCH_ARENAS` (`--small-arenas`).
@@ -571,7 +572,7 @@ fn spawn_camera(mut commands: Commands, msaa: Res<BenchMsaa>) {
 }
 
 fn fly_end() -> Vec3 {
-    START + Vec3::X * FLY_STEP * f32_from_u32(FLY_FRAMES)
+    START + Vec3::X * FLY_STEP * f32_from_u32(Phase::Fly.frames().unwrap_or(FLY_FRAMES))
 }
 
 /// `shots`: saves each view to `<out>/shots/<label>-view<N>.png`, to diff
@@ -610,10 +611,12 @@ fn drive_camera(bench: Res<Bench>, mut cams: Query<&mut Transform, With<BenchCam
             }
             Phase::Spin => {
                 let base = Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y);
-                base.with_rotation(Quat::from_rotation_y((f * f32_from_u32(speed())).to_radians()) * base.rotation)
+                base.with_rotation(
+                    Quat::from_rotation_y((f * f32_from_u32(speed())).to_radians()) * base.rotation,
+                )
             }
             Phase::Fly => {
-                let pos = START + Vec3::X * FLY_STEP * f32_from_u32(speed()) * f;
+                let pos = START + Vec3::X * FLY_STEP * f;
                 Transform::from_translation(pos)
                     .looking_at(pos + Vec3::new(1.0, -0.4, 0.0), Vec3::Y)
             }
@@ -3187,7 +3190,11 @@ fn diff_args(a: Option<&String>, b: Option<&String>, heatmap: Option<&String>) -
         return AppExit::error();
     };
     if ia.size() != ib.size() || da.len() != db.len() {
-        eprintln!("bench --diff: sizes differ ({} vs {})", ia.size(), ib.size());
+        eprintln!(
+            "bench --diff: sizes differ ({} vs {})",
+            ia.size(),
+            ib.size()
+        );
         return AppExit::error();
     }
     let (mut sum, mut changed, mut max) = (0u32, 0u32, 0u8);
