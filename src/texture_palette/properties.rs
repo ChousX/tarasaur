@@ -54,6 +54,14 @@ pub struct PaletteMaterial {
     ///
     /// Default: 35.0
     pub normal_fade_end: f32,
+
+    /// How much a large-scale, world-space noise brightens and darkens the
+    /// albedo (0 = off, 0.2 = up to 20% either way), so a texture's tiling
+    /// doesn't show over a wide area. Two octaves, about 16 and 4 world
+    /// units across.
+    ///
+    /// Default: 0.12
+    pub macro_variation: f32,
 }
 
 impl Default for PaletteMaterial {
@@ -66,6 +74,7 @@ impl Default for PaletteMaterial {
             metallic_override: None,
             normal_fade_start: 20.0,
             normal_fade_end: 35.0,
+            macro_variation: 0.12,
         }
     }
 }
@@ -114,6 +123,14 @@ impl PaletteMaterial {
         self.normal_fade_end = end;
         self
     }
+
+    /// Set the strength of the large-scale albedo variation
+    /// (`macro_variation`; 0 turns it off).
+    #[must_use]
+    pub const fn with_macro_variation(mut self, strength: f32) -> Self {
+        self.macro_variation = strength;
+        self
+    }
 }
 
 /// GPU-side representation of material properties.
@@ -139,6 +156,12 @@ pub struct MaterialPropertiesGpu {
 
     /// Camera distance past which the normal map isn't sampled.
     pub normal_fade_end: f32,
+
+    /// Strength of the large-scale albedo variation.
+    pub macro_variation: f32,
+
+    /// Padding to a 16-byte multiple.
+    _pad: f32,
 }
 
 impl From<&PaletteMaterial> for MaterialPropertiesGpu {
@@ -150,6 +173,8 @@ impl From<&PaletteMaterial> for MaterialPropertiesGpu {
             metallic_override: mat.metallic_override.unwrap_or(-1.0),
             normal_fade_start: mat.normal_fade_start,
             normal_fade_end: mat.normal_fade_end,
+            macro_variation: mat.macro_variation,
+            _pad: 0.0,
         }
     }
 }

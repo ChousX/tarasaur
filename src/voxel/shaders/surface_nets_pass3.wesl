@@ -8,7 +8,7 @@ import tarasaur::voxel::shaders::voxel_common::{
 };
 
 struct Vertex {
-    position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
+    position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte), uniform flag (bit 16), macro noise (bits 17-22)
     normal: vec4<f32>,   // .xyz = normal, .w = bitcast-packed material_id_b (low byte) + real_slot (next 15 bits)
 }
 
@@ -279,11 +279,41 @@ fn uniform_material_near(material_base: u32, p: vec3<f32>, id: u32) -> bool {
     return true;
 }
 
+// A hash of an integer lattice point, in 0..1.
+fn lattice_hash(p: vec3<i32>) -> f32 {
+    var h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u)
+        ^ (bitcast<u32>(p.z) * 0xcb1ab31fu);
+    h = (h ^ (h >> 13u)) * 0x5bd1e995u;
+    h = h ^ (h >> 15u);
+    return f32(h) / 4294967295.0;
+}
+
+// Smooth value noise, in 0..1.
+fn value_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * (3.0 - 2.0 * f);
+    let c = vec3<i32>(i);
+    let x00 = mix(lattice_hash(c), lattice_hash(c + vec3<i32>(1, 0, 0)), u.x);
+    let x10 = mix(lattice_hash(c + vec3<i32>(0, 1, 0)), lattice_hash(c + vec3<i32>(1, 1, 0)), u.x);
+    let x01 = mix(lattice_hash(c + vec3<i32>(0, 0, 1)), lattice_hash(c + vec3<i32>(1, 0, 1)), u.x);
+    let x11 = mix(lattice_hash(c + vec3<i32>(0, 1, 1)), lattice_hash(c + vec3<i32>(1, 1, 1)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+// The raster's `macro_variation` noise at a world position, in 0..1: two
+// octaves, about 16 and 4 world units across. Per vertex, since its
+// features are far wider than a voxel; per pixel it cost the raster ~15%.
+fn macro_noise(p: vec3<f32>) -> f32 {
+    return 0.67 * value_noise(p * (1.0 / 16.0)) + 0.33 * value_noise(p * 0.25);
+}
+
 // Bit 16: the vertex's material neighbourhood is uniform (see
-// uniform_material_near).
-fn pack_material_a(id_a: u32, weight_u8: u32, uniform_mat: bool) -> f32 {
+// uniform_material_near). Bits 17-22: `macro_noise`, 0..63.
+fn pack_material_a(id_a: u32, weight_u8: u32, uniform_mat: bool, macro_n: f32) -> f32 {
+    let macro_q = u32(round(clamp(macro_n, 0.0, 1.0) * 63.0));
     let packed = (id_a & 0xFFu) | ((weight_u8 & 0xFFu) << 8u) | (select(0u, 1u, uniform_mat) << 16u)
-        | 0x3F800000u;
+        | (macro_q << 17u) | 0x3F800000u;
     return bitcast<f32>(packed);
 }
 
@@ -609,7 +639,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             && uniform_material_near(sdf_base, vert_pos, blend.id_a);
 
         vertex_buffer[vert_idx] = Vertex(
-            vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8, uniform_mat)),
+            vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8, uniform_mat, macro_noise(world_pos))),
             vec4<f32>(normal, pack_material_b(blend.id_b, real_slot))
         );
     }

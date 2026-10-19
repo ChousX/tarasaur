@@ -734,10 +734,10 @@ impl FromWorld for VoxelMaterialBindGroup {
         });
         // One entry in MaterialPropertiesGpu's layout: texture_scale,
         // blend_sharpness, roughness_override, metallic_override,
-        // normal_fade_start, normal_fade_end.
+        // normal_fade_start, normal_fade_end, macro_variation, padding.
         let properties = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_dummy_material_properties_buffer"),
-            contents: bytemuck::cast_slice(&[0.1f32, 4.0, -1.0, -1.0, 0.0, 0.0]),
+            contents: bytemuck::cast_slice(&[0.1f32, 4.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 

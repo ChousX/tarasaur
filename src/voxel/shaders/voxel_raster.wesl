@@ -99,6 +99,8 @@ struct MaterialProperties {
     metallic_override: f32,
     normal_fade_start: f32,
     normal_fade_end: f32,
+    macro_variation: f32,
+    _pad: f32,
 }
 
 @group(2) @binding(2) var<storage, read> material_properties: array<MaterialProperties>;
@@ -110,7 +112,7 @@ struct MaterialProperties {
 @group(3) @binding(3) var<uniform> vis_uniforms: BatchUniforms; // pass3's, reused
 
 struct VertexInput {
-    @location(0) position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte)
+    @location(0) position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte), uniform flag (bit 16), macro noise (bits 17-22)
     @location(1) normal: vec4<f32>,   // .xyz = normal, .w = bitcast-packed material_id_b (low byte) + real_slot (next 15 bits)
 };
 
@@ -131,6 +133,8 @@ struct VertexOutput {
     // (0, 0); see uniform_material_near in pass3. Interpolated, so x is 1
     // only where every vertex of the triangle is uniform.
     @location(6) uniform_mat: vec2<f32>,
+    // Large-scale noise for `macro_variation`, -1..1 (from pass3's macro_noise).
+    @location(7) macro_n: f32,
 };
 
 // Width of the transition band, measured in |normal| units. Smaller = harder,
@@ -168,6 +172,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.material_id_a = packed_a & 0xFFu;
     let uniform_flag = f32((packed_a >> 16u) & 1u);
     out.uniform_mat = vec2<f32>(uniform_flag, uniform_flag * f32(out.material_id_a));
+    out.macro_n = f32((packed_a >> 17u) & 0x3Fu) * (2.0 / 63.0) - 1.0;
     let weight_u8 = (packed_a >> 8u) & 0xFFu;
     out.blend_weight = f32(weight_u8) / 255.0; // 0.0 = fully id_b, 1.0 = fully id_a
 
@@ -292,6 +297,7 @@ fn sample_material(
     ddy_p: vec3<f32>,
     N: vec3<f32>,
     view_dist: f32,
+    macro_n: f32,
 ) -> Surface {
     let mat = material_properties[id];
     // 1 near the camera, 0 past normal_fade_end, where the normal map isn't
@@ -337,6 +343,8 @@ fn sample_material(
     @if(VOXEL_NORMAL)
     s.normal = mix(N, s.normal, normal_fade);
 
+    s.albedo = vec4<f32>(s.albedo.rgb * (1.0 + mat.macro_variation * macro_n), s.albedo.a);
+
     // A negative override means "use the texture".
     s.arm.y = select(s.arm.y, mat.roughness_override, mat.roughness_override >= 0.0);
     s.arm.z = select(s.arm.z, mat.metallic_override, mat.metallic_override >= 0.0);
@@ -359,6 +367,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let N = normalize(in.world_normal);
     let view_dist = distance(in.world_position, view.world_position);
+    let macro_n = in.macro_n;
     // The same result fragment_material_blend gives when all 8 corners agree,
     // without its 8 lookups.
     var blend: FragBlend;
@@ -377,17 +386,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var surface: Surface;
     if (need_a && need_b) {
-        let a = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N, view_dist);
-        let b = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N, view_dist);
+        let a = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N, view_dist, macro_n);
+        let b = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N, view_dist, macro_n);
         surface = Surface(
             mix(b.albedo, a.albedo, t),
             mix(b.arm, a.arm, t),
             mix(b.normal, a.normal, t),
         );
     } else if (need_a) {
-        surface = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N, view_dist);
+        surface = sample_material(blend.id_a, in.world_position, ddx_p, ddy_p, N, view_dist, macro_n);
     } else {
-        surface = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N, view_dist);
+        surface = sample_material(blend.id_b, in.world_position, ddx_p, ddy_p, N, view_dist, macro_n);
     }
 
     var pbr = pbr_input_new();
