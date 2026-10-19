@@ -23,8 +23,8 @@ use super::generator::ChunkGeneratorRegistry;
 use crate::chunk::{Chunk, ChunkLoader, ChunkPosition, CurrentChunk, EditPin, chebyshev};
 use crate::field::{LOD, MaxEditLod, TargetLOD};
 use crate::storage::persistence::{
-    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, PreparedField, SaveCache,
-    SaveDirectory, build_if_dirty, commit_save, read_save,
+    ChunkPersistenceRegistry, ChunkSaveState, FieldSavePayload, LoadedSave, PreparedField,
+    SaveCache, SaveDirectory, build_if_dirty, commit_save, read_save,
 };
 use bevy::ecs::system::SystemParam;
 
@@ -78,7 +78,8 @@ fn make_task(
     dir: PathBuf,
 ) -> Task<Vec<FieldSavePayload>> {
     AsyncComputeTaskPool::get().spawn(async move {
-        if let Some(save) = read_save(&cache, &dir, pos)
+        let loaded = read_save(&cache, &dir, pos);
+        if let Some(save) = loaded.as_ref().and_then(LoadedSave::view)
             && save.header.lod >= lod
         {
             return save
@@ -90,8 +91,8 @@ fn make_task(
                         .iter()
                         .find(|f| f.type_id == p.field_type_id)?;
                     Some(FieldSavePayload {
-                        field_type_id: p.field_type_id.clone(),
-                        bytes: (vt.downsample)(&p.bytes, save.header.lod, lod),
+                        field_type_id: p.field_type_id.to_owned(),
+                        bytes: (vt.downsample)(p.bytes, save.header.lod, lod),
                     })
                 })
                 .collect();

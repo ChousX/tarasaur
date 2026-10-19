@@ -5,6 +5,10 @@
 //! `SaveChunkMessage`, or on despawn). Each saveable field registers a
 //! `FieldVTable`; saves go through `SaveCache` so loads never see a stale
 //! file. Lower LODs are exact stride-downsamples of the saved data.
+//!
+//! A save's bytes (`ChunkSaveData::encode`) are also its network form.
+//! Field data travels raw, so encoding is about a memcpy, and
+//! `ChunkSaveView::decode` borrows the fields without copying them.
 
 use std::{
     collections::HashMap,
@@ -17,7 +21,7 @@ use crate::chunk::{Chunk, ChunkManager, ChunkPosition};
 use crate::field::VoxelField;
 use crate::field::{LOD, MaxEditLod};
 use crate::grid::flatten_cube;
-use crate::num::{f32_from_u32, usize_from};
+use crate::num::f32_from_u32;
 use crate::storage::generator::ChunkGeneratorRegistry;
 use crate::storage::loading::ChunkDataTask;
 use crate::{chunk::ReplanRequested, field::SDF};
@@ -37,6 +41,10 @@ pub struct ChunkHeader {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FieldSavePayload {
     pub field_type_id: String,
+    /// One byte string (length, then raw bytes) rather than a sequence of
+    /// u8s, so encoding is a copy and decoding can borrow it in place. The
+    /// wire format is the same either way.
+    #[serde(with = "raw_bytes")]
     pub bytes: Vec<u8>,
 }
 
@@ -44,6 +52,141 @@ pub struct FieldSavePayload {
 pub struct ChunkSaveData {
     pub header: ChunkHeader,
     pub fields: Vec<FieldSavePayload>,
+}
+
+/// A `ChunkSaveData` whose field bytes borrow from the buffer it was
+/// decoded from: decoding copies nothing. Same wire format, so either type
+/// decodes what the other encodes.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChunkSaveView<'a> {
+    pub header: ChunkHeader,
+    #[serde(borrow)]
+    pub fields: Vec<FieldSaveView<'a>>,
+}
+
+/// One field of a `ChunkSaveView`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct FieldSaveView<'a> {
+    pub field_type_id: &'a str,
+    #[serde(serialize_with = "raw_bytes::serialize")]
+    pub bytes: &'a [u8],
+}
+
+impl ChunkSaveData {
+    /// The save file's bytes; also what to send over the network. Field
+    /// data is copied in raw, so this costs about a memcpy.
+    ///
+    /// # Errors
+    /// Only if postcard fails to serialize, which these types never make it do.
+    pub fn encode(&self) -> postcard::Result<Vec<u8>> {
+        self.view().encode()
+    }
+
+    /// Decodes into owned data. To read fields without copying them, use
+    /// `ChunkSaveView::decode`.
+    ///
+    /// # Errors
+    /// If `bytes` isn't an encoded chunk.
+    pub fn decode(bytes: &[u8]) -> postcard::Result<Self> {
+        postcard::from_bytes(bytes)
+    }
+
+    #[must_use]
+    pub fn view(&self) -> ChunkSaveView<'_> {
+        ChunkSaveView {
+            header: self.header,
+            fields: self
+                .fields
+                .iter()
+                .map(|f| FieldSaveView {
+                    field_type_id: &f.field_type_id,
+                    bytes: &f.bytes,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<'a> ChunkSaveView<'a> {
+    /// Decodes without copying any field data.
+    ///
+    /// # Errors
+    /// If `bytes` isn't an encoded chunk.
+    pub fn decode(bytes: &'a [u8]) -> postcard::Result<Self> {
+        postcard::from_bytes(bytes)
+    }
+
+    /// See `ChunkSaveData::encode`.
+    ///
+    /// # Errors
+    /// Only if postcard fails to serialize, which these types never make it do.
+    pub fn encode(&self) -> postcard::Result<Vec<u8>> {
+        // Header and names fit in the slack; field data is sized exactly,
+        // so the buffer is allocated once.
+        let len = self.fields.iter().fold(64usize, |n, f| {
+            n.saturating_add(f.bytes.len())
+                .saturating_add(f.field_type_id.len())
+                .saturating_add(10)
+        });
+        postcard::to_extend(self, Vec::with_capacity(len))
+    }
+
+    #[must_use]
+    pub fn to_owned_data(&self) -> ChunkSaveData {
+        ChunkSaveData {
+            header: self.header,
+            fields: self
+                .fields
+                .iter()
+                .map(|f| FieldSavePayload {
+                    field_type_id: f.field_type_id.to_owned(),
+                    bytes: f.bytes.to_vec(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Serde helpers that write a byte slice as one byte string. Plain serde
+/// writes `Vec<u8>` as a sequence, which postcard walks a byte at a time.
+mod raw_bytes {
+    use serde::{Deserializer, Serializer, de};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        d.deserialize_byte_buf(Visitor)
+    }
+
+    struct Visitor;
+
+    impl<'de> de::Visitor<'de> for Visitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("bytes")
+        }
+
+        fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+            Ok(v.to_vec())
+        }
+
+        fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+            Ok(v)
+        }
+
+        // Self-describing formats (JSON, ...) may hand back a sequence.
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element()? {
+                out.push(b);
+            }
+            Ok(out)
+        }
+    }
 }
 
 /// Where chunk saves are read and written. Set it before chunks load (e.g.
@@ -73,10 +216,42 @@ pub fn chunk_path(dir: &Path, p: IVec3) -> PathBuf {
 #[derive(Resource, Clone, Default)]
 pub(crate) struct SaveCache(Arc<SaveCacheInner>);
 
+/// Write locks, striped by chunk position: one chunk's writes stay in
+/// order, while different chunks write in parallel instead of parking
+/// async-pool threads (which loads need) behind one global lock.
+const WRITE_STRIPES: usize = 32; // the largest array with a `Default`
+
 #[derive(Default)]
 struct SaveCacheInner {
     map: Mutex<HashMap<IVec3, Arc<ChunkSaveData>>>,
-    write_lock: Mutex<()>,
+    write_locks: [Mutex<()>; WRITE_STRIPES],
+}
+
+impl SaveCacheInner {
+    fn write_lock(&self, pos: IVec3) -> Option<&Mutex<()>> {
+        let h = pos.x.wrapping_mul(73_856_093)
+            ^ pos.y.wrapping_mul(19_349_663)
+            ^ pos.z.wrapping_mul(83_492_791);
+        let i = usize::try_from(h.unsigned_abs()).unwrap_or(0) % WRITE_STRIPES;
+        self.write_locks.get(i)
+    }
+}
+
+/// A save read for loading: borrowed from the cache, or a file's bytes.
+pub(crate) enum LoadedSave {
+    Cached(Arc<ChunkSaveData>),
+    File(Vec<u8>),
+}
+
+impl LoadedSave {
+    /// The save's fields, borrowed (decoding a file copies nothing). `None`
+    /// if the file is corrupt.
+    pub fn view(&self) -> Option<ChunkSaveView<'_>> {
+        match self {
+            Self::Cached(data) => Some(data.view()),
+            Self::File(bytes) => ChunkSaveView::decode(bytes).ok(),
+        }
+    }
 }
 
 /// Locks a cache mutex, recovering it if a panic elsewhere poisoned it: the
@@ -92,14 +267,31 @@ impl SaveCache {
     }
 }
 
-pub(crate) fn read_save(cache: &SaveCache, dir: &Path, pos: IVec3) -> Option<Arc<ChunkSaveData>> {
+/// The chunk's pending save, else its file's bytes. Decoding is left to
+/// `LoadedSave::view`, which borrows rather than copies.
+pub(crate) fn read_save(cache: &SaveCache, dir: &Path, pos: IVec3) -> Option<LoadedSave> {
     if let Some(hit) = cache.get(pos) {
-        return Some(hit);
+        return Some(LoadedSave::Cached(hit));
     }
-    let bytes = std::fs::read(chunk_path(dir, pos)).ok()?;
-    postcard::from_bytes::<ChunkSaveData>(&bytes)
+    std::fs::read(chunk_path(dir, pos))
         .ok()
-        .map(Arc::new)
+        .map(LoadedSave::File)
+}
+
+/// Writes `bytes` to `path` via a temp file and rename, so a reader never
+/// sees half a save. Creates the directory only when it's missing.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e);
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&tmp, bytes)?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 pub(crate) fn commit_save(cache: &SaveCache, dir: &Path, data: ChunkSaveData) {
@@ -110,21 +302,15 @@ pub(crate) fn commit_save(cache: &SaveCache, dir: &Path, data: ChunkSaveData) {
     let path = chunk_path(dir, pos);
     AsyncComputeTaskPool::get()
         .spawn(async move {
-            let _guard = lock(&cache.0.write_lock);
+            let _guard = cache.0.write_lock(pos).map(lock);
             // A newer save for this chunk superseded us while we waited: skip.
             let current = lock(&cache.0.map).get(&pos).cloned();
             if !current.is_some_and(|c| Arc::ptr_eq(&c, &data)) {
                 return;
             }
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            match postcard::to_allocvec(&*data) {
+            match data.encode() {
                 Ok(bytes) => {
-                    let tmp = path.with_extension("tmp");
-                    if let Err(e) =
-                        std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path))
-                    {
+                    if let Err(e) = write_atomically(&path, &bytes) {
                         eprintln!("Failed to write chunk save {pos:?}: {e}");
                         return; // keep it cached so loads still see it
                     }
@@ -202,10 +388,10 @@ pub(crate) struct ChunkPersistenceRegistry {
 /// this an exact stride sample; no interpolation, no JFA.
 #[must_use]
 pub(crate) fn downsample_bytes<F: VoxelField>(bytes: &[u8], from: LOD, to: LOD) -> Vec<u8> {
-    let src: Vec<F::Elem> = bytemuck::pod_collect_to_vec(bytes);
+    let elem = size_of::<F::Elem>();
     let (fs, ts) = (from.size(), to.size());
     // Bad input: install falls back to a default field.
-    if Some(src.len()) != usize_from(fs).checked_pow(3) || fs < ts {
+    if Some(bytes.len()) != from.volume().checked_mul(elem) || fs < ts {
         return Vec::new();
     }
     if fs == ts {
@@ -214,19 +400,27 @@ pub(crate) fn downsample_bytes<F: VoxelField>(bytes: &[u8], from: LOD, to: LOD) 
     let Some(ratio) = fs.checked_div(ts) else {
         return Vec::new();
     };
+    // Reads the sampled elements straight from the (possibly unaligned)
+    // bytes: copying the whole source first cost more than the sampling.
+    let read = |i: usize| -> Option<F::Elem> {
+        let start = i.checked_mul(elem)?;
+        bytes
+            .get(start..start.checked_add(elem)?)
+            .map(bytemuck::pod_read_unaligned)
+    };
     let at = |c: u32| c.wrapping_mul(ratio);
-    let mut out: Vec<F::Elem> = Vec::with_capacity(usize_from(ts).saturating_pow(3));
+    let mut out: Vec<u8> = Vec::with_capacity(to.volume().saturating_mul(elem));
     for z in 0..ts {
         for y in 0..ts {
             for x in 0..ts {
-                let Some(&v) = src.get(flatten_cube(at(x), at(y), at(z), fs)) else {
+                let Some(v) = read(flatten_cube(at(x), at(y), at(z), fs)) else {
                     return Vec::new();
                 };
-                out.push(F::rescale(v, f32_from_u32(ratio)));
+                out.extend_from_slice(bytemuck::bytes_of(&F::rescale(v, f32_from_u32(ratio))));
             }
         }
     }
-    bytemuck::cast_slice(&out).to_vec()
+    out
 }
 
 impl ChunkPersistenceRegistry {
@@ -406,4 +600,139 @@ impl Plugin for ChunkPersistencePlugin {
 /// persist pre-JFA data, and replacing the fields now would discard the edits.
 pub(crate) fn is_settling(world: &World, e: Entity) -> bool {
     world.get::<SdfReinitTask>(e).is_some() || world.get::<DirtyField<SDF, f32>>(e).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChunkHeader, ChunkSaveData, ChunkSaveView, FieldSavePayload, downsample_bytes};
+    use crate::field::{LOD, SDF, VisibilityField};
+    use bevy::math::IVec3;
+
+    fn sample() -> ChunkSaveData {
+        let sdf: Vec<f32> = (0..LOD::Medium.volume())
+            .map(crate::num::f32_from_usize)
+            .collect();
+        ChunkSaveData {
+            header: ChunkHeader {
+                chunk_pos: IVec3::new(-3, 7, 1),
+                lod: LOD::Medium,
+                version: 1,
+            },
+            fields: vec![
+                FieldSavePayload {
+                    field_type_id: "sdf".into(),
+                    bytes: bytemuck::cast_slice(&sdf).to_vec(),
+                },
+                FieldSavePayload {
+                    field_type_id: "mat".into(),
+                    bytes: (0..LOD::Medium.volume())
+                        .map(|i| u8::try_from(i % 251).unwrap())
+                        .collect(),
+                },
+            ],
+        }
+    }
+
+    /// The old encoding: field bytes as a plain serde sequence of u8s.
+    #[derive(serde::Serialize)]
+    struct LegacyField<'a> {
+        field_type_id: &'a str,
+        bytes: &'a Vec<u8>,
+    }
+    #[derive(serde::Serialize)]
+    struct Legacy<'a> {
+        header: ChunkHeader,
+        fields: Vec<LegacyField<'a>>,
+    }
+
+    #[test]
+    fn wire_format_matches_the_old_saves() {
+        let data = sample();
+        let legacy = Legacy {
+            header: data.header,
+            fields: data
+                .fields
+                .iter()
+                .map(|f| LegacyField {
+                    field_type_id: &f.field_type_id,
+                    bytes: &f.bytes,
+                })
+                .collect(),
+        };
+        let old = postcard::to_allocvec(&legacy).unwrap();
+        let new = data.encode().unwrap();
+        assert_eq!(old, new);
+    }
+
+    #[test]
+    fn round_trips_owned_and_borrowed() {
+        let data = sample();
+        let bytes = data.encode().unwrap();
+        let view = ChunkSaveView::decode(&bytes).unwrap();
+        assert_eq!(view.header, data.header);
+        for (v, f) in view.fields.iter().zip(&data.fields) {
+            assert_eq!(v.field_type_id, f.field_type_id);
+            assert_eq!(v.bytes, f.bytes.as_slice());
+        }
+        assert_eq!(view.encode().unwrap(), bytes);
+        let owned = ChunkSaveData::decode(&bytes).unwrap();
+        assert_eq!(owned.encode().unwrap(), bytes);
+        assert!(ChunkSaveView::decode(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn downsamples_unaligned_bytes() {
+        let data = sample();
+        let sdf = &data.fields[0].bytes;
+        let mut shifted = vec![0u8];
+        shifted.extend_from_slice(sdf);
+        let unaligned = &shifted[1..];
+        for to in [LOD::Lowest, LOD::Low, LOD::Medium] {
+            assert_eq!(
+                downsample_bytes::<SDF>(unaligned, LOD::Medium, to),
+                downsample_bytes::<SDF>(sdf, LOD::Medium, to),
+            );
+        }
+        let mat = &data.fields[1].bytes;
+        let down = downsample_bytes::<VisibilityField>(mat, LOD::Medium, LOD::Low);
+        assert_eq!(down.len(), LOD::Low.volume());
+        // wrong size: rejected
+        assert_eq!(
+            downsample_bytes::<SDF>(&sdf[1..], LOD::Medium, LOD::Low),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    #[ignore = "timing; needs saves/chunks/chunk_0_0_0.bin"]
+    fn timing() {
+        use std::time::Instant;
+        let bytes = std::fs::read("saves/chunks/chunk_0_0_0.bin").unwrap();
+        let n = 200u32;
+        let t = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(ChunkSaveView::decode(&bytes).unwrap());
+        }
+        eprintln!("view decode: {:?}", t.elapsed() / n);
+        let t = Instant::now();
+        let mut d = None;
+        for _ in 0..n {
+            d = Some(ChunkSaveData::decode(&bytes).unwrap());
+        }
+        eprintln!("owned decode: {:?}", t.elapsed() / n);
+        let d = d.unwrap();
+        let t = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(d.encode().unwrap());
+        }
+        eprintln!("encode: {:?}", t.elapsed() / n);
+        let sdf = ChunkSaveView::decode(&bytes).unwrap().fields[0].bytes;
+        for to in LOD::ALL {
+            let t = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(downsample_bytes::<SDF>(sdf, LOD::High, to));
+            }
+            eprintln!("downsample SDF -> {to:?}: {:?}", t.elapsed() / n);
+        }
+    }
 }
