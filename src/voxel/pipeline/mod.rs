@@ -20,12 +20,13 @@ use bevy::{
             BufferBindingType, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction,
             ComputePipelineDescriptor, DepthBiasState, DepthStencilState, Extent3d, Face,
-            FilterMode, FragmentState, MultisampleState, Origin3d, PipelineCache, PrimitiveState,
-            PrimitiveTopology, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderStages, StencilState, TexelCopyBufferLayout,
-            TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension,
-            TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
-            TextureViewDimension, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            FilterMode, FragmentState, MipmapFilterMode, MultisampleState, Origin3d, PipelineCache,
+            PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, Sampler,
+            SamplerBindingType, SamplerDescriptor, ShaderStages, StencilState,
+            TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
+            TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+            TextureViewDescriptor, TextureViewDimension, VertexAttribute, VertexFormat,
+            VertexState, VertexStepMode,
         },
         renderer::{RenderDevice, RenderQueue},
         texture::GpuImage,
@@ -555,6 +556,9 @@ fn raster_pipeline_descriptor(
     }
 }
 
+/// Anisotropic filtering of the palette textures (1 = off).
+const MATERIAL_ANISOTROPY: u16 = 4;
+
 /// The palette's texture arrays, or dummies standing in for them.
 struct MaterialTextures<'a> {
     albedo: &'a TextureView,
@@ -798,6 +802,11 @@ pub fn update_voxel_material_bind_group(
         label: Some("voxel_material_sampler"),
         mag_filter: FilterMode::Linear,
         min_filter: FilterMode::Linear,
+        // Trilinear: a nearest mip shows hard bands where the level changes.
+        mipmap_filter: MipmapFilterMode::Linear,
+        // Terrain is mostly seen at grazing angles, where isotropic
+        // filtering smears; needs all three filters linear.
+        anisotropy_clamp: MATERIAL_ANISOTROPY,
         address_mode_u: AddressMode::Repeat,
         address_mode_v: AddressMode::Repeat,
         address_mode_w: AddressMode::Repeat,

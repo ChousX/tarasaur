@@ -55,9 +55,16 @@ pub struct ExtractedPalette {
 
 /// Builds the missing mip chains of every palette that asks for them
 /// (`TexturePalette::generate_mipmaps`), once each image has loaded.
-fn generate_palette_mipmaps(palettes: Res<Assets<TexturePalette>>, mut images: ResMut<Assets<Image>>) {
+fn generate_palette_mipmaps(
+    palettes: Res<Assets<TexturePalette>>,
+    mut images: ResMut<Assets<Image>>,
+) {
     for (_, palette) in palettes.iter().filter(|(_, p)| p.generate_mipmaps) {
-        let handles = [Some(&palette.albedo), palette.arm.as_ref(), palette.normal.as_ref()];
+        let handles = [
+            Some(&palette.albedo),
+            palette.arm.as_ref(),
+            palette.normal.as_ref(),
+        ];
         for handle in handles.into_iter().flatten() {
             // Look before `get_mut`, which would mark the image changed.
             if images.get(handle).is_some_and(can_generate_mipmaps)
