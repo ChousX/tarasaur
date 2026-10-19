@@ -82,9 +82,11 @@ pub fn voxel_raster_pass(
         return;
     };
     // A prepass that isn't compiled yet is skipped; shading alone is still
-    // correct, since its depth test works without the prepass.
-    let prepass = prepass_key.and_then(|key| res.pipeline(key));
-    let (Some(shade), Some(compaction)) = (
+    // correct, since its depth test works without the prepass. The full
+    // keys (mask test, normal maps) draw every chunk correctly, so they
+    // stand in for narrower variants still compiling.
+    let prepass_key = prepass_key.filter(|&key| res.pipeline(key).is_some());
+    let (Some(_), Some(compaction)) = (
         res.pipeline(shade_key),
         res.pipeline_cache
             .get_compute_pipeline(res.draw_pipeline.id),
@@ -112,10 +114,23 @@ pub fn voxel_raster_pass(
     render_pass.set_bind_group(1, &mesh_view.binding_array, &[]);
     render_pass.set_bind_group(2, &res.voxel_material.bind_group, &[]);
 
-    // Both pipelines share one layout, so the bind groups stay set.
-    for pipeline in prepass.into_iter().chain([shade]) {
-        render_pass.set_render_pipeline(pipeline);
+    // All the pipelines share one layout, so the bind groups stay set.
+    for base in prepass_key.into_iter().chain([shade_key]) {
+        let mut bound = None;
         for d in draws.iter().filter(|d| d.count > 0) {
+            let narrow = base.for_draw(d.variant);
+            let key = if res.pipeline(narrow).is_some() {
+                narrow
+            } else {
+                base
+            };
+            if bound != Some(key) {
+                let Some(pipeline) = res.pipeline(key) else {
+                    continue;
+                };
+                render_pass.set_render_pipeline(pipeline);
+                bound = Some(key);
+            }
             let Some(arena) = res.arena_set.arenas.get(d.lod).and_then(|a| a.get(d.arena)) else {
                 continue;
             };

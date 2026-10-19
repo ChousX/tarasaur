@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use bevy::{
     asset::uuid_handle,
     camera::primitives::{Aabb, Frustum},
-    ecs::entity::EntityHashMap,
+    ecs::{entity::EntityHashMap, system::SystemParam},
     prelude::*,
     render::{
         camera::ExtractedCamera,
@@ -25,6 +25,7 @@ use bevy::{
             ShaderStages,
         },
         renderer::{RenderDevice, RenderQueue},
+        view::ExtractedView,
     },
 };
 
@@ -33,7 +34,7 @@ use crate::{
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
         arena::{VoxelChunkArena, VoxelChunkArenaSet},
-        pipeline::layouts::storage_buffer_entry,
+        pipeline::{VoxelMaterialBindGroup, layouts::storage_buffer_entry},
         types::{CreateStorage, DrawIndexedIndirectArgs},
     },
 };
@@ -85,12 +86,54 @@ impl FromWorld for VoxelDrawPipeline {
     }
 }
 
-/// One arena's visible chunks for one view.
+/// Which raster pipeline a group of chunks needs (see
+/// `VoxelRasterKey::for_draw`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DrawVariant {
+    /// The chunk has a visibility mask: test it per pixel, and discard.
+    pub masked: bool,
+    /// The chunk is entirely past every material's normal fade
+    /// (`VoxelMaterialBindGroup::normals_end`): skip normal maps.
+    pub far: bool,
+}
+
+impl DrawVariant {
+    pub const ALL: [Self; 4] = [
+        Self {
+            masked: false,
+            far: false,
+        },
+        Self {
+            masked: false,
+            far: true,
+        },
+        Self {
+            masked: true,
+            far: false,
+        },
+        Self {
+            masked: true,
+            far: true,
+        },
+    ];
+
+    const fn index(self) -> usize {
+        match (self.masked, self.far) {
+            (false, false) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (true, true) => 3,
+        }
+    }
+}
+
+/// One arena's visible chunks of one `DrawVariant`, for one view.
 pub struct ArenaDraws {
     /// Where the arena is in `VoxelChunkArenaSet::arenas` (LOD, index).
     /// Arenas are only ever appended, so this stays valid.
     pub lod: usize,
     pub arena: usize,
+    pub variant: DrawVariant,
     /// `[count, slot, slot, ...]`, CPU-written each frame.
     visible: Buffer,
     /// Packed draw arguments of the visible slots, GPU-written.
@@ -106,6 +149,7 @@ impl ArenaDraws {
         arena: &VoxelChunkArena,
         lod: usize,
         index: usize,
+        variant: DrawVariant,
     ) -> Self {
         let max = u64::from(arena.max_chunks);
         let visible = device.storage(
@@ -139,6 +183,7 @@ impl ArenaDraws {
         Self {
             lod,
             arena: index,
+            variant,
             visible,
             args,
             bind_group,
@@ -167,65 +212,120 @@ impl VoxelViewDraws {
     }
 }
 
-/// Whether a resident chunk's mesh can be in view. A slot with no known
-/// position is kept.
-fn chunk_visible(arena: &VoxelChunkArena, slot: u32, frustum: &Frustum) -> bool {
+/// How far a resident chunk's mesh is from `eye`, or `None` if it's out of
+/// view. A slot with no known position is kept, at distance 0.
+fn chunk_distance(arena: &VoxelChunkArena, slot: u32, frustum: &Frustum, eye: Vec3) -> Option<f32> {
     let Some(Some(pos)) = arena.chunk_pos_of_slot.get(usize_from(slot)) else {
-        return true;
+        return Some(0.0);
     };
     // Surface nets puts vertices up to one voxel past the chunk's far faces.
     let voxel = CHUNK_SIZE / f32_from_u32(arena.cell_count.saturating_sub(1).max(1));
     let min = pos.as_vec3() * CHUNK_SIZE;
-    let aabb = Aabb::from_min_max(min, min + Vec3::splat(CHUNK_SIZE + voxel));
-    frustum.intersects_obb_identity(&aabb)
+    let max = min + Vec3::splat(CHUNK_SIZE + voxel);
+    frustum
+        .intersects_obb_identity(&Aabb::from_min_max(min, max))
+        .then(|| eye.clamp(min, max).distance(eye))
 }
 
-/// Culls every arena against every camera's frustum and uploads the
-/// visible slots. Runs after the arenas' uploads for the frame.
+/// What `prepare_voxel_view_draws` reads.
+#[derive(SystemParam)]
+pub struct DrawInputs<'w> {
+    arena_set: Res<'w, VoxelChunkArenaSet>,
+    pipeline: Res<'w, VoxelDrawPipeline>,
+    material: Res<'w, VoxelMaterialBindGroup>,
+    device: Res<'w, RenderDevice>,
+    queue: Res<'w, RenderQueue>,
+}
+
+/// Culls every arena against every camera's frustum, sorts the visible
+/// chunks front to back and splits them by `DrawVariant`, and uploads them.
+/// Runs after the arenas' uploads for the frame.
 pub fn prepare_voxel_view_draws(
-    views: Query<(Entity, &Frustum), With<ExtractedCamera>>,
-    arena_set: Res<VoxelChunkArenaSet>,
-    pipeline: Res<VoxelDrawPipeline>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
+    views: Query<(Entity, &Frustum, &ExtractedView), With<ExtractedCamera>>,
+    inputs: DrawInputs,
     mut draws: ResMut<VoxelViewDraws>,
-    mut visible: Local<Vec<u32>>,
+    mut visible: Local<[Vec<u32>; 4]>,
+    mut by_distance: Local<Vec<(f32, u32)>>,
 ) {
+    let DrawInputs {
+        arena_set,
+        pipeline,
+        material,
+        device,
+        queue,
+    } = inputs;
     draws.0.retain(|view, _| views.contains(*view));
-    for (view, frustum) in &views {
+    for (view, frustum, extracted) in &views {
+        let eye = extracted.world_from_view.translation();
         let per_view = draws.0.entry(view).or_default();
         for (lod, arenas) in arena_set.arenas.iter().enumerate() {
             for (index, arena) in arenas.iter().enumerate() {
-                visible.clear();
-                visible.push(0); // count, filled in below
-                visible.extend(
-                    arena
-                        .active_slots
-                        .iter()
-                        .copied()
-                        .filter(|&slot| chunk_visible(arena, slot, frustum)),
-                );
-                let count = u32::try_from(visible.len().saturating_sub(1)).unwrap_or(u32::MAX);
-                if let Some(first) = visible.first_mut() {
-                    *first = count;
+                // Front to back, so nearer terrain can hide what's behind
+                // it before that is shaded.
+                by_distance.clear();
+                by_distance.extend(arena.active_slots.iter().filter_map(|&slot| {
+                    chunk_distance(arena, slot, frustum, eye).map(|d| (d, slot))
+                }));
+                by_distance.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                for list in &mut *visible {
+                    list.clear();
+                    list.push(0); // count, filled in below
+                }
+                for &(distance, slot) in &*by_distance {
+                    let variant = DrawVariant {
+                        masked: arena
+                            .mask_slots
+                            .get(usize_from(slot))
+                            .copied()
+                            .unwrap_or(true),
+                        far: distance >= material.normals_end,
+                    };
+                    if let Some(list) = visible.get_mut(variant.index()) {
+                        list.push(slot);
+                    }
                 }
 
-                let at = per_view
-                    .iter()
-                    .position(|d| d.lod == lod && d.arena == index)
-                    .unwrap_or_else(|| {
-                        per_view.push(ArenaDraws::new(
-                            &device,
-                            &pipeline.layout,
-                            arena,
-                            lod,
-                            index,
-                        ));
-                        per_view.len().saturating_sub(1)
-                    });
-                if let Some(d) = per_view.get_mut(at) {
-                    queue.write_buffer(&d.visible, 0, bytemuck::cast_slice(&visible));
-                    d.count = count;
+                for (variant, list) in DrawVariant::ALL.into_iter().zip(visible.iter_mut()) {
+                    let count = u32::try_from(list.len().saturating_sub(1)).unwrap_or(u32::MAX);
+                    if let Some(first) = list.first_mut() {
+                        *first = count;
+                    }
+                    let is_this =
+                        |d: &ArenaDraws| d.lod == lod && d.arena == index && d.variant == variant;
+                    let at = per_view.iter().position(is_this);
+                    let at = match at {
+                        Some(at) => at,
+                        // Nothing to draw yet: don't make buffers for it.
+                        None if count == 0 => continue,
+                        None => {
+                            per_view.push(ArenaDraws::new(
+                                &device,
+                                &pipeline.layout,
+                                arena,
+                                lod,
+                                index,
+                                variant,
+                            ));
+                            // Draw order: chunks without a mask first (they
+                            // fill the early depth buffer), then the finest
+                            // LOD and nearer chunks first.
+                            per_view.sort_by_key(|d| {
+                                (
+                                    d.variant.masked,
+                                    std::cmp::Reverse(d.lod),
+                                    d.variant.far,
+                                    d.arena,
+                                )
+                            });
+                            per_view.iter().position(is_this).unwrap_or_default()
+                        }
+                    };
+                    if let Some(d) = per_view.get_mut(at) {
+                        if count > 0 {
+                            queue.write_buffer(&d.visible, 0, bytemuck::cast_slice(list));
+                        }
+                        d.count = count;
+                    }
                 }
             }
         }

@@ -1,6 +1,7 @@
 // Draws the meshed chunks: triplanar palette texturing (albedo, plus ARM
 // under VOXEL_ARM and normal maps under VOXEL_NORMAL) with material blending, per-pixel discard against the
-// chunk's visibility mask, and Bevy's PBR lighting.
+// chunk's visibility mask, and Bevy's PBR lighting. Chunks without a mask are
+// drawn without VOXEL_MASK, so without the mask test.
 //
 // Groups 0 and 1 are Bevy's mesh view bind groups (view, lights, shadows,
 // fog, light probes), bound by voxel_raster_pass; 2 is the palette, 3 the
@@ -343,6 +344,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ddx_p = dpdx(in.world_position);
     let ddy_p = dpdy(in.world_position);
 
+    // Only chunks with a visibility mask are drawn with VOXEL_MASK: a
+    // shader that can discard loses early depth testing on tiling GPUs.
+    @if(VOXEL_MASK)
     if (!fragment_is_visible(in.real_slot, in.world_position)) {
         discard;
     }
@@ -398,6 +402,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 // write depth either, or they'd occlude what's behind them.
 @fragment
 fn fs_prepass(in: VertexOutput) -> @location(0) vec4<f32> {
+    @if(VOXEL_MASK)
     if (!fragment_is_visible(in.real_slot, in.world_position)) {
         discard;
     }

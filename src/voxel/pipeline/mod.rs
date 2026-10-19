@@ -40,7 +40,7 @@ use crate::{
     texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
     voxel::{
         CURSOR_QUERY_SHADER_HANDLE, SURFACE_NETS_PASS1_SHADER_HANDLE,
-        SURFACE_NETS_PASS3_SHADER_HANDLE,
+        SURFACE_NETS_PASS3_SHADER_HANDLE, draw::DrawVariant,
     },
 };
 
@@ -164,6 +164,25 @@ pub struct VoxelRasterKey {
     pub arm: bool,
     pub normal: bool,
     pub pass: RasterPass,
+    /// Whether the fragment shader tests the visibility mask (and may
+    /// discard). Without a `discard`, tiling GPUs keep early depth testing
+    /// and their low-resolution depth buffer, so occluded terrain isn't
+    /// shaded; chunks without a mask are drawn without it.
+    pub masked: bool,
+}
+
+impl VoxelRasterKey {
+    /// This key narrowed to what one group of draws needs: no mask test for
+    /// chunks without a mask, and no normal maps past every material's
+    /// normal fade.
+    #[must_use]
+    pub const fn for_draw(self, variant: DrawVariant) -> Self {
+        Self {
+            normal: self.normal && !variant.far,
+            masked: self.masked && variant.masked,
+            ..self
+        }
+    }
 }
 
 /// The voxel raster pipelines, one per [`VoxelRasterKey`] in use.
@@ -201,8 +220,9 @@ impl FromWorld for VoxelRasterPipeline {
 }
 
 /// The keys a view draws with, in order: the prepass (if on), then the
-/// shading pass. `None` until Bevy has cached the view's mesh pipeline key
-/// (it does so in `PrepareAssets`).
+/// shading pass, each before `VoxelRasterKey::for_draw` narrows it. `None`
+/// until Bevy has cached the view's mesh pipeline key (it does so in
+/// `PrepareAssets`).
 #[must_use]
 pub fn raster_keys(
     view_keys: &ViewKeyCache,
@@ -216,6 +236,7 @@ pub fn raster_keys(
         arm: textures && material.has_arm,
         normal: textures && material.has_normal,
         pass,
+        masked: true,
     };
     Some(if depth_prepass.0 {
         (
@@ -242,11 +263,13 @@ pub fn queue_voxel_raster_pipelines(
         let Some((prepass, shade)) = raster_keys(&view_keys, view, &material, depth_prepass) else {
             continue;
         };
-        for key in prepass.into_iter().chain([shade]) {
-            pipeline.pipelines.entry(key).or_insert_with(|| {
-                pipeline_cache
-                    .queue_render_pipeline(raster_pipeline_descriptor(&mesh_pipeline, key))
-            });
+        for base in prepass.into_iter().chain([shade]) {
+            for key in DrawVariant::ALL.map(|v| base.for_draw(v)) {
+                pipeline.pipelines.entry(key).or_insert_with(|| {
+                    pipeline_cache
+                        .queue_render_pipeline(raster_pipeline_descriptor(&mesh_pipeline, key))
+                });
+            }
         }
     }
 }
@@ -466,6 +489,9 @@ fn raster_pipeline_descriptor(
     if key.normal {
         shader_defs.push("VOXEL_NORMAL".into());
     }
+    if key.masked {
+        shader_defs.push("VOXEL_MASK".into());
+    }
     // The prepass writes depth only; the shading pass after it tests against
     // that depth without writing it, so each pixel is shaded once.
     let (label, fragment_entry, color_writes, depth_write) = match key.pass {
@@ -658,6 +684,11 @@ pub struct VoxelMaterialBindGroup {
     pub has_arm: bool,
     /// Whether `bind_group` holds a real normal map (selects `VOXEL_NORMAL`).
     pub has_normal: bool,
+    /// Distance from the camera past which no material samples its normal
+    /// map (its `normal_fade_end`, or its start if that's later); infinite
+    /// without a normal map. Chunks entirely past it are drawn without
+    /// `VOXEL_NORMAL`, which looks the same.
+    pub normals_end: f32,
     /// Stands in for a palette without an ARM texture.
     dummy_arm: TextureView,
     /// Stands in for a palette without a normal map.
@@ -725,6 +756,7 @@ impl FromWorld for VoxelMaterialBindGroup {
             ),
             has_arm: false,
             has_normal: false,
+            normals_end: f32::INFINITY,
             dummy_arm,
             dummy_normal,
         }
@@ -828,5 +860,16 @@ pub fn update_voxel_material_bind_group(
     );
     material.has_arm = arm.is_some();
     material.has_normal = normal.is_some();
+    // The shader's fade reaches 0 at the end, or just past the start when
+    // the end is before it (see sample_material in voxel_raster.wesl).
+    material.normals_end = if normal.is_some() {
+        extracted
+            .materials
+            .iter()
+            .map(|m| m.normal_fade_end.max(m.normal_fade_start + 1e-3))
+            .fold(0.0, f32::max)
+    } else {
+        f32::INFINITY
+    };
     *built_for = Some(ids);
 }
