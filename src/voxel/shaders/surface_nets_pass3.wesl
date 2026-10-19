@@ -251,8 +251,39 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
     return MaterialBlend(id_a, id_b, weight_u8);
 }
 
-fn pack_material_a(id_a: u32, weight_u8: u32) -> f32 {
-    let packed = (id_a & 0xFFu) | ((weight_u8 & 0xFFu) << 8u) | 0x3F800000u;
+// Whether every material texel the raster could read for a pixel within a
+// cell of `p` (texel space) is `id`: the raster reads the 8 texels from
+// floor(pixel position), clamped to the volume (fragment_material_blend in
+// voxel_raster.wesl), and a triangle's vertices sit in neighbouring cells,
+// so this covers every pixel of a triangle whose three vertices are all
+// uniform. Lets the raster skip its per-pixel material lookup there.
+fn uniform_material_near(material_base: u32, p: vec3<f32>, id: u32) -> bool {
+    let ts = uniforms.texture_size;
+    let base = vec3<i32>(floor(p));
+    // Four ids per word, x fastest: a row of 4 texels is mostly one or two
+    // words, so reuse the last one instead of loading it again.
+    var word_idx = 0xFFFFFFFFu;
+    var word = 0u;
+    for (var i = 0u; i < 64u; i++) {
+        let o = vec3<i32>(i32(i & 3u), i32((i >> 2u) & 3u), i32(i >> 4u)) - vec3<i32>(1);
+        let c = vec3<u32>(clamp(base + o, vec3<i32>(0), vec3<i32>(i32(ts) - 1)));
+        let elem = material_base + flatten_sdf_idx(c, ts);
+        if (elem / 4u != word_idx) {
+            word_idx = elem / 4u;
+            word = material_buffer[word_idx];
+        }
+        if (((word >> ((elem % 4u) * 8u)) & 0xFFu) != id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Bit 16: the vertex's material neighbourhood is uniform (see
+// uniform_material_near).
+fn pack_material_a(id_a: u32, weight_u8: u32, uniform_mat: bool) -> f32 {
+    let packed = (id_a & 0xFFu) | ((weight_u8 & 0xFFu) << 8u) | (select(0u, 1u, uniform_mat) << 16u)
+        | 0x3F800000u;
     return bitcast<f32>(packed);
 }
 
@@ -555,6 +586,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         var lo = seam.lo;
         var step = seam.step;
         var vert = seam.vert;
+        let own_cell = vert.w == 0.0;
         if (vert.w == 0.0) {
             lo = id;
             step = vec3<u32>(1u);
@@ -569,9 +601,15 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let span = texel_pos(lo + step) - p_lo; // 0 on flattened axes
         let frac = select(vec3<f32>(0.0), (vert_pos - p_lo) / span, span > vec3<f32>(0.0));
         let blend = tally_corner_materials(sdf_base, lo, step, frac);
+        // Seam vertices, and vertices next to the last cell row (stretched
+        // to a coarser neighbour's spacing), can put their triangles past
+        // the neighbourhood uniform_material_near checks.
+        let uniform_mat = own_cell && blend.id_a == blend.id_b
+            && all(id < vec3<u32>(uniforms.cell_count - 2u))
+            && uniform_material_near(sdf_base, vert_pos, blend.id_a);
 
         vertex_buffer[vert_idx] = Vertex(
-            vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8)),
+            vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8, uniform_mat)),
             vec4<f32>(normal, pack_material_b(blend.id_b, real_slot))
         );
     }

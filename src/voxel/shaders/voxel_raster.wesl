@@ -127,6 +127,10 @@ struct VertexOutput {
     // chunk, so this is constant across the triangle regardless of
     // interpolation mode; flat avoids any float-precision surprises).
     @location(5) @interpolate(flat) real_slot: u32,
+    // (1, id) at a vertex whose material neighbourhood is all `id`, else
+    // (0, 0); see uniform_material_near in pass3. Interpolated, so x is 1
+    // only where every vertex of the triangle is uniform.
+    @location(6) uniform_mat: vec2<f32>,
 };
 
 // Width of the transition band, measured in |normal| units. Smaller = harder,
@@ -162,6 +166,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let packed_b = bitcast<u32>(input.normal.w);
 
     out.material_id_a = packed_a & 0xFFu;
+    let uniform_flag = f32((packed_a >> 16u) & 1u);
+    out.uniform_mat = vec2<f32>(uniform_flag, uniform_flag * f32(out.material_id_a));
     let weight_u8 = (packed_a >> 8u) & 0xFFu;
     out.blend_weight = f32(weight_u8) / 255.0; // 0.0 = fully id_b, 1.0 = fully id_a
 
@@ -353,7 +359,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let N = normalize(in.world_normal);
     let view_dist = distance(in.world_position, view.world_position);
-    let blend = fragment_material_blend(in.real_slot, in.world_position);
+    // The same result fragment_material_blend gives when all 8 corners agree,
+    // without its 8 lookups.
+    var blend: FragBlend;
+    if (in.uniform_mat.x > 0.9999) {
+        let id = u32(round(in.uniform_mat.y / in.uniform_mat.x));
+        blend = FragBlend(id, id, 1.0);
+    } else {
+        blend = fragment_material_blend(in.real_slot, in.world_position);
+    }
 
     // Decide which materials are actually needed.
     let t = smoothstep(0.35, 0.65, blend.w);
