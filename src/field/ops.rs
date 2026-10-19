@@ -107,6 +107,16 @@ fn sphere_range(center: Vec3, radius: f32, size: UVec3) -> Option<(UVec3, UVec3)
     grid_range(min, max)
 }
 
+/// A CSG edit worked out but not yet written (see
+/// `FieldSphereOps::csg_sphere_delta`).
+#[derive(Default)]
+pub struct CsgDelta {
+    /// Each changed voxel and its new signed distance.
+    writes: Vec<(UVec3, f32)>,
+    /// The voxels it turns from outside to inside.
+    filled: Vec<UVec3>,
+}
+
 /// Runs `work` over `lo..=hi` split into contiguous ranges on the compute task
 /// pool, returning the results in range order. Small ranges run inline.
 fn parallel_slabs<R: Send + 'static>(
@@ -279,10 +289,30 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         T: SignedDistance,
         Self: Sync,
     {
+        let delta = self.csg_sphere_delta(center, radius, reach, subtract, max_step, beyond);
+        self.apply_csg_delta(delta)
+    }
+
+    /// `csg_sphere`'s new values, without writing them: only reads `self`,
+    /// so several chunks' edits can be worked out at once (and read each
+    /// other's borders through `beyond`) before any is written.
+    fn csg_sphere_delta(
+        &self,
+        center: Vec3,
+        radius: f32,
+        reach: f32,
+        subtract: bool,
+        max_step: Option<f32>,
+        beyond: impl Fn(UVec3, usize, bool) -> Option<f32> + Sync,
+    ) -> CsgDelta
+    where
+        T: SignedDistance,
+        Self: Sync,
+    {
         let outer = radius + reach;
         let size = self.size();
         let Some((min, max)) = sphere_range(center, outer, size) else {
-            return Vec::new();
+            return CsgDelta::default();
         };
         let read = |v: UVec3| self.get(v.x, v.y, v.z).distance();
         // The two neighbours of `v` along `axis`, from `beyond` past a face.
@@ -365,15 +395,24 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             }
             (out, filled)
         };
-        let slabs = parallel_slabs(min.z, max.z, slab);
-        let mut filled = Vec::new();
-        for (out, slab_filled) in slabs {
-            for (v, value) in out {
-                self.set(v.x, v.y, v.z, T::from_signed_distance(value));
-            }
-            filled.extend(slab_filled);
+        let mut delta = CsgDelta::default();
+        for (out, filled) in parallel_slabs(min.z, max.z, slab) {
+            delta.writes.extend(out);
+            delta.filled.extend(filled);
         }
-        filled
+        delta
+    }
+
+    /// Writes a `csg_sphere_delta`. Returns the voxels it turns from outside
+    /// to inside.
+    fn apply_csg_delta(&mut self, delta: CsgDelta) -> Vec<UVec3>
+    where
+        T: SignedDistance,
+    {
+        for (v, value) in delta.writes {
+            self.set(v.x, v.y, v.z, T::from_signed_distance(value));
+        }
+        delta.filled
     }
 
     /// `voxels` plus their face neighbours that are outside (air): what a

@@ -11,7 +11,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use super::{
     EditableChunks, Field, SDF, VoxelField,
     editor::{EditFieldMessage, EditMode},
-    ops::{AccumulateExt, BlendExt, ShapeBounds, ShapeScale},
+    ops::{AccumulateExt, BlendExt, CsgDelta, ShapeBounds, ShapeScale},
 };
 use crate::{
     chunk::CHUNK_SIZE,
@@ -24,13 +24,13 @@ use crate::{
         },
         ops::{FieldSphereOps, ShapeEditOps},
     },
-    num::{f32_from_u32, usize_from},
+    num::f32_from_u32,
     voxel::resident::ForceResident,
 };
 use bevy::{
     ecs::message::MessageReader,
     prelude::*,
-    tasks::{AsyncComputeTaskPool, Task, block_on, poll_once},
+    tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
 };
 
 const MAX_DEFER_FRAMES: u32 = 600;
@@ -286,81 +286,36 @@ where
 
 const SDF_CSG_REACH_VOXELS: f32 = 4.0;
 
-/// A chunk's faces as (axis, positive): -x, +x, -y, +y, -z, +z.
-const FACES: [(usize, bool); 6] = [
-    (0, false),
-    (0, true),
-    (1, false),
-    (1, true),
-    (2, false),
-    (2, true),
-];
-
-/// A face's voxel at `layer` along `axis` and (a, b) along the other two
-/// axes, lower axis first.
-const fn face_voxel(axis: usize, layer: u32, a: u32, b: u32) -> UVec3 {
-    match axis {
-        0 => UVec3::new(layer, a, b),
-        1 => UVec3::new(a, layer, b),
-        _ => UVec3::new(a, b, layer),
-    }
+/// One chunk's share of a CSG edit, ready to work out.
+struct CsgWork {
+    entity: Entity,
+    chunk_pos: IVec3,
+    op: SdfCsgSphere,
 }
 
-/// The voxel layer just past each face of a chunk, copied from its face
-/// neighbours: what a gradient on the chunk's border reads (see
-/// `FieldSphereOps::csg_sphere`). Gathered for every chunk before any is
-/// edited, so they all step from the same state. A face whose neighbour
-/// isn't loaded at the same LOD is `None`.
-struct Halo {
+/// The value one voxel past `sdf`'s face from `v` (on it), read from the
+/// face neighbour in `fields`: what a gradient on the chunk's border reads
+/// (see `FieldSphereOps::csg_sphere`). `None` if that neighbour isn't
+/// loaded at the same LOD.
+fn beyond_face(
+    fields: &HashMap<IVec3, &SDF>,
+    chunk_pos: IVec3,
     size: u32,
-    /// In `FACES` order, each indexed (a, b) with a fastest.
-    faces: [Option<Vec<f32>>; 6],
-}
-
-impl Halo {
-    fn gather(pos: IVec3, chunks: &ChunkManager, editable: &EditableChunks<SDF>) -> Option<Self> {
-        let size = chunks
-            .get_chunk(&pos)
-            .and_then(|e| editable.get(e))?
-            .size()
-            .x;
-        let last = size.saturating_sub(1);
-        let faces = FACES.map(|(axis, positive)| {
-            let step = IVec3::AXES.get(axis).copied().unwrap_or(IVec3::X);
-            let neighbour = if positive {
-                pos.saturating_add(step)
-            } else {
-                pos.saturating_sub(step)
-            };
-            let sdf = chunks
-                .get_chunk(&neighbour)
-                .and_then(|e| editable.get(e))
-                .filter(|sdf| sdf.size().x == size)?;
-            // The neighbour's layer that touches this chunk.
-            let layer = if positive { 0 } else { last };
-            Some(
-                (0..size)
-                    .flat_map(|b| (0..size).map(move |a| face_voxel(axis, layer, a, b)))
-                    .map(|v| sdf.get(v.x, v.y, v.z))
-                    .collect(),
-            )
-        });
-        Some(Self { size, faces })
-    }
-
-    /// The value one voxel past this chunk's face from `v`, on it.
-    fn get(&self, v: UVec3, axis: usize, positive: bool) -> Option<f32> {
-        let face = FACES.iter().position(|&f| f == (axis, positive))?;
-        let (a, b) = match axis {
-            0 => (v.y, v.z),
-            1 => (v.x, v.z),
-            _ => (v.x, v.y),
-        };
-        let i = usize_from(b)
-            .checked_mul(usize_from(self.size))?
-            .checked_add(usize_from(a))?;
-        self.faces.get(face)?.as_ref()?.get(i).copied()
-    }
+    v: UVec3,
+    axis: usize,
+    positive: bool,
+) -> Option<f32> {
+    let step = IVec3::AXES.get(axis).copied().unwrap_or(IVec3::X);
+    let neighbour = if positive {
+        chunk_pos.saturating_add(step)
+    } else {
+        chunk_pos.saturating_sub(step)
+    };
+    let sdf = fields.get(&neighbour).filter(|sdf| sdf.size().x == size)?;
+    // The neighbour's layer that touches this chunk.
+    let mut n = v;
+    n[axis] = if positive { 0 } else { size.saturating_sub(1) };
+    Some(sdf.get(n.x, n.y, n.z))
 }
 
 pub fn process_sdf_csg_spheres(
@@ -373,63 +328,120 @@ pub fn process_sdf_csg_spheres(
     mut paint: MessageWriter<MaterialPaintVoxels>,
 ) {
     let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
-    let new: Vec<_> = events
-        .read()
-        .map(|&op| {
-            resident.touch_sphere(op.center, op.radius + reach_world);
-            (op.center, Vec3::splat(op.radius + reach_world), op)
-        })
-        .collect();
-    // Gradual edits read their neighbours' borders (see `Halo`).
-    let mut halos = HashMap::new();
-    let gradual = new
-        .iter()
-        .filter(|(_, _, op)| op.max_step.is_some())
-        .flat_map(|&(center, half, _)| overlapping_chunks(center, half))
-        .chain(
-            deferred
-                .iter()
-                .filter(|d| d.edit.max_step.is_some())
-                .map(|d| d.chunk_pos),
+    // Like `apply_edits`: last frame's retries first, then the new edits on
+    // every chunk they overlap.
+    let mut queued = std::mem::take(&mut *deferred);
+    for op in events.read() {
+        resident.touch_sphere(op.center, op.radius + reach_world);
+        let half = Vec3::splat(op.radius + reach_world);
+        queued.extend(
+            overlapping_chunks(op.center, half).map(|chunk_pos| DeferredEdit {
+                chunk_pos,
+                edit: *op,
+                age: 0,
+            }),
         );
-    for pos in gradual {
-        let Some(entity) = chunk_manager.get_chunk(&pos) else {
-            continue;
+    }
+
+    // The editable ones go into waves, each chunk at most once per wave, so
+    // a chunk hit by several edits takes them in order.
+    let mut waves: Vec<Vec<CsgWork>> = Vec::new();
+    let mut wave_of: HashMap<Entity, usize> = HashMap::new();
+    for mut e in queued {
+        let Some(entity) = chunk_manager.get_chunk(&e.chunk_pos) else {
+            continue; // chunk not loaded / gone: nothing to edit
         };
-        if let Entry::Vacant(slot) = halos.entry(entity)
-            && let Some(halo) = Halo::gather(pos, &chunk_manager, &editable)
-        {
-            slot.insert(halo);
+        if editable.get_mut(entity).is_some() {
+            let wave = wave_of.entry(entity).or_insert(0);
+            if waves.len() <= *wave {
+                waves.push(Vec::new());
+            }
+            if let Some(w) = waves.get_mut(*wave) {
+                w.push(CsgWork {
+                    entity,
+                    chunk_pos: e.chunk_pos,
+                    op: e.edit,
+                });
+            }
+            *wave = wave.saturating_add(1);
+        } else {
+            e.age = e.age.saturating_add(1); // waiting for the chunk to reach max LOD
+            if e.age < MAX_DEFER_FRAMES {
+                deferred.push(e);
+            } else {
+                warn!(
+                    "[csg] chunk {:?} never reached MaxEditLod, edit dropped",
+                    e.chunk_pos
+                );
+            }
         }
     }
-    apply_edits(
-        &mut deferred,
-        new,
-        &chunk_manager,
-        &mut editable,
-        |chunk, sdf, origin, voxel_size, op| {
-            // No DirtyField: CSG output is already a valid distance field.
-            // `set` bumps version/inside_count, which drives re-extract.
-            let filled = sdf.csg_sphere(
-                (op.center - origin) / voxel_size,
-                op.radius / voxel_size,
-                SDF_CSG_REACH_VOXELS,
-                op.subtract,
-                op.max_step.map(|s| s / voxel_size),
-                |v, axis, positive| halos.get(&chunk)?.get(v, axis, positive),
-            );
-            if let Some(material) = op.paint
+    if deferred.len() > MAX_DEFERRED {
+        let excess = deferred.len().saturating_sub(MAX_DEFERRED);
+        deferred.drain(..excess); // drop the oldest
+    }
+
+    for wave in waves {
+        // Every chunk of the wave is worked out from the same state, reading
+        // its neighbours' borders directly, on every core; then all are
+        // written. No DirtyField: CSG output is already a valid distance
+        // field. `set` bumps version/inside_count, which drives re-extract.
+        let deltas: Vec<CsgDelta> = {
+            let mut fields: HashMap<IVec3, &SDF> = HashMap::new();
+            for w in &wave {
+                for offset in [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y]
+                    .into_iter()
+                    .chain([IVec3::Z, IVec3::NEG_Z])
+                {
+                    let pos = w.chunk_pos.saturating_add(offset);
+                    if let Entry::Vacant(slot) = fields.entry(pos)
+                        && let Some(sdf) =
+                            chunk_manager.get_chunk(&pos).and_then(|e| editable.get(e))
+                    {
+                        slot.insert(sdf);
+                    }
+                }
+            }
+            let fields = &fields;
+            ComputeTaskPool::get().scope(|s| {
+                for w in &wave {
+                    s.spawn(async move {
+                        let Some(sdf) = fields.get(&w.chunk_pos) else {
+                            return CsgDelta::default();
+                        };
+                        let size = sdf.size().x;
+                        let origin = w.chunk_pos.as_vec3() * CHUNK_SIZE;
+                        let voxel_size = CHUNK_SIZE / f32_from_u32(size);
+                        sdf.csg_sphere_delta(
+                            (w.op.center - origin) / voxel_size,
+                            w.op.radius / voxel_size,
+                            SDF_CSG_REACH_VOXELS,
+                            w.op.subtract,
+                            w.op.max_step.map(|s| s / voxel_size),
+                            |v, axis, positive| {
+                                beyond_face(fields, w.chunk_pos, size, v, axis, positive)
+                            },
+                        )
+                    });
+                }
+            })
+        };
+        for (w, delta) in wave.iter().zip(deltas) {
+            let Some(mut sdf) = editable.get_mut(w.entity) else {
+                continue;
+            };
+            let filled = sdf.apply_csg_delta(delta);
+            if let Some(material) = w.op.paint
                 && !filled.is_empty()
             {
                 paint.write(MaterialPaintVoxels {
-                    chunk,
+                    chunk: w.entity,
                     voxels: sdf.with_air_neighbours(&filled),
                     material,
                 });
             }
-        },
-        |chunk_pos| warn!("[csg] chunk {chunk_pos:?} never reached MaxEditLod, edit dropped"),
-    );
+        }
+    }
 }
 
 pub fn process_sdf_sculpts(
