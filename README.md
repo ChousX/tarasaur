@@ -225,7 +225,8 @@ cargo run --release --example sandbox
 
 ## Development
 
-`nix develop` gives you the toolchain, Vulkan, Tracy and RenderDoc. Without
+[devenv](https://devenv.sh) (`devenv shell`, or `direnv allow` once) gives you
+the toolchain, Vulkan, Tracy and RenderDoc. Without
 Nix, use a recent Rust (edition 2024) and Bevy's
 [Linux dependencies](https://github.com/bevyengine/bevy/blob/main/docs/linux_dependencies.md).
 

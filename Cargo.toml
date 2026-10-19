@@ -17,8 +17,10 @@ exclude = [
     "/docs",
     "/tools",
     "/nix",
-    "/flake.nix",
-    "/flake.lock",
+    "/devenv.nix",
+    "/devenv.yaml",
+    "/devenv.lock",
+    "/.envrc",
     "/clippy.toml",
     "/.gitignore",
 ]

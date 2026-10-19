@@ -3,3 +3,8 @@ events.txt
 /saves
 /bench_results
 /captures
+
+# devenv
+.devenv*
+devenv.local.nix
+.direnv
