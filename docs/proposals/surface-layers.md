@@ -99,9 +99,10 @@ pub trait LayerRaster: Send + Sync + 'static {
     /// Which Bevy pass to draw in. Opaque layers draw after
     /// `main_opaque_pass_3d`; transparent ones after `main_transparent_pass_3d`,
     /// back to front per chunk, without writing depth.
-    const PASS: LayerPass;
-    const BLEND: Option<BlendState>;
-    const CULL: Option<Face>;
+    const PASS: LayerPass = LayerPass::Opaque;
+    /// `None` is `BlendState::REPLACE`.
+    const BLEND: Option<BlendState> = None;
+    const CULL: Option<Face> = Some(Face::Back);
     /// The shader; `vs_main` is shared, `fs_main` is the layer's.
     fn shader() -> Handle<Shader>;
     /// Group 2's layout and bind group. The palette raster binds the texture
@@ -109,12 +110,20 @@ pub trait LayerRaster: Send + Sync + 'static {
     fn material_layout(device: &RenderDevice) -> BindGroupLayout;
     fn material_bind_group(world: &mut World, layout: &BindGroupLayout) -> Option<BindGroup>;
     /// Shader defs this raster specializes on, from its own resources
-    /// (the palette's `arm` and `normal` today).
-    fn specialize(world: &World) -> Vec<ShaderDefVal>;
+    /// (the palette's `arm` and `normal` today). Default: none.
+    fn specialize(_world: &World) -> Vec<ShaderDefVal> {
+        Vec::new()
+    }
 }
 
 pub enum LayerPass { Opaque, Transparent }
 ```
+
+Every const has a default, and the defaults are the terrain's: a raster
+that only supplies `shader`, `material_layout` and `material_bind_group`
+draws opaque, unblended and back-face culled, exactly as the palette does.
+The only required items on either trait are the ones with no sensible
+default: the shape field, the raster, its shader and its bind group.
 
 The terrain's raster becomes `PaletteRaster`, which is today's code moved:
 `material_layout_entries`, `material_bind_group`, `update_voxel_material_bind_group`
