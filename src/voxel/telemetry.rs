@@ -38,8 +38,9 @@ pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, layers: Res<VoxelLaye
     if !telemetry.0 {
         return;
     }
-    let arenas = layers.iter().flat_map(|(layer, set)| {
-        set.arenas
+    let arenas = layers.iter().flat_map(|(layer, l)| {
+        l.set
+            .arenas
             .iter()
             .enumerate()
             .flat_map(move |(rank, arenas)| {

@@ -84,7 +84,7 @@ static NO_ARENAS: [Vec<super::arena::VoxelChunkArena>; LOD::COUNT] =
 
 impl ArenaInspector<'_> {
     fn terrain(&self) -> Option<&VoxelChunkArenaSet> {
-        self.layers.get(LayerIndex::TERRAIN)
+        self.layers.set(LayerIndex::TERRAIN)
     }
 
     fn arenas(&self) -> &[Vec<super::arena::VoxelChunkArena>; LOD::COUNT] {

@@ -31,8 +31,8 @@ pub(crate) mod upload;
 pub(crate) mod util;
 
 pub use arena::ArenaConfig;
-pub use layer::{LayerIndex, VoxelLayers};
-pub use pipeline::VoxelDepthPrepass;
+pub use layer::{LayerDesc, LayerIndex, LayerMaterial, LayerPass, LayerRaster, VoxelLayers};
+pub use pipeline::{PaletteRaster, VoxelDepthPrepass};
 pub use telemetry::GuardTelemetry;
 pub use upload::RemeshBudget;
 
@@ -58,13 +58,10 @@ use crate::{
             prepare_voxel_view_draws,
         },
         extract::extract_removed,
-        layer::FieldLayer,
+        layer::{FieldLayer, create_layer_layouts, update_layer_materials},
         mesh::dispatch_voxel_compute_passes_batched,
-        pipeline::{
-            VoxelMaterialBindGroup, VoxelRasterPipeline, queue_voxel_raster_pipelines,
-            update_voxel_material_bind_group,
-        },
-        raster::voxel_raster_pass,
+        pipeline::{VoxelRasterPipeline, queue_voxel_raster_pipelines},
+        raster::{voxel_raster_pass_opaque, voxel_raster_pass_transparent},
         resident::{ForceResident, lease_chunks_near_camera, tick_force_resident},
         telemetry::map_guard_readbacks,
         upload::{prepare_mask_upload, prepare_material_upload, prepare_shape_upload},
@@ -126,7 +123,10 @@ pub(crate) fn register_field_upload<F: VoxelField>(app: &mut App) {
         return;
     };
     let layer = match F::GPU {
-        GpuChannel::Shape => render_app.world_mut().resource_mut::<VoxelLayers>().add(),
+        GpuChannel::Shape => render_app
+            .world_mut()
+            .resource_mut::<VoxelLayers>()
+            .add(LayerDesc::of::<PaletteRaster>()),
         // Side channels ride along with the terrain's shape.
         _ => LayerIndex::TERRAIN,
     };
@@ -162,6 +162,7 @@ pub struct VoxelRenderPlugin;
 /// embedded asset is what gives it that path.
 fn load_shaders(app: &mut App) {
     load_shader_library!(app, "shaders/voxel_common.wesl");
+    load_shader_library!(app, "shaders/voxel_raster_vertex.wesl");
     load_internal_asset!(
         app,
         DRAW_COMPACTION_SHADER_HANDLE,
@@ -231,10 +232,10 @@ impl Plugin for VoxelRenderPlugin {
             .add_systems(
                 Render,
                 (
-                    update_voxel_material_bind_group.in_set(RenderSystems::Prepare),
+                    update_layer_materials.in_set(RenderSystems::Prepare),
                     queue_voxel_raster_pipelines
                         .in_set(RenderSystems::Prepare)
-                        .after(update_voxel_material_bind_group),
+                        .after(update_layer_materials),
                     prepare_voxel_view_draws
                         .in_set(RenderSystems::Prepare)
                         .after(VoxelPrepareSet::Upload),
@@ -242,14 +243,18 @@ impl Plugin for VoxelRenderPlugin {
                     map_guard_readbacks.in_set(RenderSystems::Cleanup),
                 ),
             )
-            // Opaque terrain: after Bevy's opaque pass, and before its transparent
-            // pass so blended meshes and gizmos land on top of it.
+            // Opaque layers: after Bevy's opaque pass, and before its
+            // transparent pass so blended meshes and gizmos land on top of
+            // them. Transparent layers: after Bevy's transparent pass.
             .add_systems(
                 Core3d,
-                voxel_raster_pass
-                    .in_set(Core3dSystems::MainPass)
-                    .after(main_opaque_pass_3d)
-                    .before(main_transparent_pass_3d),
+                (
+                    voxel_raster_pass_opaque
+                        .after(main_opaque_pass_3d)
+                        .before(main_transparent_pass_3d),
+                    voxel_raster_pass_transparent.after(main_transparent_pass_3d),
+                )
+                    .in_set(Core3dSystems::MainPass),
             );
     }
 
@@ -260,9 +265,9 @@ impl Plugin for VoxelRenderPlugin {
 
         render_app
             .init_resource::<VoxelRasterPipeline>()
-            .init_resource::<VoxelMaterialBindGroup>()
             .init_resource::<VoxelPipelineLayouts>()
             .init_resource::<VoxelComputePipeline>()
             .init_resource::<VoxelDrawPipeline>();
+        create_layer_layouts(render_app.world_mut());
     }
 }

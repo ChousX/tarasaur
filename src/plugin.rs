@@ -110,7 +110,7 @@ impl TarasaurPlugin {
         if let Some(terrain) = render_app
             .world_mut()
             .resource_mut::<VoxelLayers>()
-            .get_mut(LayerIndex::TERRAIN)
+            .set_mut(LayerIndex::TERRAIN)
         {
             terrain.config = self.arenas.clone();
         }

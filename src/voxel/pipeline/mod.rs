@@ -1,5 +1,5 @@
 //! Pipelines and bind groups: the meshing and query compute pipelines, the
-//! PBR raster pipeline (one per view key) and the palette material.
+//! raster pipelines (one per layer and view key) and the palette raster.
 
 pub mod layouts;
 use bevy::{
@@ -40,7 +40,9 @@ use crate::{
     texture_palette::{MaterialPropertiesGpu, plugin::ExtractedPalette},
     voxel::{
         CURSOR_QUERY_SHADER_HANDLE, SURFACE_NETS_PASS1_SHADER_HANDLE,
-        SURFACE_NETS_PASS3_SHADER_HANDLE, draw::DrawVariant,
+        SURFACE_NETS_PASS3_SHADER_HANDLE, VOXEL_RASTER_SHADER_HANDLE,
+        draw::DrawVariant,
+        layer::{Layer, LayerIndex, LayerMaterial, LayerPass, LayerRaster, VoxelLayers},
     },
 };
 
@@ -145,7 +147,8 @@ pub struct VoxelDepthPrepass(pub bool);
 /// Which of the voxel raster pipelines a key is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RasterPass {
-    /// PBR shading that writes depth (no prepass).
+    /// Shading that writes depth (no prepass). A transparent layer's only
+    /// pass, testing depth without writing it.
     Shade,
     /// Depth only, for the prepass.
     Prepass,
@@ -155,11 +158,13 @@ pub enum RasterPass {
 
 /// What a raster pipeline is specialized on.
 ///
-/// The view's mesh pipeline key (MSAA, target format, tonemapping, prepasses,
-/// fog, light probes, ...), whether the palette has ARM and normal map
-/// textures to sample, and which pass.
+/// The layer (its shader, blend, cull and pass), the view's mesh pipeline
+/// key (MSAA, target format, tonemapping, prepasses, fog, light probes,
+/// ...), whether the palette has ARM and normal map textures to sample, and
+/// which pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoxelRasterKey {
+    pub layer: LayerIndex,
     pub view: MeshPipelineKey,
     pub arm: bool,
     pub normal: bool,
@@ -191,10 +196,9 @@ impl VoxelRasterKey {
 /// Bevy's mesh view bind groups, and each pipeline must be specialized with
 /// the same view key the view's bind group was built for. Like Bevy's
 /// deferred lighting pass, this reads that key from `ViewKeyCache`.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct VoxelRasterPipeline {
     pipelines: HashMap<VoxelRasterKey, CachedRenderPipelineId>,
-    pub material_layout: BindGroupLayout,
 }
 
 impl VoxelRasterPipeline {
@@ -206,39 +210,28 @@ impl VoxelRasterPipeline {
     }
 }
 
-impl FromWorld for VoxelRasterPipeline {
-    fn from_world(world: &mut World) -> Self {
-        let render_device = world.resource::<RenderDevice>();
-        Self {
-            pipelines: HashMap::new(),
-            material_layout: render_device.create_bind_group_layout(
-                Some("voxel_material_layout"),
-                &material_layout_entries(),
-            ),
-        }
-    }
-}
-
-/// The keys a view draws with, in order: the prepass (if on), then the
-/// shading pass, each before `VoxelRasterKey::for_draw` narrows it. `None`
-/// until Bevy has cached the view's mesh pipeline key (it does so in
+/// The keys a view draws `layer` with, in order: the prepass (if on), then
+/// the shading pass, each before `VoxelRasterKey::for_draw` narrows it.
+/// `None` until Bevy has cached the view's mesh pipeline key (it does so in
 /// `PrepareAssets`).
 #[must_use]
 pub fn raster_keys(
     view_keys: &ViewKeyCache,
     view: &ExtractedView,
-    material: &VoxelMaterialBindGroup,
-    depth_prepass: VoxelDepthPrepass,
+    layer: LayerIndex,
+    material: &LayerMaterial,
+    depth_prepass: bool,
 ) -> Option<(Option<VoxelRasterKey>, VoxelRasterKey)> {
     let &view_key = view_keys.get(&view.retained_view_entity)?;
     let key = |textures: bool, pass| VoxelRasterKey {
+        layer,
         view: view_key,
         arm: textures && material.has_arm,
         normal: textures && material.has_normal,
         pass,
         masked: true,
     };
-    Some(if depth_prepass.0 {
+    Some(if depth_prepass {
         (
             Some(key(false, RasterPass::Prepass)),
             key(true, RasterPass::ShadeAfterPrepass),
@@ -248,33 +241,46 @@ pub fn raster_keys(
     })
 }
 
-/// Queues the raster pipelines every camera's view needs.
+/// Queues the raster pipelines every camera's view needs, for every layer
+/// that has a material.
 pub fn queue_voxel_raster_pipelines(
     views: Query<&ExtractedView, With<ExtractedCamera>>,
     view_keys: Res<ViewKeyCache>,
-    material: Res<VoxelMaterialBindGroup>,
+    layers: Res<VoxelLayers>,
     depth_prepass: Option<Res<VoxelDepthPrepass>>,
     mesh_pipeline: Res<MeshPipeline>,
     pipeline_cache: Res<PipelineCache>,
     mut pipeline: ResMut<VoxelRasterPipeline>,
 ) {
     let depth_prepass = depth_prepass.map_or_else(VoxelDepthPrepass::default, |p| *p);
-    for view in &views {
-        let Some((prepass, shade)) = raster_keys(&view_keys, view, &material, depth_prepass) else {
+    for (index, layer) in layers.iter() {
+        let Some(material) = &layer.material else {
             continue;
         };
-        for base in prepass.into_iter().chain([shade]) {
-            for key in DrawVariant::ALL.map(|v| base.for_draw(v)) {
-                pipeline.pipelines.entry(key).or_insert_with(|| {
-                    pipeline_cache
-                        .queue_render_pipeline(raster_pipeline_descriptor(&mesh_pipeline, key))
-                });
+        let with_prepass = depth_prepass.0 && layer.raster.pass == LayerPass::Opaque;
+        for view in &views {
+            let Some((prepass, shade)) =
+                raster_keys(&view_keys, view, index, material, with_prepass)
+            else {
+                continue;
+            };
+            for base in prepass.into_iter().chain([shade]) {
+                for key in DrawVariant::ALL.map(|v| base.for_draw(v)) {
+                    pipeline.pipelines.entry(key).or_insert_with(|| {
+                        pipeline_cache.queue_render_pipeline(raster_pipeline_descriptor(
+                            &mesh_pipeline,
+                            key,
+                            layer,
+                        ))
+                    });
+                }
             }
         }
     }
 }
 
-/// Group 2: the palette (WGSL expects `texture_2d_array<f32>`).
+/// Group 2 of the palette raster: the palette (WGSL expects
+/// `texture_2d_array<f32>`).
 fn material_layout_entries() -> Vec<BindGroupLayoutEntry> {
     let texture_array = |binding| BindGroupLayoutEntry {
         binding,
@@ -478,9 +484,12 @@ const TONEMAP_METHODS: [(MeshPipelineKey, &str); 9] = [
 /// Bevy's `IRRADIANCE_VOLUMES_ARE_USABLE`, which it keeps crate-private.
 const IRRADIANCE_VOLUMES_ARE_USABLE: bool = cfg!(not(target_arch = "wasm32"));
 
+/// The pipeline for `key`, drawing `layer` with its own shader, blend,
+/// cull and pass.
 fn raster_pipeline_descriptor(
     mesh_pipeline: &MeshPipeline,
     key: VoxelRasterKey,
+    layer: &Layer,
 ) -> RenderPipelineDescriptor {
     let mut shader_defs = view_shader_defs(mesh_pipeline, key.view);
     if key.arm {
@@ -492,10 +501,17 @@ fn raster_pipeline_descriptor(
     if key.masked {
         shader_defs.push("VOXEL_MASK".into());
     }
+    let transparent = layer.raster.pass == LayerPass::Transparent;
     // The prepass writes depth only; the shading pass after it tests against
-    // that depth without writing it, so each pixel is shaded once.
+    // that depth without writing it, so each pixel is shaded once. A
+    // transparent layer never writes depth.
     let (label, fragment_entry, color_writes, depth_write) = match key.pass {
-        RasterPass::Shade => ("voxel_raster_pipeline", "fs_main", ColorWrites::ALL, true),
+        RasterPass::Shade => (
+            "voxel_raster_pipeline",
+            "fs_main",
+            ColorWrites::ALL,
+            !transparent,
+        ),
         RasterPass::Prepass => (
             "voxel_depth_prepass_pipeline",
             "fs_prepass",
@@ -507,11 +523,13 @@ fn raster_pipeline_descriptor(
         }
     };
     let view_layout = mesh_pipeline.get_view_layout(key.view.into());
-    let cull_mode = if key.view.contains(MeshPipelineKey::INVERT_CULLING) {
-        Face::Front
-    } else {
-        Face::Back
-    };
+    let inverted = key.view.contains(MeshPipelineKey::INVERT_CULLING);
+    let cull_mode = layer.raster.cull.map(|face| match (face, inverted) {
+        (Face::Back, true) => Face::Front,
+        (Face::Front, true) => Face::Back,
+        (face, false) => face,
+    });
+    let shader = (layer.raster.shader)();
 
     RenderPipelineDescriptor {
         label: Some(label.into()),
@@ -519,50 +537,29 @@ fn raster_pipeline_descriptor(
             view_layout.main_layout,
             view_layout.binding_array_layout,
             BindGroupLayoutDescriptor {
-                label: Cow::Borrowed("voxel_material_layout"),
-                entries: material_layout_entries(),
+                label: Cow::Borrowed(layer.raster.label),
+                entries: (layer.raster.material_layout_entries)(),
             },
             BindGroupLayoutDescriptor {
                 label: Cow::Borrowed("voxel_raster_chunk_visibility_layout"),
                 entries: layouts::raster_chunk_visibility_entries(),
             },
         ],
-        vertex: VertexState {
-            shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
-            entry_point: Some("vs_main".into()),
-            shader_defs: shader_defs.clone(),
-            constants: vec![],
-            buffers: vec![VertexBufferLayout {
-                array_stride: 32,
-                step_mode: VertexStepMode::Vertex,
-                attributes: vec![
-                    VertexAttribute {
-                        format: VertexFormat::Float32x4,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    VertexAttribute {
-                        format: VertexFormat::Float32x4,
-                        offset: 16,
-                        shader_location: 1,
-                    },
-                ],
-            }],
-        },
+        vertex: vertex_state(shader.clone(), shader_defs.clone()),
         fragment: Some(FragmentState {
-            shader: crate::voxel::VOXEL_RASTER_SHADER_HANDLE,
+            shader,
             entry_point: Some(fragment_entry.into()),
             shader_defs,
             constants: vec![],
             targets: vec![Some(ColorTargetState {
                 format: key.view.target_format(),
-                blend: Some(BlendState::REPLACE),
+                blend: Some(layer.raster.blend.unwrap_or(BlendState::REPLACE)),
                 write_mask: color_writes,
             })],
         }),
         primitive: PrimitiveState {
             topology: PrimitiveTopology::TriangleList,
-            cull_mode: Some(cull_mode),
+            cull_mode,
             ..default()
         },
         depth_stencil: Some(DepthStencilState {
@@ -579,6 +576,33 @@ fn raster_pipeline_descriptor(
         },
         zero_initialize_workgroup_memory: false,
         immediate_size: 0,
+    }
+}
+
+/// The vertex stage every layer shares: pass3's 32-byte vertices through
+/// the layer shader's `vs_main`.
+fn vertex_state(shader: Handle<Shader>, shader_defs: Vec<ShaderDefVal>) -> VertexState {
+    VertexState {
+        shader,
+        entry_point: Some("vs_main".into()),
+        shader_defs,
+        constants: vec![],
+        buffers: vec![VertexBufferLayout {
+            array_stride: 32,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![
+                VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 1,
+                },
+            ],
+        }],
     }
 }
 
@@ -674,33 +698,26 @@ fn dummy_texture_array(
     })
 }
 
-/// The bind group actually used by `voxel_raster_pass`. Starts out as a
-/// 1x1 white dummy; `update_voxel_material_bind_group` replaces it once a
-/// real palette's textures have finished loading.
+/// The palette raster's dummies, and what its bind group was last built
+/// from.
 #[derive(Resource)]
-pub struct VoxelMaterialBindGroup {
-    pub bind_group: BindGroup,
-    /// Whether `bind_group` holds a real ARM texture (selects `VOXEL_ARM`).
-    pub has_arm: bool,
-    /// Whether `bind_group` holds a real normal map (selects `VOXEL_NORMAL`).
-    pub has_normal: bool,
-    /// Distance from the camera past which no material samples its normal
-    /// map (its `normal_fade_end`, or its start if that's later); infinite
-    /// without a normal map. Chunks entirely past it are drawn without
-    /// `VOXEL_NORMAL`, which looks the same.
-    pub normals_end: f32,
+struct PaletteState {
+    /// A 1x1 white albedo with no properties: what the terrain is drawn
+    /// with until a palette's textures have loaded.
+    dummy_bind_group: BindGroup,
     /// Stands in for a palette without an ARM texture.
     dummy_arm: TextureView,
     /// Stands in for a palette without a normal map.
     dummy_normal: TextureView,
+    built_for: Option<PaletteIds>,
 }
 
-impl FromWorld for VoxelMaterialBindGroup {
-    fn from_world(world: &mut World) -> Self {
-        let render_device = world.resource::<RenderDevice>();
-        let render_queue = world.resource::<RenderQueue>();
-        let raster_pipeline = world.resource::<VoxelRasterPipeline>();
-
+impl PaletteState {
+    fn new(
+        render_device: &RenderDevice,
+        render_queue: &RenderQueue,
+        layout: &BindGroupLayout,
+    ) -> Self {
         let albedo = dummy_texture_array(
             render_device,
             render_queue,
@@ -740,25 +757,23 @@ impl FromWorld for VoxelMaterialBindGroup {
             contents: bytemuck::cast_slice(&[0.1f32, 4.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
-
+        let dummy_bind_group = material_bind_group(
+            render_device,
+            layout,
+            "voxel_dummy_material_bind_group",
+            &MaterialTextures {
+                albedo: &albedo,
+                arm: &dummy_arm,
+                normal: &dummy_normal,
+            },
+            &sampler,
+            &properties,
+        );
         Self {
-            bind_group: material_bind_group(
-                render_device,
-                &raster_pipeline.material_layout,
-                "voxel_dummy_material_bind_group",
-                &MaterialTextures {
-                    albedo: &albedo,
-                    arm: &dummy_arm,
-                    normal: &dummy_normal,
-                },
-                &sampler,
-                &properties,
-            ),
-            has_arm: false,
-            has_normal: false,
-            normals_end: f32::INFINITY,
+            dummy_bind_group,
             dummy_arm,
             dummy_normal,
+            built_for: None,
         }
     }
 }
@@ -770,106 +785,127 @@ type PaletteIds = (
     Option<AssetId<Image>>,
 );
 
-/// Runs in `RenderSystems::Prepare`.
-///
-/// Rebuilds `VoxelMaterialBindGroup` once the active palette's albedo (and
-/// ARM and normal map, if it has them) images are loaded, and never again after that for the
-/// same handles — in-place edits to palette.materials after the initial
-/// build won't hot-reload; only a handle change (different palette asset)
-/// triggers a rebuild.
-pub fn update_voxel_material_bind_group(
-    render_device: Res<RenderDevice>,
-    raster_pipeline: Res<VoxelRasterPipeline>,
-    gpu_images: Res<RenderAssets<GpuImage>>,
-    extracted: Option<Res<ExtractedPalette>>,
-    mut material: ResMut<VoxelMaterialBindGroup>,
-    mut built_for: Local<Option<PaletteIds>>,
-) {
-    let Some(extracted) = extracted else {
-        return; // No PalettePlugin registered — keep the dummy.
-    };
+/// The terrain's look: triplanar palette texturing, blended between voxel
+/// materials, lit by Bevy's PBR (`voxel_raster.wesl`). Draws with a white
+/// dummy until the active palette's textures have loaded.
+pub struct PaletteRaster;
 
-    let ids = (
-        extracted.albedo.id(),
-        extracted.arm.as_ref().map(Handle::id),
-        extracted.normal.as_ref().map(Handle::id),
-    );
-    if *built_for == Some(ids) {
-        return; // Already built for these exact textures — nothing changed.
+impl LayerRaster for PaletteRaster {
+    fn shader() -> Handle<Shader> {
+        VOXEL_RASTER_SHADER_HANDLE
     }
-    let Some(albedo) = gpu_images.get(&extracted.albedo) else {
-        return; // Not loaded/converted to GPU form yet — try again next frame.
-    };
-    // Wait for optional textures too, so the first build already has them.
-    let optional = |handle: &Option<Handle<Image>>| {
-        handle.as_ref().map_or(Some(None), |handle| {
-            gpu_images
-                .get(handle)
-                .map(|image| Some(&image.texture_view))
+
+    fn material_layout_entries() -> Vec<BindGroupLayoutEntry> {
+        material_layout_entries()
+    }
+
+    /// Rebuilds the bind group once the active palette's albedo (and ARM
+    /// and normal map, if it has them) images are loaded, and never again
+    /// after that for the same handles: in-place edits to
+    /// `palette.materials` after the initial build won't hot-reload; only a
+    /// handle change (a different palette asset) triggers a rebuild.
+    fn material(
+        world: &mut World,
+        layout: &BindGroupLayout,
+        current: Option<&LayerMaterial>,
+    ) -> Option<LayerMaterial> {
+        if !world.contains_resource::<PaletteState>() {
+            let state = PaletteState::new(
+                world.resource::<RenderDevice>(),
+                world.resource::<RenderQueue>(),
+                layout,
+            );
+            world.insert_resource(state);
+        }
+        world.resource_scope::<PaletteState, _>(|world, mut state| {
+            if current.is_none() {
+                return Some(LayerMaterial::plain(state.dummy_bind_group.clone()));
+            }
+            // No PalettePlugin, or no palette yet: keep the dummy.
+            let extracted = world.get_resource::<ExtractedPalette>()?;
+            let ids = (
+                extracted.albedo.id(),
+                extracted.arm.as_ref().map(Handle::id),
+                extracted.normal.as_ref().map(Handle::id),
+            );
+            if state.built_for == Some(ids) {
+                return None; // Already built for these exact textures.
+            }
+            let gpu_images = world.resource::<RenderAssets<GpuImage>>();
+            // Not loaded/converted to GPU form yet: try again next frame.
+            let albedo = gpu_images.get(&extracted.albedo)?;
+            // Wait for optional textures too, so the first build already has them.
+            let optional = |handle: &Option<Handle<Image>>| {
+                handle.as_ref().map_or(Some(None), |handle| {
+                    gpu_images
+                        .get(handle)
+                        .map(|image| Some(&image.texture_view))
+                })
+            };
+            let arm = optional(&extracted.arm)?;
+            let normal = optional(&extracted.normal)?;
+            let render_device = world.resource::<RenderDevice>();
+
+            // A zero-length storage buffer is invalid, so an empty palette
+            // gets one default entry.
+            let mut materials: Vec<MaterialPropertiesGpu> = extracted
+                .materials
+                .iter()
+                .map(MaterialPropertiesGpu::from)
+                .collect();
+            if materials.is_empty() {
+                materials.push(MaterialPropertiesGpu::default());
+            }
+            let properties = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("voxel_material_properties_buffer"),
+                contents: bytemuck::cast_slice(&materials),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            });
+            let sampler = render_device.create_sampler(&SamplerDescriptor {
+                label: Some("voxel_material_sampler"),
+                mag_filter: FilterMode::Linear,
+                min_filter: FilterMode::Linear,
+                // Trilinear: a nearest mip shows hard bands where the level changes.
+                mipmap_filter: MipmapFilterMode::Linear,
+                // Terrain is mostly seen at grazing angles, where isotropic
+                // filtering smears; needs all three filters linear.
+                anisotropy_clamp: MATERIAL_ANISOTROPY,
+                address_mode_u: AddressMode::Repeat,
+                address_mode_v: AddressMode::Repeat,
+                address_mode_w: AddressMode::Repeat,
+                ..default()
+            });
+
+            let bind_group = material_bind_group(
+                render_device,
+                layout,
+                "voxel_material_bind_group",
+                &MaterialTextures {
+                    albedo: &albedo.texture_view,
+                    arm: arm.unwrap_or(&state.dummy_arm),
+                    normal: normal.unwrap_or(&state.dummy_normal),
+                },
+                &sampler,
+                &properties,
+            );
+            // The shader's fade reaches 0 at the end, or just past the start when
+            // the end is before it (see sample_material in voxel_raster.wesl).
+            let normals_end = if normal.is_some() {
+                extracted
+                    .materials
+                    .iter()
+                    .map(|m| m.normal_fade_end.max(m.normal_fade_start + 1e-3))
+                    .fold(0.0, f32::max)
+            } else {
+                f32::INFINITY
+            };
+            state.built_for = Some(ids);
+            Some(LayerMaterial {
+                bind_group,
+                has_arm: arm.is_some(),
+                has_normal: normal.is_some(),
+                normals_end,
+            })
         })
-    };
-    let Some(arm) = optional(&extracted.arm) else {
-        return;
-    };
-    let Some(normal) = optional(&extracted.normal) else {
-        return;
-    };
-
-    // A zero-length storage buffer is invalid, so an empty palette gets one
-    // default entry.
-    let mut materials: Vec<MaterialPropertiesGpu> = extracted
-        .materials
-        .iter()
-        .map(MaterialPropertiesGpu::from)
-        .collect();
-    if materials.is_empty() {
-        materials.push(MaterialPropertiesGpu::default());
     }
-    let properties = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("voxel_material_properties_buffer"),
-        contents: bytemuck::cast_slice(&materials),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-    });
-    let sampler = render_device.create_sampler(&SamplerDescriptor {
-        label: Some("voxel_material_sampler"),
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        // Trilinear: a nearest mip shows hard bands where the level changes.
-        mipmap_filter: MipmapFilterMode::Linear,
-        // Terrain is mostly seen at grazing angles, where isotropic
-        // filtering smears; needs all three filters linear.
-        anisotropy_clamp: MATERIAL_ANISOTROPY,
-        address_mode_u: AddressMode::Repeat,
-        address_mode_v: AddressMode::Repeat,
-        address_mode_w: AddressMode::Repeat,
-        ..default()
-    });
-
-    let material = &mut *material;
-    material.bind_group = material_bind_group(
-        &render_device,
-        &raster_pipeline.material_layout,
-        "voxel_material_bind_group",
-        &MaterialTextures {
-            albedo: &albedo.texture_view,
-            arm: arm.unwrap_or(&material.dummy_arm),
-            normal: normal.unwrap_or(&material.dummy_normal),
-        },
-        &sampler,
-        &properties,
-    );
-    material.has_arm = arm.is_some();
-    material.has_normal = normal.is_some();
-    // The shader's fade reaches 0 at the end, or just past the start when
-    // the end is before it (see sample_material in voxel_raster.wesl).
-    material.normals_end = if normal.is_some() {
-        extracted
-            .materials
-            .iter()
-            .map(|m| m.normal_fade_end.max(m.normal_fade_start + 1e-3))
-            .fold(0.0, f32::max)
-    } else {
-        f32::INFINITY
-    };
-    *built_for = Some(ids);
 }

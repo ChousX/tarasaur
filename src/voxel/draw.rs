@@ -34,8 +34,8 @@ use crate::{
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
         arena::VoxelChunkArena,
-        layer::{LayerIndex, VoxelLayers},
-        pipeline::{VoxelMaterialBindGroup, layouts::storage_buffer_entry},
+        layer::{LayerIndex, LayerPass, VoxelLayers},
+        pipeline::layouts::storage_buffer_entry,
         types::{CreateStorage, DrawIndexedIndirectArgs},
     },
 };
@@ -94,7 +94,7 @@ pub struct DrawVariant {
     /// The chunk has a visibility mask: test it per pixel, and discard.
     pub masked: bool,
     /// The chunk is entirely past every material's normal fade
-    /// (`VoxelMaterialBindGroup::normals_end`): skip normal maps.
+    /// (`Layer::normals_end`): skip normal maps.
     pub far: bool,
 }
 
@@ -237,14 +237,14 @@ fn chunk_distance(arena: &VoxelChunkArena, slot: u32, frustum: &Frustum, eye: Ve
 pub struct DrawInputs<'w> {
     layers: Res<'w, VoxelLayers>,
     pipeline: Res<'w, VoxelDrawPipeline>,
-    material: Res<'w, VoxelMaterialBindGroup>,
     device: Res<'w, RenderDevice>,
     queue: Res<'w, RenderQueue>,
 }
 
 /// Culls every arena against every camera's frustum, sorts the visible
-/// chunks front to back and splits them by `DrawVariant`, and uploads them.
-/// Runs after the arenas' uploads for the frame.
+/// chunks front to back (back to front for a transparent layer) and splits
+/// them by `DrawVariant`, and uploads them. Runs after the arenas' uploads
+/// for the frame.
 pub fn prepare_voxel_view_draws(
     views: Query<(Entity, &Frustum, &ExtractedView), With<ExtractedCamera>>,
     inputs: DrawInputs,
@@ -255,7 +255,6 @@ pub fn prepare_voxel_view_draws(
     let DrawInputs {
         layers,
         pipeline,
-        material,
         device,
         queue,
     } = inputs;
@@ -263,26 +262,32 @@ pub fn prepare_voxel_view_draws(
     for (view, frustum, extracted) in &views {
         let eye = extracted.world_from_view.translation();
         let per_view = draws.0.entry(view).or_default();
-        let arenas = layers.iter().flat_map(|(layer, set)| {
-            set.arenas
+        let arenas = layers.iter().flat_map(|(layer, l)| {
+            l.set
+                .arenas
                 .iter()
                 .enumerate()
                 .flat_map(move |(lod, arenas)| {
                     arenas
                         .iter()
                         .enumerate()
-                        .map(move |(index, arena)| (layer, lod, index, arena))
+                        .map(move |(index, arena)| (layer, l, lod, index, arena))
                 })
         });
-        for (layer, lod, index, arena) in arenas {
+        for (layer, l, lod, index, arena) in arenas {
             {
                 // Front to back, so nearer terrain can hide what's behind
-                // it before that is shaded.
+                // it before that is shaded; a transparent layer the other
+                // way, so what's behind shows through what's in front.
                 by_distance.clear();
                 by_distance.extend(arena.active_slots.iter().filter_map(|&slot| {
                     chunk_distance(arena, slot, frustum, eye).map(|d| (d, slot))
                 }));
                 by_distance.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                if l.raster.pass == LayerPass::Transparent {
+                    by_distance.reverse();
+                }
+                let normals_end = l.normals_end();
                 for list in &mut *visible {
                     list.clear();
                     list.push(0); // count, filled in below
@@ -294,7 +299,7 @@ pub fn prepare_voxel_view_draws(
                             .get(usize_from(slot))
                             .copied()
                             .unwrap_or(true),
-                        far: distance >= material.normals_end,
+                        far: distance >= normals_end,
                     };
                     if let Some(list) = visible.get_mut(variant.index()) {
                         list.push(slot);
@@ -354,17 +359,17 @@ pub fn prepare_voxel_view_draws(
 
 /// Packs one view's visible draw arguments. Record it before the view's
 /// render pass, in the same encoder.
-pub fn encode_draw_compaction(
+pub fn encode_draw_compaction<'a>(
     encoder: &mut CommandEncoder,
     pipeline: &ComputePipeline,
-    draws: &[ArenaDraws],
+    draws: impl Iterator<Item = &'a ArenaDraws>,
 ) {
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("voxel_draw_compaction"),
         timestamp_writes: None,
     });
     pass.set_pipeline(pipeline);
-    for d in draws.iter().filter(|d| d.count > 0) {
+    for d in draws.filter(|d| d.count > 0) {
         pass.set_bind_group(0, &d.bind_group, &[]);
         pass.dispatch_workgroups(d.count.div_ceil(WORKGROUP_SIZE), 1, 1);
     }

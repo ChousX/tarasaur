@@ -114,7 +114,7 @@ fn send_frame_stats(
     };
     let deferred = layers
         .iter()
-        .map(|(_, set)| set.deferred.len())
+        .map(|(_, l)| l.set.deferred.len())
         .fold(0, usize::saturating_add);
     if let Ok(mut out) = channel.0.lock() {
         out.draws = draws.total();
