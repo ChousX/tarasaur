@@ -33,7 +33,8 @@ use crate::{
     chunk::CHUNK_SIZE,
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
-        arena::{VoxelChunkArena, VoxelChunkArenaSet},
+        arena::VoxelChunkArena,
+        layer::{LayerIndex, VoxelLayers},
         pipeline::{VoxelMaterialBindGroup, layouts::storage_buffer_entry},
         types::{CreateStorage, DrawIndexedIndirectArgs},
     },
@@ -129,8 +130,10 @@ impl DrawVariant {
 
 /// One arena's visible chunks of one `DrawVariant`, for one view.
 pub struct ArenaDraws {
-    /// Where the arena is in `VoxelChunkArenaSet::arenas` (LOD, index).
-    /// Arenas are only ever appended, so this stays valid.
+    /// Where the arena is: its layer, then (LOD, index) in that layer's
+    /// `VoxelChunkArenaSet::arenas`. Layers and arenas are only ever
+    /// appended, so this stays valid.
+    pub layer: LayerIndex,
     pub lod: usize,
     pub arena: usize,
     pub variant: DrawVariant,
@@ -147,6 +150,7 @@ impl ArenaDraws {
         device: &RenderDevice,
         layout: &BindGroupLayout,
         arena: &VoxelChunkArena,
+        layer: LayerIndex,
         lod: usize,
         index: usize,
         variant: DrawVariant,
@@ -181,6 +185,7 @@ impl ArenaDraws {
             ],
         );
         Self {
+            layer,
             lod,
             arena: index,
             variant,
@@ -230,7 +235,7 @@ fn chunk_distance(arena: &VoxelChunkArena, slot: u32, frustum: &Frustum, eye: Ve
 /// What `prepare_voxel_view_draws` reads.
 #[derive(SystemParam)]
 pub struct DrawInputs<'w> {
-    arena_set: Res<'w, VoxelChunkArenaSet>,
+    layers: Res<'w, VoxelLayers>,
     pipeline: Res<'w, VoxelDrawPipeline>,
     material: Res<'w, VoxelMaterialBindGroup>,
     device: Res<'w, RenderDevice>,
@@ -248,7 +253,7 @@ pub fn prepare_voxel_view_draws(
     mut by_distance: Local<Vec<(f32, u32)>>,
 ) {
     let DrawInputs {
-        arena_set,
+        layers,
         pipeline,
         material,
         device,
@@ -258,8 +263,19 @@ pub fn prepare_voxel_view_draws(
     for (view, frustum, extracted) in &views {
         let eye = extracted.world_from_view.translation();
         let per_view = draws.0.entry(view).or_default();
-        for (lod, arenas) in arena_set.arenas.iter().enumerate() {
-            for (index, arena) in arenas.iter().enumerate() {
+        let arenas = layers.iter().flat_map(|(layer, set)| {
+            set.arenas
+                .iter()
+                .enumerate()
+                .flat_map(move |(lod, arenas)| {
+                    arenas
+                        .iter()
+                        .enumerate()
+                        .map(move |(index, arena)| (layer, lod, index, arena))
+                })
+        });
+        for (layer, lod, index, arena) in arenas {
+            {
                 // Front to back, so nearer terrain can hide what's behind
                 // it before that is shaded.
                 by_distance.clear();
@@ -290,8 +306,9 @@ pub fn prepare_voxel_view_draws(
                     if let Some(first) = list.first_mut() {
                         *first = count;
                     }
-                    let is_this =
-                        |d: &ArenaDraws| d.lod == lod && d.arena == index && d.variant == variant;
+                    let is_this = |d: &ArenaDraws| {
+                        d.layer == layer && d.lod == lod && d.arena == index && d.variant == variant
+                    };
                     let at = per_view.iter().position(is_this);
                     let at = match at {
                         Some(at) => at,
@@ -302,15 +319,18 @@ pub fn prepare_voxel_view_draws(
                                 &device,
                                 &pipeline.layout,
                                 arena,
+                                layer,
                                 lod,
                                 index,
                                 variant,
                             ));
-                            // Draw order: chunks without a mask first (they
-                            // fill the early depth buffer), then the finest
-                            // LOD and nearer chunks first.
+                            // Draw order: by layer; within one, chunks
+                            // without a mask first (they fill the early
+                            // depth buffer), then the finest LOD and nearer
+                            // chunks first.
                             per_view.sort_by_key(|d| {
                                 (
+                                    d.layer,
                                     d.variant.masked,
                                     std::cmp::Reverse(d.lod),
                                     d.variant.far,

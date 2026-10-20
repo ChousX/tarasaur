@@ -784,7 +784,9 @@ pub struct GpuChunkLookupEntry {
 /// One channel's latest upload per chunk: (LOD it was built at, padded bytes).
 pub type SideChannelCache = HashMap<MainEntity, (LOD, Arc<[u8]>)>;
 
-#[derive(Resource, Default)]
+/// One layer's arenas, per LOD, and the state its uploads share. Held by
+/// `voxel::layer::VoxelLayers`.
+#[derive(Default)]
 pub struct VoxelChunkArenaSet {
     pub arenas: [Vec<VoxelChunkArena>; LOD::COUNT],
     pub config: ArenaConfig,

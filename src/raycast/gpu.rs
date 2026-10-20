@@ -30,6 +30,7 @@ use crate::{
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
         arena::VoxelChunkArenaSet,
+        layer::VoxelLayers,
         pipeline::{VoxelComputePipeline, VoxelPipelineLayouts},
         types::{CreateStorage, entries},
     },
@@ -343,14 +344,14 @@ pub fn extract_voxel_queries(
         .extend(pending.0.iter().copied().take(usize_from(QUERY_CAPACITY)));
 }
 
-/// Runs in `RenderSystems::Prepare`, after `prepare_visibility_for_arena`
-/// (so the collision arena's `slot_of_chunk_pos` reflects this frame's
-/// allocations before the lookup table is rebuilt from it).
+/// Runs in `RenderSystems::Prepare`, after the uploads (so the queryable
+/// layer's `slot_of_chunk_pos` reflects this frame's allocations before the
+/// lookup table is rebuilt from it).
 pub fn prepare_voxel_queries(
     render_queue: Res<RenderQueue>,
     render_device: Res<RenderDevice>,
     extracted: Res<ExtractedVoxelQueries>,
-    arena_set: Res<VoxelChunkArenaSet>,
+    layers: Res<VoxelLayers>,
     layouts: Res<VoxelPipelineLayouts>,
     mut query_buffers: ResMut<VoxelQueryBuffers>,
 ) {
@@ -360,6 +361,10 @@ pub fn prepare_voxel_queries(
     if this_frame_count == 0 {
         return;
     }
+    let Some(arena_set) = layers.queryable() else {
+        query_buffers.active_count = 0;
+        return;
+    };
 
     render_queue.write_buffer(
         &query_buffers.query_buffer,
@@ -426,7 +431,7 @@ pub fn prepare_voxel_queries(
         bytemuck::bytes_of(&uniforms),
     );
 
-    query_buffers.update_bind_groups(&render_device, &layouts, &arena_set);
+    query_buffers.update_bind_groups(&render_device, &layouts, arena_set);
 }
 
 /// Runs in `VoxelPrepareSet::Dispatch`, after the meshing dispatch.

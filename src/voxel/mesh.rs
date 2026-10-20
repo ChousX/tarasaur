@@ -19,7 +19,8 @@ use bevy::{
 };
 
 use crate::voxel::{
-    arena::{ARGS_BYTES, GUARD_BYTES, PASS1_WORKGROUP_EDGE, VoxelChunkArena, VoxelChunkArenaSet},
+    arena::{ARGS_BYTES, GUARD_BYTES, PASS1_WORKGROUP_EDGE, VoxelChunkArena},
+    layer::VoxelLayers,
     stats::VoxelFrameStats,
 };
 
@@ -33,11 +34,11 @@ pub fn dispatch_voxel_compute_passes_batched(
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<VoxelComputePipeline>,
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    mut layers: ResMut<VoxelLayers>,
     telemetry: Res<GuardTelemetry>,
     mut diagnostics: MeshDiagnostics,
 ) {
-    if !arena_set.iter().any(|a| !a.dirty_slots.is_empty()) {
+    if !layers.arenas().any(|a| !a.dirty_slots.is_empty()) {
         return;
     }
 
@@ -59,8 +60,8 @@ pub fn dispatch_voxel_compute_passes_batched(
     let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("voxel_compute_encoder_batched"),
     });
-    let mut dirty: Vec<&mut VoxelChunkArena> = arena_set
-        .iter_mut()
+    let mut dirty: Vec<&mut VoxelChunkArena> = layers
+        .arenas_mut()
         .filter(|a| !a.dirty_slots.is_empty())
         .collect();
     let (mut meshed_chunks, mut meshed_cells) = (0u32, 0u64);

@@ -7,7 +7,14 @@ use bevy::{
     render::{render_resource::Buffer, sync_world::MainEntity},
 };
 
-use crate::{field::LOD, num::usize_from, voxel::arena::VoxelChunkArenaSet};
+use crate::{
+    field::LOD,
+    num::usize_from,
+    voxel::{
+        arena::VoxelChunkArenaSet,
+        layer::{LayerIndex, VoxelLayers},
+    },
+};
 
 /// Where a resident chunk's material ids live on the GPU.
 pub struct MaterialSlot {
@@ -64,24 +71,37 @@ pub struct MaskSlot {
     pub padded_size: u32,
 }
 
-/// Render-world system param: which arenas exist and which chunks they hold.
+/// Render-world system param: which arenas the terrain layer has and which
+/// chunks they hold.
 #[derive(SystemParam)]
 pub struct ArenaInspector<'w> {
-    arenas: Res<'w, VoxelChunkArenaSet>,
+    layers: Res<'w, VoxelLayers>,
 }
 
+/// The terrain layer's arenas, or none before it is registered.
+static NO_ARENAS: [Vec<super::arena::VoxelChunkArena>; LOD::COUNT] =
+    [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+
 impl ArenaInspector<'_> {
+    fn terrain(&self) -> Option<&VoxelChunkArenaSet> {
+        self.layers.get(LayerIndex::TERRAIN)
+    }
+
+    fn arenas(&self) -> &[Vec<super::arena::VoxelChunkArena>; LOD::COUNT] {
+        self.terrain().map_or(&NO_ARENAS, |set| &set.arenas)
+    }
+
     /// Arenas per LOD, indexed by `LOD::rank()`.
     #[must_use]
     pub fn arena_counts(&self) -> [usize; LOD::COUNT] {
-        self.arenas.arenas.each_ref().map(Vec::len)
+        self.arenas().each_ref().map(Vec::len)
     }
 
     /// Every chunk holding a slot: (chunk position, LOD, arena index).
     pub fn resident_chunks(&self) -> impl Iterator<Item = (IVec3, LOD, usize)> + '_ {
         LOD::ALL
             .iter()
-            .zip(&self.arenas.arenas)
+            .zip(self.arenas())
             .flat_map(|(&lod, arenas)| {
                 arenas.iter().enumerate().flat_map(move |(index, arena)| {
                     arena
@@ -97,7 +117,7 @@ impl ArenaInspector<'_> {
     pub fn mesh_arenas(&self) -> Vec<MeshArena> {
         LOD::ALL
             .iter()
-            .zip(&self.arenas.arenas)
+            .zip(self.arenas())
             .flat_map(|(&lod, arenas)| {
                 arenas.iter().map(move |arena| MeshArena {
                     lod,
@@ -125,9 +145,9 @@ impl ArenaInspector<'_> {
     /// holds one.
     #[must_use]
     pub fn material_slot(&self, lod: LOD, chunk: Entity) -> Option<MaterialSlot> {
-        let found = self.arenas.find_slot(lod, MainEntity::from(chunk))?;
-        let arena = self
-            .arenas
+        let set = self.terrain()?;
+        let found = set.find_slot(lod, MainEntity::from(chunk))?;
+        let arena = set
             .arenas
             .get(VoxelChunkArenaSet::lod_index(lod))?
             .get(found.arena_idx)?;
@@ -143,9 +163,9 @@ impl ArenaInspector<'_> {
     /// if it holds one.
     #[must_use]
     pub fn mask_slot(&self, lod: LOD, chunk: Entity) -> Option<MaskSlot> {
-        let found = self.arenas.find_slot(lod, MainEntity::from(chunk))?;
-        let arena = self
-            .arenas
+        let set = self.terrain()?;
+        let found = set.find_slot(lod, MainEntity::from(chunk))?;
+        let arena = set
             .arenas
             .get(VoxelChunkArenaSet::lod_index(lod))?
             .get(found.arena_idx)?;

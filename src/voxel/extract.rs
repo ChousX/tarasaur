@@ -30,7 +30,7 @@ use crate::{
     },
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
     num::usize_from,
-    voxel::{arena::VoxelChunkArenaSet, resident::ForceResident},
+    voxel::{arena::VoxelChunkArenaSet, layer::VoxelLayers, resident::ForceResident},
 };
 
 /// Frames between full consistency checks in debug builds.
@@ -550,25 +550,28 @@ pub struct LiveAudit<'w, 's> {
     frame: Extract<'w, 's, Res<'static, FrameCount>>,
 }
 
-/// Applies [`LiveOutbox`]: keeps `arena_set.live` current and releases the
-/// slots of chunks that despawned, lost their surface or became hidden.
+/// Applies [`LiveOutbox`] to every layer: keeps its `live` set current and
+/// releases the slots of chunks that despawned, lost their surface or
+/// became hidden.
 pub fn release_despawned_chunks(
     outbox: Extract<Res<LiveOutbox>>,
     audit: LiveAudit,
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    mut layers: ResMut<VoxelLayers>,
 ) {
-    for &e in &outbox.despawned {
-        drop_chunk(&mut arena_set, e.into());
-    }
-    for &(e, wanted) in &outbox.changed {
-        if wanted {
-            arena_set.live.insert(e.into());
-        } else {
-            drop_chunk(&mut arena_set, e.into());
+    for arena_set in layers.sets_mut() {
+        for &e in &outbox.despawned {
+            drop_chunk(arena_set, e.into());
         }
-    }
-    if cfg!(debug_assertions) && audit.frame.0.is_multiple_of(AUDIT_INTERVAL) {
-        audit_live(&audit, &mut arena_set);
+        for &(e, wanted) in &outbox.changed {
+            if wanted {
+                arena_set.live.insert(e.into());
+            } else {
+                drop_chunk(arena_set, e.into());
+            }
+        }
+        if cfg!(debug_assertions) && audit.frame.0.is_multiple_of(AUDIT_INTERVAL) {
+            audit_live(&audit, arena_set);
+        }
     }
 }
 

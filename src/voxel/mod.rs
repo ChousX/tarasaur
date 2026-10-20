@@ -19,6 +19,7 @@ pub(crate) mod arena;
 pub(crate) mod draw;
 pub(crate) mod extract;
 pub mod inspect;
+pub mod layer;
 pub(crate) mod mesh;
 pub(crate) mod pipeline;
 pub(crate) mod raster;
@@ -30,6 +31,7 @@ pub(crate) mod upload;
 pub(crate) mod util;
 
 pub use arena::ArenaConfig;
+pub use layer::{LayerIndex, VoxelLayers};
 pub use pipeline::VoxelDepthPrepass;
 pub use telemetry::GuardTelemetry;
 pub use upload::RemeshBudget;
@@ -51,12 +53,12 @@ use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 use crate::{
     field::{GpuChannel, VoxelField},
     voxel::{
-        arena::VoxelChunkArenaSet,
         draw::{
             DRAW_COMPACTION_SHADER_HANDLE, VoxelDrawPipeline, VoxelViewDraws,
             prepare_voxel_view_draws,
         },
         extract::extract_removed,
+        layer::FieldLayer,
         mesh::dispatch_voxel_compute_passes_batched,
         pipeline::{
             VoxelMaterialBindGroup, VoxelRasterPipeline, queue_voxel_raster_pipelines,
@@ -123,6 +125,12 @@ pub(crate) fn register_field_upload<F: VoxelField>(app: &mut App) {
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
+    let layer = match F::GPU {
+        GpuChannel::Shape => render_app.world_mut().resource_mut::<VoxelLayers>().add(),
+        // Side channels ride along with the terrain's shape.
+        _ => LayerIndex::TERRAIN,
+    };
+    render_app.insert_resource(FieldLayer::<F>::new(layer));
     if F::OPTIONAL {
         render_app.add_systems(
             ExtractSchedule,
@@ -204,7 +212,7 @@ impl Plugin for VoxelRenderPlugin {
         render_app.init_resource::<VoxelViewDraws>();
 
         render_app
-            .init_resource::<VoxelChunkArenaSet>()
+            .init_resource::<VoxelLayers>()
             .init_resource::<RemeshBudget>()
             .init_resource::<GuardTelemetry>()
             .add_systems(ExtractSchedule, release_despawned_chunks)

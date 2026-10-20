@@ -26,7 +26,8 @@ use crate::{
     texture_palette::plugin::PalettePlugin,
     voxel::{
         ArenaConfig, GuardTelemetry, RemeshBudget, VoxelDepthPrepass, VoxelRenderPlugin,
-        arena::VoxelChunkArenaSet, register_field_upload,
+        layer::{LayerIndex, VoxelLayers},
+        register_field_upload,
     },
 };
 
@@ -106,10 +107,13 @@ impl TarasaurPlugin {
                 cells_per_frame: self.remesh_cells_per_frame,
             })
             .insert_resource(GuardTelemetry(self.guard_telemetry));
-        render_app
+        if let Some(terrain) = render_app
             .world_mut()
-            .resource_mut::<VoxelChunkArenaSet>()
-            .config = self.arenas.clone();
+            .resource_mut::<VoxelLayers>()
+            .get_mut(LayerIndex::TERRAIN)
+        {
+            terrain.config = self.arenas.clone();
+        }
     }
 }
 

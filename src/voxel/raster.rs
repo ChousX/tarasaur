@@ -16,8 +16,8 @@ use bevy::{
 };
 
 use crate::voxel::{
-    arena::VoxelChunkArenaSet,
     draw::{VoxelDrawPipeline, VoxelViewDraws, encode_draw_compaction},
+    layer::VoxelLayers,
     pipeline::{
         VoxelDepthPrepass, VoxelMaterialBindGroup, VoxelRasterKey, VoxelRasterPipeline, raster_keys,
     },
@@ -28,7 +28,7 @@ use crate::voxel::{
 pub struct RasterResources<'w> {
     view_keys: Res<'w, ViewKeyCache>,
     depth_prepass: Option<Res<'w, VoxelDepthPrepass>>,
-    arena_set: Res<'w, VoxelChunkArenaSet>,
+    layers: Res<'w, VoxelLayers>,
     pipeline_cache: Res<'w, PipelineCache>,
     raster_pipeline: Res<'w, VoxelRasterPipeline>,
     voxel_material: Res<'w, VoxelMaterialBindGroup>,
@@ -131,7 +131,12 @@ pub fn voxel_raster_pass(
                 render_pass.set_render_pipeline(pipeline);
                 bound = Some(key);
             }
-            let Some(arena) = res.arena_set.arenas.get(d.lod).and_then(|a| a.get(d.arena)) else {
+            let Some(arena) = res
+                .layers
+                .get(d.layer)
+                .and_then(|set| set.arenas.get(d.lod))
+                .and_then(|a| a.get(d.arena))
+            else {
                 continue;
             };
             render_pass.set_vertex_buffer(0, arena.final_vertex_buffer.slice(..));

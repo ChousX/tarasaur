@@ -30,6 +30,7 @@ use crate::{
         arena::{
             ARGS_BYTES, ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet,
         },
+        layer::LayerOf,
         pipeline::VoxelPipelineLayouts,
         stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
@@ -386,7 +387,7 @@ fn clusters(positions: &[Option<IVec3>]) -> Vec<usize> {
 /// the upload waits and the chunk keeps drawing its current mesh (an old
 /// LOD is only released once the new one is placed).
 pub fn prepare_shape_upload<F: VoxelField>(
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    mut layer: LayerOf<F>,
     gpu: ArenaGpu,
     budget: Res<RemeshBudget>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<F>)>,
@@ -394,19 +395,22 @@ pub fn prepare_shape_upload<F: VoxelField>(
     mut out_of_room: Local<bool>,
     stats: Option<ResMut<VoxelFrameStats>>,
 ) {
+    let Some(arena_set) = layer.set() else {
+        return;
+    };
     arena_set.deferred.clear();
     arena_set.reslotted.clear();
-    let pending = newest_pending(&arena_set, &extracted_chunks, &mut commands);
+    let pending = newest_pending(arena_set, &extracted_chunks, &mut commands);
 
     let mut batch = Vec::new();
     for (p, x) in admit(
-        &mut arena_set,
+        arena_set,
         budget.cells_per_frame,
         pending,
         &extracted_chunks,
     ) {
         if x.meta_only {
-            if restitch(&mut arena_set, &gpu.render_queue, x, p.seam_ranks) {
+            if restitch(arena_set, &gpu.render_queue, x, p.seam_ranks) {
                 commands.entity(p.entity).despawn();
             }
             continue;
@@ -669,13 +673,16 @@ fn count_refills(stats: Option<ResMut<VoxelFrameStats>>, uploads: &[SideUpload])
 /// upload placed. Runs after it (`UploadSet::Channels`), so `deferred`,
 /// `reslotted` and new slots are current.
 pub fn prepare_material_upload<F: VoxelField>(
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    mut layer: LayerOf<F>,
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<F>)>,
     mut commands: Commands,
     stats: Option<ResMut<VoxelFrameStats>>,
 ) {
-    let uploads = side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands);
+    let Some(arena_set) = layer.set() else {
+        return;
+    };
+    let uploads = side_channel_uploads(arena_set, &extracted_chunks, &mut commands);
     count_refills(stats, &uploads);
     for up in uploads {
         let slot = up.slot.slot;
@@ -699,13 +706,16 @@ pub fn prepare_material_upload<F: VoxelField>(
 /// The `GpuChannel::Mask` upload: each chunk's mask as one bit per voxel,
 /// plus the per-slot "has a mask" bits the raster pass checks first.
 pub fn prepare_mask_upload<F: VoxelField>(
-    mut arena_set: ResMut<VoxelChunkArenaSet>,
+    mut layer: LayerOf<F>,
     render_queue: Res<RenderQueue>,
     extracted_chunks: Query<(Entity, &ExtractedChunkField<F>)>,
     mut commands: Commands,
     stats: Option<ResMut<VoxelFrameStats>>,
 ) {
-    let uploads = side_channel_uploads(&mut arena_set, &extracted_chunks, &mut commands);
+    let Some(arena_set) = layer.set() else {
+        return;
+    };
+    let uploads = side_channel_uploads(arena_set, &extracted_chunks, &mut commands);
     count_refills(stats, &uploads);
     for up in uploads {
         let slot = up.slot.slot;

@@ -18,10 +18,7 @@ use crate::{
     field::systems::SdfReinitTask,
     field::{LOD, TargetLOD},
     storage::loading::ChunkDataTask,
-    voxel::{
-        arena::{VoxelChunkArena, VoxelChunkArenaSet},
-        draw::VoxelViewDraws,
-    },
+    voxel::{arena::VoxelChunkArena, draw::VoxelViewDraws, layer::VoxelLayers},
 };
 
 /// Render-world counts for one frame.
@@ -107,19 +104,23 @@ impl Plugin for VoxelDiagnosticsPlugin {
 
 fn send_frame_stats(
     mut stats: ResMut<VoxelFrameStats>,
-    arena_set: Res<VoxelChunkArenaSet>,
+    layers: Res<VoxelLayers>,
     draws: Res<VoxelViewDraws>,
     channel: Res<VoxelStatsChannel>,
 ) {
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     let sum = |f: fn(&VoxelChunkArena) -> usize| {
-        count(arena_set.iter().map(f).fold(0, usize::saturating_add))
+        count(layers.arenas().map(f).fold(0, usize::saturating_add))
     };
+    let deferred = layers
+        .iter()
+        .map(|(_, set)| set.deferred.len())
+        .fold(0, usize::saturating_add);
     if let Ok(mut out) = channel.0.lock() {
         out.draws = draws.total();
         out.resident = sum(|a| a.active_slots.len());
         out.dirty_slots = sum(|a| a.dirty_slots.len());
-        out.pending_uploads = count(arena_set.deferred.len());
+        out.pending_uploads = count(deferred);
         out.meshed_chunks = out.meshed_chunks.saturating_add(stats.meshed_chunks);
         out.meshed_cells = out.meshed_cells.saturating_add(stats.meshed_cells);
         out.reslotted = out.reslotted.saturating_add(stats.reslotted);

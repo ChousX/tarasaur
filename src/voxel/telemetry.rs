@@ -7,7 +7,8 @@ use crate::num::usize_from;
 use bevy::{prelude::*, render::render_resource::MapMode};
 
 use crate::voxel::{
-    arena::{GUARD_BYTES, INDICES_PER_CELL, VoxelChunkArenaSet},
+    arena::{GUARD_BYTES, INDICES_PER_CELL},
+    layer::VoxelLayers,
     types::DrawIndexedIndirectArgs,
 };
 
@@ -33,12 +34,23 @@ pub(super) const GUARD_FREE: u8 = 0;
 pub(super) const GUARD_COPIED: u8 = 1;
 const GUARD_MAPPED: u8 = 2;
 
-pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelChunkArenaSet>) {
+pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, layers: Res<VoxelLayers>) {
     if !telemetry.0 {
         return;
     }
-    for (rank, arenas) in arena_set.arenas.iter().enumerate() {
-        for (arena_idx, arena) in arenas.iter().enumerate() {
+    let arenas = layers.iter().flat_map(|(layer, set)| {
+        set.arenas
+            .iter()
+            .enumerate()
+            .flat_map(move |(rank, arenas)| {
+                arenas
+                    .iter()
+                    .enumerate()
+                    .map(move |(arena_idx, arena)| (layer, rank, arena_idx, arena))
+            })
+    });
+    for (layer, rank, arena_idx, arena) in arenas {
+        {
             let state = arena.guard_state.clone();
             if state
                 .compare_exchange(
@@ -77,15 +89,16 @@ pub fn map_guard_readbacks(telemetry: Res<GuardTelemetry>, arena_set: Res<VoxelC
                     if let Some(&(slot, range, args)) = bad_args.first() {
                         let pos = chunk_pos_of_slot.get(usize_from(slot)).copied().flatten();
                         error!(
-                            "[guard] LOD rank {rank} arena {arena_idx}: {} drawn slot(s) with bad indirect args; first: slot {slot} at {pos:?}, range (base, cap) {range:?}, args {args:?}",
+                            "[guard] layer {} LOD rank {rank} arena {arena_idx}: {} drawn slot(s) with bad indirect args; first: slot {slot} at {pos:?}, range (base, cap) {range:?}, args {args:?}",
+                            layer.0,
                             bad_args.len()
                         );
                     }
                     if let Some(v) = v.filter(|v| v[0] != 0) {
                         let pos = chunk_pos_of_slot.get(usize_from(v[1])).copied().flatten();
                         warn!(
-                            "[guard] LOD rank {rank} arena {arena_idx}: {} chunk(s) skipped; last slot {} at {:?}: gpu_count {} > cpu_count {}",
-                            v[0], v[1], pos, v[2], v[3]
+                            "[guard] layer {} LOD rank {rank} arena {arena_idx}: {} chunk(s) skipped; last slot {} at {:?}: gpu_count {} > cpu_count {}",
+                            layer.0, v[0], v[1], pos, v[2], v[3]
                         );
                     }
                 }
