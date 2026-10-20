@@ -204,7 +204,9 @@ mod tests {
         let edge = UVec3::splat(size.wrapping_sub(1));
         // NEIGHBORS_MASK starts with the +x, +y, +z faces.
         let step = |axis: usize| match &neighbors[axis] {
-            Some((_, n_size)) if *n_size < size => size.checked_div(*n_size).map_or(1.0, f32_from_u32),
+            Some((_, n_size)) if *n_size < size => {
+                size.checked_div(*n_size).map_or(1.0, f32_from_u32)
+            }
             _ => 1.0,
         };
         let step = Vec3::new(step(0), step(1), step(2));

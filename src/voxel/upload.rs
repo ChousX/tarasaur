@@ -140,7 +140,9 @@ fn newest_pending<T: Send + Sync + 'static>(
             };
             let entity = n.data.map(|d| d.1).or(meta)?;
             let ranks_from = meta.unwrap_or(entity);
-            let seam_ranks = extracted.get(ranks_from).map_or([0; 2], |(_, x)| x.seam_ranks);
+            let seam_ranks = extracted
+                .get(ranks_from)
+                .map_or([0; 2], |(_, x)| x.seam_ranks);
             Some(Pending {
                 since: n.since,
                 entity,

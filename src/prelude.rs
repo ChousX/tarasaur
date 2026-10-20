@@ -17,13 +17,15 @@ pub use crate::field::{
         EditMode, MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, SdfSphereStamp,
         WorldEditor,
     },
-    ops::{AccumulateExt, BlendExt},
+    ops::{AccumulateExt, BlendExt, PlaneMode, Sweep},
 };
 pub use crate::storage::persistence::{AutosaveIntervalSecs, SaveChunkMessage, SaveDirectory};
 
 // Rendering, palettes and ray casts
 pub use crate::raycast::{
-    cursor::{BrushTool, CursorBrush, CursorHit, CursorQueryMode, FlattenPlane},
+    cursor::{
+        BrushStroke, BrushTool, CursorBrush, CursorHit, CursorQueryMode, FlattenPlane, Stroke,
+    },
     terrain_ray::TerrainRay,
 };
 pub use crate::texture_palette::{

@@ -332,15 +332,15 @@ pub fn process_sdf_csg_spheres(
     // every chunk they overlap.
     let mut queued = std::mem::take(&mut *deferred);
     for op in events.read() {
-        resident.touch_sphere(op.center, op.radius + reach_world);
-        let half = Vec3::splat(op.radius + reach_world);
-        queued.extend(
-            overlapping_chunks(op.center, half).map(|chunk_pos| DeferredEdit {
-                chunk_pos,
-                edit: *op,
-                age: 0,
-            }),
-        );
+        let sweep = op.sweep();
+        let (mid, half) = sweep.bounds(op.radius + reach_world);
+        let half_len = sweep.from.distance(sweep.to) * 0.5;
+        resident.touch_sphere(mid, op.radius + reach_world + half_len);
+        queued.extend(overlapping_chunks(mid, half).map(|chunk_pos| DeferredEdit {
+            chunk_pos,
+            edit: *op,
+            age: 0,
+        }));
     }
 
     // The editable ones go into waves, each chunk at most once per wave, so
@@ -413,7 +413,7 @@ pub fn process_sdf_csg_spheres(
                         let origin = w.chunk_pos.as_vec3() * CHUNK_SIZE;
                         let voxel_size = CHUNK_SIZE / f32_from_u32(size);
                         sdf.csg_sphere_delta(
-                            (w.op.center - origin) / voxel_size,
+                            w.op.sweep().to_grid(origin, voxel_size),
                             w.op.radius / voxel_size,
                             SDF_CSG_REACH_VOXELS,
                             w.op.subtract,
@@ -452,8 +452,10 @@ pub fn process_sdf_sculpts(
     mut resident: ResMut<ForceResident>,
 ) {
     let new = events.read().map(|&op| {
-        resident.touch_sphere(op.center, op.radius);
-        (op.center, Vec3::splat(op.radius), op)
+        let sweep = op.sweep();
+        let (mid, half) = sweep.bounds(op.radius);
+        resident.touch_sphere(mid, op.radius + sweep.from.distance(sweep.to) * 0.5);
+        (mid, half, op)
     });
     apply_edits(
         &mut deferred,
@@ -462,16 +464,21 @@ pub fn process_sdf_sculpts(
         &mut editable,
         |_, sdf, origin, voxel_size, op| {
             // Like CSG: the output is still a distance field, so no DirtyField.
-            let center = (op.center - origin) / voxel_size;
+            let at = op.sweep().to_grid(origin, voxel_size);
             let radius = op.radius / voxel_size;
             match op.op {
-                SdfSculptOp::Smooth => sdf.smooth_sphere(center, radius, op.amount),
-                SdfSculptOp::Flatten { point, normal } => sdf.flatten_sphere(
-                    center,
+                SdfSculptOp::Smooth => sdf.smooth_sphere(at, radius, op.amount),
+                SdfSculptOp::Flatten {
+                    point,
+                    normal,
+                    mode,
+                } => sdf.flatten_sphere(
+                    at,
                     radius,
                     (point - origin) / voxel_size,
                     normal,
                     op.amount,
+                    mode,
                 ),
             }
         },

@@ -1,9 +1,10 @@
 //! Main playground: streamed, textured heightfield terrain around a fly
 //! camera, edited with the library's `CursorBrush`. Hold right mouse to
-//! look, left mouse to apply the brush. 1-5 pick the tool (dig, build,
-//! smooth, flatten, paint), Q/E the material, scroll the radius and Ctrl +
-//! scroll the strength; Ctrl + left mouse swaps dig and build, and R toggles
-//! flatten between level and along the slope.
+//! look, left mouse to apply the brush. 1-7 pick the tool (dig, build,
+//! smooth, flatten, paint, fill, scrape), Q/E the material, scroll the
+//! radius and Ctrl + scroll the strength; Ctrl + left mouse swaps dig and
+//! build (and fill and scrape), and R toggles the flatten, fill and scrape
+//! plane between level and along the slope.
 //!
 //! Capture: F12 saves a screenshot, F10 starts and stops recording frames
 //! (turn them into a GIF with `tools/make-gif.sh`), H hides the HUD. Both
@@ -105,12 +106,14 @@ fn spawn_player(mut commands: Commands) {
 // Terrain editing
 // ---------------------------------------------------------------------------
 
-const TOOL_KEYS: [KeyCode; 5] = [
+const TOOL_KEYS: [KeyCode; 7] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
     KeyCode::Digit4,
     KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
 ];
 
 /// Number keys pick the tool, Q/E cycle the material, R toggles level
@@ -191,8 +194,8 @@ fn update_hud(brush: Res<CursorBrush>, mut hud: Query<&mut Text, With<Hud>>) {
     for mut text in &mut hud {
         text.0 = format!(
             "{tools}\nmaterial {material:?} (Q/E)   radius {:.1} (scroll)   strength {:.1} (ctrl+scroll)   \
-             flatten {:?} (R)\n\
-             LMB apply, ctrl+LMB swaps dig/build, RMB look",
+             plane {:?} (R)\n\
+             LMB apply, ctrl+LMB swaps dig/build and fill/scrape, RMB look",
             brush.radius, brush.strength, brush.flatten
         );
     }

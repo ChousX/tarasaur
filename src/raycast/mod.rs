@@ -17,8 +17,8 @@ use crate::{
     voxel::{UploadSet, VoxelPrepareSet, mesh::dispatch_voxel_compute_passes_batched},
 };
 use cursor::{
-    CursorBrush, CursorHit, CursorQueryMode, cursor_brush, cycle_cursor_mode, draw_cursor_brush,
-    resolve_cursor_hit, update_cursor_focus,
+    BrushStroke, CursorBrush, CursorHit, CursorQueryMode, cursor_brush, cycle_cursor_mode,
+    draw_cursor_brush, resolve_cursor_hit, update_cursor_focus,
 };
 use gpu::{
     ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries, VoxelQueryBuffers,
@@ -40,6 +40,7 @@ impl Plugin for RaycastPlugin {
             .init_resource::<CursorQueryMode>()
             .init_resource::<CursorHit>()
             .init_resource::<CursorBrush>()
+            .init_resource::<BrushStroke>()
             .add_systems(
                 First,
                 (clear_pending_voxel_queries, drain_voxel_query_results),
@@ -53,6 +54,7 @@ impl Plugin for RaycastPlugin {
                         .after(resolve_cursor_hit)
                         .before(ChunkSet::Plan),
                     (cursor_brush, draw_cursor_brush)
+                        .chain()
                         .after(resolve_cursor_hit)
                         .in_set(FieldSet::Brush)
                         .run_if(|b: Res<CursorBrush>| b.enabled),

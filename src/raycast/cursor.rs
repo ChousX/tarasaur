@@ -1,6 +1,7 @@
 //! The terrain point under the mouse (`CursorHit`), the chunk focus it
 //! drives, and the default brush (`CursorBrush`: dig, build, smooth,
-//! flatten, paint). F8 cycles the query backend.
+//! flatten, paint, fill, scrape) with the stroke it's drawing
+//! (`BrushStroke`). F8 cycles the query backend.
 
 use bevy::{
     ecs::{message::MessageWriter, system::SystemParam},
@@ -10,7 +11,10 @@ use bevy::{
 
 use crate::{
     chunk::{CursorFocusChunk, FOCUS_RADIUS, chebyshev, world_pos_to_chunk_pos},
-    field::editor::{MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere},
+    field::{
+        editor::{MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere},
+        ops::PlaneMode,
+    },
     raycast::{
         gpu::{PendingVoxelQueries, RayQuery, VoxelQueryResults},
         terrain_ray::TerrainRay,
@@ -89,15 +93,22 @@ pub enum BrushTool {
     Flatten,
     /// Sets the material inside the sphere; the shape is untouched.
     Paint,
+    /// Like Flatten, but only adds material: fills dips up to the plane.
+    Fill,
+    /// Like Flatten, but only removes material: shaves bumps down to the
+    /// plane.
+    Scrape,
 }
 
 impl BrushTool {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Dig,
         Self::Build,
         Self::Smooth,
         Self::Flatten,
         Self::Paint,
+        Self::Fill,
+        Self::Scrape,
     ];
 
     #[must_use]
@@ -108,16 +119,33 @@ impl BrushTool {
             Self::Smooth => "Smooth",
             Self::Flatten => "Flatten",
             Self::Paint => "Paint",
+            Self::Fill => "Fill",
+            Self::Scrape => "Scrape",
         }
     }
 
-    /// Dig and Build swap; the rest have no opposite.
+    /// Dig and Build swap, and so do Fill and Scrape; the rest have no
+    /// opposite.
     #[must_use]
     pub const fn inverted(self) -> Self {
         match self {
             Self::Dig => Self::Build,
             Self::Build => Self::Dig,
+            Self::Fill => Self::Scrape,
+            Self::Scrape => Self::Fill,
             other => other,
+        }
+    }
+
+    /// The side of the stroke's plane this tool works on, if it works on
+    /// one.
+    #[must_use]
+    pub const fn plane_mode(self) -> Option<PlaneMode> {
+        match self {
+            Self::Flatten => Some(PlaneMode::Flatten),
+            Self::Fill => Some(PlaneMode::Fill),
+            Self::Scrape => Some(PlaneMode::Scrape),
+            _ => None,
         }
     }
 
@@ -128,12 +156,14 @@ impl BrushTool {
             Self::Smooth => Color::srgb(0.4, 0.7, 1.0),
             Self::Flatten => Color::srgb(1.0, 0.9, 0.3),
             Self::Paint => Color::srgb(1.0, 0.4, 1.0),
+            Self::Fill => Color::srgb(0.6, 1.0, 0.8),
+            Self::Scrape => Color::srgb(1.0, 0.6, 0.2),
         }
     }
 }
 
-/// The plane `BrushTool::Flatten` pulls toward, through the point where
-/// the stroke started.
+/// The plane `BrushTool::Flatten`, `Fill` and `Scrape` pull toward,
+/// through the point where the stroke started.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FlattenPlane {
     /// Horizontal: pads, floors, roads.
@@ -156,8 +186,8 @@ impl FlattenPlane {
 /// The built-in mouse brush (`cursor_brush`).
 ///
 /// Hold left mouse to apply `tool` at the `CursorHit`; hold Ctrl as well to
-/// swap Dig and Build. Change the fields at runtime to switch tools, or set
-/// `enabled: false` and edit from `CursorHit` yourself.
+/// swap Dig and Build (or Fill and Scrape). Change the fields at runtime to
+/// switch tools, or set `enabled: false` and edit from `CursorHit` yourself.
 #[derive(Resource, Clone, Debug)]
 pub struct CursorBrush {
     pub enabled: bool,
@@ -167,14 +197,14 @@ pub struct CursorBrush {
     pub radius: f32,
     /// How fast the brush works, at its center (slower toward the rim).
     /// Dig and Build: world units per second the surface moves; they stop
-    /// at the sphere either way. Smooth and Flatten: the fraction of the way
-    /// voxels move per second.
+    /// at the sphere either way. Smooth, Flatten, Fill and Scrape: the
+    /// fraction of the way voxels move per second.
     pub strength: f32,
     /// Palette id that Paint (and Build, with `paint_on_build`) writes.
     /// Needs a `MaterialFieldPlugin`; without one painting does nothing.
     pub material: u8,
     pub paint_on_build: bool,
-    /// The plane Flatten pulls toward.
+    /// The plane Flatten, Fill and Scrape pull toward.
     pub flatten: FlattenPlane,
     /// Draw the brush sphere at the cursor.
     pub show_gizmo: bool,
@@ -196,7 +226,8 @@ impl Default for CursorBrush {
 }
 
 impl CursorBrush {
-    /// The tool in effect this frame: `tool`, with Ctrl swapping Dig and Build.
+    /// The tool in effect this frame: `tool`, with Ctrl swapping it for its
+    /// opposite (`BrushTool::inverted`).
     #[must_use]
     pub fn active_tool(&self, keys: &ButtonInput<KeyCode>) -> BrushTool {
         if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
@@ -206,7 +237,7 @@ impl CursorBrush {
         }
     }
 
-    /// The unit normal of the plane Flatten would use, starting at `hit`.
+    /// The unit normal of the plane a stroke starting at `hit` would use.
     fn flatten_normal(&self, hit: &CursorSurfaceHit) -> Vec3 {
         match self.flatten {
             FlattenPlane::Level => Vec3::Y,
@@ -313,31 +344,82 @@ pub struct BrushWriters<'w> {
     paint: MessageWriter<'w, MaterialPaint>,
 }
 
+/// A stroke that jumps further than this many brush radii in one frame (the
+/// cursor slid off a ledge onto distant terrain) starts a new segment
+/// instead of sweeping straight through whatever lies between.
+const MAX_SWEEP_RADII: f32 = 4.0;
+
+/// The stroke `cursor_brush` is drawing: from pressing left mouse to
+/// releasing it or switching tools. `None` between strokes.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct BrushStroke(pub Option<Stroke>);
+
+/// What a stroke keeps from frame to frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stroke {
+    pub tool: BrushTool,
+    /// The hit the stroke started on.
+    pub start: Vec3,
+    /// The plane Flatten, Fill and Scrape pull toward, through `start`:
+    /// (point, unit normal pointing out of the terrain).
+    pub plane: (Vec3, Vec3),
+    /// The last edit's center, which the next edit sweeps from. `None`
+    /// after a frame with nothing under the cursor, or a jump.
+    pub last: Option<Vec3>,
+}
+
+impl Stroke {
+    /// Where an edit at `center` sweeps from (`None`: a plain sphere), and
+    /// makes `center` the last.
+    fn sweep_to(&mut self, center: Vec3, radius: f32) -> Option<Vec3> {
+        let from = self
+            .last
+            .filter(|last| last.distance(center) <= radius * MAX_SWEEP_RADII);
+        self.last = Some(center);
+        from
+    }
+}
+
 /// Applies `CursorBrush` while left mouse is held.
 ///
-/// Dig, Build, Smooth and Flatten are gradual, scaled by the frame time;
-/// Dig, Build and Paint stop at the brush sphere, so holding them in place
-/// doesn't pile up.
+/// Dig, Build, Smooth, Flatten, Fill and Scrape are gradual, scaled by the
+/// frame time, and sweep from the last frame's center so a fast stroke
+/// leaves no gaps. Dig, Build and Paint stop at the brush sphere, so
+/// holding them in place doesn't pile up.
 pub fn cursor_brush(
     brush: Res<CursorBrush>,
     input: BrushInput,
     hit: Res<CursorHit>,
     terrain: TerrainRay,
-    // Flatten's plane (point, normal), fixed when the stroke starts.
-    mut plane: Local<Option<(Vec3, Vec3)>>,
+    mut stroke: ResMut<BrushStroke>,
     mut out: BrushWriters,
 ) {
     let tool = brush.active_tool(&input.keys);
     let held = input.mouse.pressed(MouseButton::Left);
-    if !held || tool != BrushTool::Flatten {
-        *plane = None;
+    if stroke.0.is_some_and(|s| !held || s.tool != tool) {
+        stroke.0 = None;
     }
-    let Some(h) = hit.0 else { return };
     if !held {
         return;
     }
+    let Some(h) = hit.0 else {
+        // Nothing under the cursor: the next hit starts a new segment.
+        if let Some(s) = &mut stroke.0 {
+            s.last = None;
+        }
+        return;
+    };
 
     let (center, radius) = brush.sphere(tool, &h, &terrain);
+    let s = stroke.0.get_or_insert_with(|| Stroke {
+        tool,
+        start: h.pos,
+        plane: (h.pos, brush.flatten_normal(&h)),
+        last: None,
+    });
+    let sweep_from = s.sweep_to(center, radius);
+    let (point, normal) = s.plane;
+
     let dt = input.time.delta_secs();
     let amount = (brush.strength * dt).clamp(0.0, 1.0);
     match tool {
@@ -346,6 +428,7 @@ pub fn cursor_brush(
             out.csg.write(SdfCsgSphere {
                 center,
                 radius,
+                sweep_from,
                 subtract: !build,
                 max_step: Some(brush.strength.max(0.0) * dt),
                 // Only what the build fills, as it fills it.
@@ -356,17 +439,23 @@ pub fn cursor_brush(
             out.sculpt.write(SdfSculptSphere {
                 center,
                 radius,
+                sweep_from,
                 amount,
                 op: SdfSculptOp::Smooth,
             });
         }
-        BrushTool::Flatten => {
-            let (point, normal) = *plane.get_or_insert((h.pos, brush.flatten_normal(&h)));
+        BrushTool::Flatten | BrushTool::Fill | BrushTool::Scrape => {
+            let mode = tool.plane_mode().unwrap_or_default();
             out.sculpt.write(SdfSculptSphere {
                 center,
                 radius,
+                sweep_from,
                 amount,
-                op: SdfSculptOp::Flatten { point, normal },
+                op: SdfSculptOp::Flatten {
+                    point,
+                    normal,
+                    mode,
+                },
             });
         }
         BrushTool::Paint => {
@@ -379,12 +468,14 @@ pub fn cursor_brush(
     }
 }
 
-/// Outlines the sphere `cursor_brush` would edit, colored by tool. Does
-/// nothing without `GizmoPlugin`.
+/// Outlines the sphere `cursor_brush` would edit, colored by tool, and for
+/// Flatten, Fill and Scrape the plane under it. Does nothing without
+/// `GizmoPlugin`.
 pub fn draw_cursor_brush(
     brush: Res<CursorBrush>,
     keys: Res<ButtonInput<KeyCode>>,
     hit: Res<CursorHit>,
+    stroke: Res<BrushStroke>,
     terrain: TerrainRay,
     gizmos: Option<Gizmos>,
 ) {
@@ -398,10 +489,15 @@ pub fn draw_cursor_brush(
     let (center, radius) = brush.sphere(tool, &h, &terrain);
     let color = tool.color();
     gizmos.sphere(Isometry3d::from_translation(center), radius, color);
-    if tool == BrushTool::Flatten {
-        // The plane a stroke started here would flatten toward.
-        let rotation = Quat::from_rotation_arc(Vec3::Z, brush.flatten_normal(&h));
-        gizmos.circle(Isometry3d::new(h.pos, rotation), radius, color);
+    if tool.plane_mode().is_some() {
+        // The stroke's plane, or the one a stroke started here would use,
+        // drawn where it cuts under the brush.
+        let (point, normal) = stroke
+            .0
+            .map_or((h.pos, brush.flatten_normal(&h)), |s| s.plane);
+        let on_plane = center - normal * (center - point).dot(normal);
+        let rotation = Quat::from_rotation_arc(Vec3::Z, normal);
+        gizmos.circle(Isometry3d::new(on_plane, rotation), radius, color);
     }
 }
 
@@ -422,4 +518,25 @@ pub fn update_cursor_focus(hit: Res<CursorHit>, mut focus: ResMut<CursorFocusChu
     if !inside_window {
         focus.0 = Some(new);
     } // assign only on change, so is_changed stays meaningful
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BrushTool, Stroke, Vec3};
+
+    #[test]
+    fn stroke_sweeps_from_its_last_center_but_not_across_a_jump() {
+        let mut stroke = Stroke {
+            tool: BrushTool::Dig,
+            start: Vec3::ZERO,
+            plane: (Vec3::ZERO, Vec3::Y),
+            last: None,
+        };
+        // The first edit is a plain sphere, the next sweeps from it.
+        assert_eq!(stroke.sweep_to(Vec3::ZERO, 1.0), None);
+        assert_eq!(stroke.sweep_to(Vec3::X * 3.0, 1.0), Some(Vec3::ZERO));
+        // Further than four radii: a new segment.
+        assert_eq!(stroke.sweep_to(Vec3::X * 8.0, 1.0), None);
+        assert_eq!(stroke.last, Some(Vec3::X * 8.0));
+    }
 }

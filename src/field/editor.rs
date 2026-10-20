@@ -4,6 +4,7 @@
 use std::marker::PhantomData;
 
 use super::Field;
+use super::ops::{PlaneMode, Sweep};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -141,12 +142,17 @@ pub struct SdfSphereStamp {
     pub sdf_radius: f32,
 }
 
-/// CSG union/subtraction of a sphere; idempotent, no reinit needed. What
-/// the built-in brush's Dig and Build send.
+/// CSG union/subtraction of a sphere, or of the capsule it sweeps;
+/// idempotent, no reinit needed. What the built-in brush's Dig and Build
+/// send.
 #[derive(Message, Clone, Copy)]
 pub struct SdfCsgSphere {
     pub center: Vec3,
     pub radius: f32,
+    /// `Some(from)`: the edit is the capsule swept from `from` to `center`,
+    /// so a stroke that moves far in a frame leaves no gaps. Send the last
+    /// edit's center.
+    pub sweep_from: Option<Vec3>,
     pub subtract: bool, // true = dig, false = add material
     /// `None`: exact CSG at once. `Some(step)`: the surface moves at most
     /// `step` world units toward the CSG result, the full step at the
@@ -160,14 +166,29 @@ pub struct SdfCsgSphere {
     pub paint: Option<u8>,
 }
 
+impl SdfCsgSphere {
+    /// The segment the edit covers (world space).
+    #[must_use]
+    pub fn sweep(&self) -> Sweep {
+        Sweep {
+            from: self.sweep_from.unwrap_or(self.center),
+            to: self.center,
+        }
+    }
+}
+
 /// What an `SdfSculptSphere` does to the distances inside it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SdfSculptOp {
     /// Relax toward the neighbour average: rounds off bumps and creases.
     Smooth,
     /// Pull toward the plane through `point` (world space) with unit
-    /// `normal` pointing out of the terrain.
-    Flatten { point: Vec3, normal: Vec3 },
+    /// `normal` pointing out of the terrain, on the side(s) `mode` picks.
+    Flatten {
+        point: Vec3,
+        normal: Vec3,
+        mode: PlaneMode,
+    },
 }
 
 /// A gradual SDF brush, applied without a jump-flood reinit.
@@ -179,8 +200,22 @@ pub enum SdfSculptOp {
 pub struct SdfSculptSphere {
     pub center: Vec3,
     pub radius: f32,
+    /// `Some(from)`: work on the capsule swept from `from` to `center`, as
+    /// in `SdfCsgSphere`.
+    pub sweep_from: Option<Vec3>,
     pub amount: f32,
     pub op: SdfSculptOp,
+}
+
+impl SdfSculptSphere {
+    /// The segment the edit covers (world space).
+    #[must_use]
+    pub fn sweep(&self) -> Sweep {
+        Sweep {
+            from: self.sweep_from.unwrap_or(self.center),
+            to: self.center,
+        }
+    }
 }
 
 /// Sets the listed voxels (grid coordinates) of one chunk's material field

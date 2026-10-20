@@ -94,17 +94,86 @@ fn grid_range(min: IVec3, max: IVec3) -> Option<(UVec3, UVec3)> {
     Some((min.as_uvec3(), max.as_uvec3()))
 }
 
-/// The voxels a sphere (grid space) can touch, one voxel of margin
-/// included, clamped to a grid of `size`.
-fn sphere_range(center: Vec3, radius: f32, size: UVec3) -> Option<(UVec3, UVec3)> {
-    let max_bound = size.as_vec3() - Vec3::ONE;
-    let min = (center - Vec3::splat(radius + 1.0))
-        .max(Vec3::ZERO)
-        .as_ivec3();
-    let max = (center + Vec3::splat(radius + 1.0))
-        .min(max_bound)
-        .as_ivec3();
-    grid_range(min, max)
+/// The segment a brush sweeps along in one edit (grid or world space): it
+/// covers every point within its radius of the segment, a capsule.
+/// `from == to` (or a bare `Vec3`) is a plain sphere.
+///
+/// Sweeping from the last edit's center to this one's keeps a fast stroke
+/// continuous instead of a row of separate dabs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sweep {
+    pub from: Vec3,
+    pub to: Vec3,
+}
+
+impl Sweep {
+    #[must_use]
+    pub const fn point(p: Vec3) -> Self {
+        Self { from: p, to: p }
+    }
+
+    /// Distance from `p` to the segment.
+    #[inline]
+    #[must_use]
+    pub fn distance(&self, p: Vec3) -> f32 {
+        let ab = self.to - self.from;
+        let len2 = ab.length_squared();
+        let t = if len2 > 0.0 {
+            ((p - self.from).dot(ab) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        p.distance(ab.mul_add(Vec3::splat(t), self.from))
+    }
+
+    /// The segment's midpoint, and the half extent of the box around its
+    /// capsule of `radius`.
+    #[must_use]
+    pub fn bounds(&self, radius: f32) -> (Vec3, Vec3) {
+        let mid = self.from.midpoint(self.to);
+        let half = (self.to - self.from)
+            .abs()
+            .mul_add(Vec3::splat(0.5), Vec3::splat(radius));
+        (mid, half)
+    }
+
+    /// The same segment in grid space: `(p - origin) / voxel_size`.
+    #[must_use]
+    pub fn to_grid(self, origin: Vec3, voxel_size: f32) -> Self {
+        Self {
+            from: (self.from - origin) / voxel_size,
+            to: (self.to - origin) / voxel_size,
+        }
+    }
+
+    /// The voxels its capsule of `radius` (grid space) can touch, one voxel
+    /// of margin included, clamped to a grid of `size`.
+    fn range(&self, radius: f32, size: UVec3) -> Option<(UVec3, UVec3)> {
+        let max_bound = size.as_vec3() - Vec3::ONE;
+        let pad = Vec3::splat(radius + 1.0);
+        let min = (self.from.min(self.to) - pad).max(Vec3::ZERO).as_ivec3();
+        let max = (self.from.max(self.to) + pad).min(max_bound).as_ivec3();
+        grid_range(min, max)
+    }
+}
+
+impl From<Vec3> for Sweep {
+    fn from(p: Vec3) -> Self {
+        Self::point(p)
+    }
+}
+
+/// Which side of its plane a flatten works on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlaneMode {
+    /// Fills dips below the plane and shaves bumps above it.
+    #[default]
+    Flatten,
+    /// Only adds material: fills dips up to the plane, leaves bumps alone.
+    Fill,
+    /// Only removes material: shaves bumps down to the plane, leaves dips
+    /// alone.
+    Scrape,
 }
 
 /// A CSG edit worked out but not yet written (see
@@ -178,19 +247,21 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     }
 
     /// Like `apply_sphere`, but `op` also gets the voxel's grid position:
-    /// (`current_value`, `position`, `distance_from_center`).
-    fn apply_sphere_at<F>(&mut self, center: Vec3, radius: f32, mut op: F)
+    /// (`current_value`, `position`, `distance_from_center`). Given a
+    /// `Sweep`, the distance is to its segment.
+    fn apply_sphere_at<F>(&mut self, at: impl Into<Sweep>, radius: f32, mut op: F)
     where
         F: FnMut(T, Vec3, f32) -> T,
     {
-        let Some((min, max)) = sphere_range(center, radius, self.size()) else {
+        let at = at.into();
+        let Some((min, max)) = at.range(radius, self.size()) else {
             return;
         };
         for z in min.z..=max.z {
             for y in min.y..=max.y {
                 for x in min.x..=max.x {
                     let pos = UVec3::new(x, y, z).as_vec3();
-                    let dist = pos.distance(center);
+                    let dist = at.distance(pos);
                     if dist <= radius {
                         let current = self.get(x, y, z);
                         let new_value = op(current, pos, dist);
@@ -275,10 +346,13 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// rock at its border, and can only see the surface coming in its
     /// neighbour. `None` mirrors the inside neighbour instead.
     ///
+    /// Given a `Sweep`, the shape is the capsule around its segment, and
+    /// the falloff is by distance from the segment.
+    ///
     /// Returns the voxels this call turned from outside to inside.
     fn csg_sphere(
         &mut self,
-        center: Vec3,
+        at: impl Into<Sweep>,
         radius: f32,
         reach: f32,
         subtract: bool,
@@ -289,7 +363,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         T: SignedDistance,
         Self: Sync,
     {
-        let delta = self.csg_sphere_delta(center, radius, reach, subtract, max_step, beyond);
+        let delta = self.csg_sphere_delta(at, radius, reach, subtract, max_step, beyond);
         self.apply_csg_delta(delta)
     }
 
@@ -298,7 +372,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// other's borders through `beyond`) before any is written.
     fn csg_sphere_delta(
         &self,
-        center: Vec3,
+        at: impl Into<Sweep>,
         radius: f32,
         reach: f32,
         subtract: bool,
@@ -309,9 +383,10 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         T: SignedDistance,
         Self: Sync,
     {
+        let at = at.into();
         let outer = radius + reach;
         let size = self.size();
-        let Some((min, max)) = sphere_range(center, outer, size) else {
+        let Some((min, max)) = at.range(outer, size) else {
             return CsgDelta::default();
         };
         let read = |v: UVec3| self.get(v.x, v.y, v.z).distance();
@@ -355,7 +430,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             for z in zs {
                 for y in min.y..=max.y {
                     for x in min.x..=max.x {
-                        let dist = UVec3::new(x, y, z).as_vec3().distance(center);
+                        let dist = at.distance(UVec3::new(x, y, z).as_vec3());
                         if dist > outer {
                             continue;
                         }
@@ -454,12 +529,14 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
     /// depend on iteration order. An axis whose neighbour lies outside the
     /// chunk is left as is (as if the field continued linearly), so linear
     /// fields — flat ground — never move, and chunk borders stay put.
-    fn smooth_sphere(&mut self, center: Vec3, radius: f32, amount: f32)
+    /// Given a `Sweep`, it smooths the capsule around its segment.
+    fn smooth_sphere(&mut self, at: impl Into<Sweep>, radius: f32, amount: f32)
     where
         T: SignedDistance,
     {
+        let at = at.into();
         let size = self.size();
-        let Some((min, max)) = sphere_range(center, radius, size) else {
+        let Some((min, max)) = at.range(radius, size) else {
             return;
         };
         let read = |x: u32, y: u32, z: u32| self.get(x, y, z).distance();
@@ -476,7 +553,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         for z in min.z..=max.z {
             for y in min.y..=max.y {
                 for x in min.x..=max.x {
-                    let dist = UVec3::new(x, y, z).as_vec3().distance(center);
+                    let dist = at.distance(UVec3::new(x, y, z).as_vec3());
                     if dist > radius {
                         continue;
                     }
@@ -506,24 +583,33 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
 
     /// Pulls the distances inside the sphere toward those of a plane
     /// through `plane_point` with unit `plane_normal` (grid space, normal
-    /// pointing out of the terrain): fills dips below it and shaves bumps
-    /// above it. `amount` (0..=1) as in `smooth_sphere`. Depends only on
-    /// position and the current value, so it's seamless across chunks.
+    /// pointing out of the terrain). `mode` picks the side it works on:
+    /// filling dips below the plane, shaving bumps above it, or both.
+    /// `amount` (0..=1) as in `smooth_sphere`. Depends only on position and
+    /// the current value, so it's seamless across chunks. Given a `Sweep`,
+    /// it works on the capsule around its segment.
     fn flatten_sphere(
         &mut self,
-        center: Vec3,
+        at: impl Into<Sweep>,
         radius: f32,
         plane_point: Vec3,
         plane_normal: Vec3,
         amount: f32,
+        mode: PlaneMode,
     ) where
         T: SignedDistance,
     {
-        self.apply_sphere_at(center, radius, |cur, pos, dist| {
+        self.apply_sphere_at(at, radius, |cur, pos, dist| {
             let c = cur.distance();
             let plane = (pos - plane_point).dot(plane_normal);
+            // Negative is solid, so the lower value holds more material.
+            let target = match mode {
+                PlaneMode::Flatten => plane,
+                PlaneMode::Fill => c.min(plane),
+                PlaneMode::Scrape => c.max(plane),
+            };
             let t = (amount * brush_falloff(dist, radius)).clamp(0.0, 1.0);
-            T::from_signed_distance((plane - c).mul_add(t, c))
+            T::from_signed_distance((target - c).mul_add(t, c))
         });
     }
 }
@@ -691,7 +777,7 @@ impl SignedDistance for f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cuboid, FieldBoxOps, FieldSphereOps, UVec3, Vec3};
+    use super::{Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sweep, UVec3, Vec3};
     use crate::{
         field::Field,
         field::{LOD, SDF, VisibilityField},
@@ -968,11 +1054,71 @@ mod tests {
         // Ground at y = 1.5; flatten toward y = 2.5 at full strength.
         let mut sdf = sdf_from(|_, y, _| y - 1.5);
         let center = Vec3::new(2.0, 2.0, 2.0);
-        sdf.flatten_sphere(center, 1.5, Vec3::new(0.0, 2.5, 0.0), Vec3::Y, 1.0);
+        sdf.flatten_sphere(
+            center,
+            1.5,
+            Vec3::new(0.0, 2.5, 0.0),
+            Vec3::Y,
+            1.0,
+            PlaneMode::Flatten,
+        );
         // The center gets the plane's distance exactly...
         assert!((sdf.get(2, 2, 2) - -0.5).abs() < 1e-5);
         // ...voxels outside the sphere keep the ground's.
         assert!((sdf.get(0, 2, 0) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fill_only_adds_and_scrape_only_removes() {
+        // Ground at y = 1.5, the brush at full strength on voxel (2, 2, 2).
+        let ground = |_: f32, y: f32, _: f32| y - 1.5;
+        let center = Vec3::splat(2.0);
+        let run = |plane_y: f32, mode| {
+            let mut sdf = sdf_from(ground);
+            let point = Vec3::new(0.0, plane_y, 0.0);
+            sdf.flatten_sphere(center, 1.5, point, Vec3::Y, 1.0, mode);
+            (sdf.get(2, 2, 2), sdf.get(2, 1, 2))
+        };
+        // A plane above the ground: Fill raises it, Scrape leaves it.
+        let (air, _) = run(2.5, PlaneMode::Fill);
+        assert!((air - -0.5).abs() < 1e-5, "fill left {air}");
+        let (air, _) = run(2.5, PlaneMode::Scrape);
+        assert!((air - 0.5).abs() < 1e-5, "scrape moved {air}");
+        // A plane below it: Scrape cuts down to it, Fill leaves it.
+        let (_, rock) = run(0.5, PlaneMode::Scrape);
+        assert!((rock - 0.5).abs() < 1e-5, "scrape left {rock}");
+        let (_, rock) = run(0.5, PlaneMode::Fill);
+        assert!((rock - -0.5).abs() < 1e-5, "fill moved {rock}");
+    }
+
+    #[test]
+    fn swept_dig_leaves_no_gap_between_dabs() {
+        let ground = |_: f32, y: f32, _: f32| y - 10.5;
+        let (a, b) = (Vec3::new(3.0, 10.0, 8.0), Vec3::new(12.0, 10.0, 8.0));
+        let fresh = || {
+            let mut sdf = SDF::new(LOD::Low);
+            let n = sdf.size().x;
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        sdf.set(x, y, z, ground(0.0, f32_from_u32(y), 0.0));
+                    }
+                }
+            }
+            sdf
+        };
+        // Two dabs 9 voxels apart, radius 2: rock left between them.
+        let mut dabs = fresh();
+        dabs.csg_sphere(a, 2.0, 2.0, true, None, no_halo);
+        dabs.csg_sphere(b, 2.0, 2.0, true, None, no_halo);
+        assert!(dabs.get(8, 10, 8) < 0.0);
+        // The sweep between them digs the whole trench, exactly.
+        let mut swept = fresh();
+        swept.csg_sphere(Sweep { from: a, to: b }, 2.0, 2.0, true, None, no_halo);
+        assert!((swept.get(8, 10, 8) - 2.0).abs() < 1e-5);
+        assert!((swept.get(8, 9, 8) - 1.0).abs() < 1e-5);
+        // Past its ends it's the same as the dabs.
+        assert!((swept.get(0, 10, 8) - dabs.get(0, 10, 8)).abs() < 1e-5);
     }
 
     fn hidden_count(field: &VisibilityField) -> usize {

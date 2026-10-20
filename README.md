@@ -31,8 +31,8 @@ hardware such as a Steam Deck.
   - `VisibilityField`: an optional per-voxel mask, discarded per pixel
   - `MaterialField<M>`: per-voxel ids from your own material enum
 - **Editing.** World-space sphere and box brushes (`WorldEditor`), exact
-  CSG spheres (`SdfCsgSphere`), smooth and flatten sculpts
-  (`SdfSculptSphere`), and material painting by palette id
+  CSG spheres or swept capsules (`SdfCsgSphere`), smooth, flatten, fill
+  and scrape sculpts (`SdfSculptSphere`), and material painting by palette id
   (`MaterialPaint`). Edits that span chunks apply to every chunk they
   touch.
 - **Persistence.** Edited chunks autosave to `./saves/chunks/` (`SaveDirectory`). Saves load
@@ -93,11 +93,13 @@ fn setup(mut commands: Commands) {
 ```
 
 The built-in cursor brush is on by default: hold left mouse to apply
-`CursorBrush::tool` (`BrushTool::Dig`, `Build`, `Smooth`, `Flatten` or
-`Paint`), and hold Ctrl as well to swap dig and build. Set its `radius`,
-`strength`, `material` (a palette id, used by Paint and by Build) and
-`flatten` (`FlattenPlane::Level` or `Slope`) at runtime; the app binds
-the keys. F8 cycles the ray backend (Auto / CPU / GPU). Turn the brush off
+`CursorBrush::tool` (`BrushTool::Dig`, `Build`, `Smooth`, `Flatten`,
+`Paint`, or the one-sided flattens `Fill` and `Scrape`), and hold Ctrl as
+well to swap dig and build (or fill and scrape). Each frame's edit sweeps
+a capsule from the last one, so fast strokes leave no gaps; the stroke in
+progress is in `BrushStroke`. Set its `radius`, `strength`, `material` (a
+palette id, used by Paint and by Build) and `flatten`
+(`FlattenPlane::Level` or `Slope`) at runtime; the app binds the keys. F8 cycles the ray backend (Auto / CPU / GPU). Turn the brush off
 with `CursorBrush { enabled: false, ..default() }` and edit from
 `CursorHit` yourself.
 
@@ -289,7 +291,8 @@ and labels results `deck-<label>` (default: the commit hash).
 
 CPU profiling uses [Tracy](https://github.com/wolfpld/tracy). The dev shell
 pins Tracy 0.14.1, the protocol version Bevy 0.20's client speaks
-(`nix/tracy.nix`). The app only records while Tracy is connected, so
+(`devenv/bevy/tracy.nix` in [ChousX/NixOS](https://github.com/ChousX/NixOS)).
+The app only records while Tracy is connected, so
 connect when the part you care about starts:
 
 ```sh

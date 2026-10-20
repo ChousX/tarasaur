@@ -1027,6 +1027,7 @@ fn drive_reslots(
             csg.write(SdfCsgSphere {
                 center,
                 radius: RESLOT_FILL_RADIUS,
+                sweep_from: None,
                 subtract: false,
                 max_step: None,
                 paint: None,
@@ -1035,6 +1036,7 @@ fn drive_reslots(
             csg.write(SdfCsgSphere {
                 center,
                 radius: RESLOT_DIG_RADIUS,
+                sweep_from: None,
                 subtract: true,
                 max_step: None,
                 paint: None,
@@ -2773,6 +2775,7 @@ fn drive_dig(bench: Res<Bench>, terrain: TerrainRay, mut csg: MessageWriter<SdfC
     csg.write(SdfCsgSphere {
         center: hit.pos,
         radius: DIG_RADIUS,
+        sweep_from: None,
         subtract: true,
         max_step: Some(DIG_STEP),
         paint: None,
