@@ -21,15 +21,17 @@ use bevy::{
     tasks::ComputeTaskPool,
 };
 
+use std::borrow::Cow;
+
 use crate::{
     chunk::{Chunk, ChunkManager, ChunkPosition},
-    field::{GpuChannel, LOD, VisibilityField, VoxelField},
+    field::{GpuChannel, LOD, SDF, VisibilityField, VoxelField},
     field::{
-        apron::{fill_apron, seam_lod_ranks},
+        apron::{apron_source, fill_apron_with, seam_lod_ranks},
         surface::HasSurface,
     },
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
-    num::usize_from,
+    num::{f32_from_u32, usize_from},
     voxel::{
         arena::VoxelChunkArenaSet,
         layer::{LayerResidency, SubSurface, VoxelLayers},
@@ -40,15 +42,19 @@ use crate::{
 /// The surfaces in one padded volume, each as uploaded.
 pub type SurfaceBytes = Vec<(SubSurface, Vec<u8>)>;
 
-/// `SurfaceLayer::surfaces` for a field: the surfaces in one padded
-/// volume, as uploaded.
-pub type Surfaces<T> = fn(&[<T as VoxelField>::Elem], LOD) -> SurfaceBytes;
+/// A neighbour's voxels (resampled to its upload LOD if need be) and size,
+/// per `NEIGHBORS_MASK` entry.
+type ApronSources<'a, E> = [Option<(Cow<'a, [E]>, u32)>; 7];
 
-/// One surface per volume, from `gpu_bytes`: every side channel, and a
-/// layer that doesn't override `surfaces`.
-pub fn single_surface<T: VoxelField>(vol: &[T::Elem], _: LOD) -> SurfaceBytes {
-    vec![(SubSurface(0), T::gpu_bytes(vol))]
-}
+/// Each surface's signed distances from one volume, in its voxels.
+pub type SurfaceDistances = Vec<(SubSurface, Vec<f32>)>;
+
+/// `SurfaceLayer::SURFACES` for a field: from a chunk's voxels at a LOD,
+/// each surface's signed distances in voxels of that LOD.
+pub type Surfaces<T> = fn(&[<T as VoxelField>::Elem], LOD) -> SurfaceDistances;
+
+/// Each neighbour's surfaces and size, per `NEIGHBORS_MASK` entry.
+type NeighbourSurfaces = [Option<(SurfaceDistances, u32)>; 7];
 
 /// Frames between full consistency checks in debug builds.
 const AUDIT_INTERVAL: u32 = 120;
@@ -74,15 +80,37 @@ fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
     }
 }
 
+/// How a layer's field is extracted: which chunks (`residency`), at what
+/// LOD at most (`upload_lod`), and what a padded volume becomes
+/// (`surfaces`).
+pub struct ExtractConfig<T: VoxelField> {
+    pub residency: LayerResidency,
+    pub upload_lod: Option<LOD>,
+    /// `None`: the field is its own single surface.
+    pub surfaces: Option<Surfaces<T>>,
+}
+
+// By hand: a derive would ask `T: Copy`, and nothing here holds a `T`.
+impl<T: VoxelField> Clone for ExtractConfig<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: VoxelField> Copy for ExtractConfig<T> {}
+
+/// The LOD a chunk at `lod` is uploaded at under `cap`.
+fn effective(lod: LOD, cap: Option<LOD>) -> LOD {
+    cap.map_or(lod, |c| lod.min(c))
+}
+
 /// Registers the hand-off of field `T`: the main-world padding system and
-/// the render-world extract system that forwards its output. `residency`
-/// is its layer's: which chunks are extracted at all; `surfaces` turns a
-/// padded volume into what is uploaded.
-pub fn add_field_extraction<T>(app: &mut App, residency: LayerResidency, surfaces: Surfaces<T>)
+/// the render-world extract system that forwards its output.
+pub fn add_field_extraction<T>(app: &mut App, config: ExtractConfig<T>)
 where
     T: VoxelField,
 {
-    app.insert_resource(PaddedOutbox::<T>::new(residency, surfaces))
+    app.insert_resource(PaddedOutbox::<T>::new(config))
         .add_systems(Last, pad_dirty_chunks::<T>);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
@@ -171,23 +199,19 @@ pub struct PaddedChunk {
 }
 
 /// This frame's padded volumes of field `T`, for `extract_voxel_chunks`,
-/// which chunks its layer extracts, and how a volume becomes surfaces.
+/// and how its layer extracts them.
 #[derive(Resource)]
 pub struct PaddedOutbox<T: VoxelField> {
     pub chunks: Vec<PaddedChunk>,
-    pub residency: LayerResidency,
-    pub surfaces: Surfaces<T>,
-    _type: PhantomData<T>,
+    pub config: ExtractConfig<T>,
 }
 
 impl<T: VoxelField> PaddedOutbox<T> {
     #[must_use]
-    pub const fn new(residency: LayerResidency, surfaces: Surfaces<T>) -> Self {
+    pub const fn new(config: ExtractConfig<T>) -> Self {
         Self {
             chunks: Vec::new(),
-            residency,
-            surfaces,
-            _type: PhantomData,
+            config,
         }
     }
 }
@@ -233,40 +257,45 @@ impl ExtractState {
     }
 }
 
+/// `lod` is the chunk's own; the key holds the LOD it is uploaded at.
 fn extract_key<T: VoxelField>(
     field: &T,
     pos: IVec3,
     lod: LOD,
+    cap: Option<LOD>,
     chunk_manager: &ChunkManager,
     query: &FieldQuery<T>,
 ) -> ExtractKey {
+    let eff = effective(lod, cap);
     let mut versions = [0u64; 8];
     let (own, neighbor_versions) = versions.split_at_mut(1);
     if let Some(own) = own.first_mut() {
         *own = field.version();
     }
-    // Per axis, whether the face neighbour across it is coarser: then the
-    // apron steps by its voxel along that axis (see `fill_apron_with`).
+    // Per axis, whether the face neighbour across it is coarser (as
+    // uploaded): then the apron steps by its voxel along that axis (see
+    // `fill_apron_with`).
     let coarse_face = [IVec3::X, IVec3::Y, IVec3::Z].map(|axis| {
         chunk_manager
             .get_chunk(&pos.wrapping_add(axis))
             .and_then(|e| query.get(e).ok())
             .filter(|(_, _, f, l)| f.data_slice().len() == l.volume())
-            .is_some_and(|(_, _, _, l)| l.size() < lod.size())
+            .is_some_and(|(_, _, _, l)| effective(*l, cap).size() < eff.size())
     });
     for ((i, offset), slot) in NEIGHBORS_MASK.iter().enumerate().zip(neighbor_versions) {
         if let Some(n_entity) = chunk_manager.get_chunk(&pos.wrapping_add(*offset))
             && let Ok((_, _, n_field, n_lod)) = query.get(n_entity)
         {
             // At equal LOD with unit steps the apron reads only the
-            // neighbour's facing slab; otherwise it resamples more of it,
-            // so use the full version.
+            // neighbour's facing slab; otherwise (including a neighbour
+            // resampled to the cap) it reads more of it, so use the full
+            // version.
             let unit_steps = offset
                 .to_array()
                 .iter()
                 .zip(coarse_face)
                 .all(|(d, coarse)| *d == 0 || !coarse);
-            let v = if *n_lod == lod && unit_steps {
+            let v = if *n_lod == eff && unit_steps {
                 n_field.border_version(i)
             } else {
                 n_field.version()
@@ -276,21 +305,45 @@ fn extract_key<T: VoxelField>(
         }
     }
     (
-        lod,
+        eff,
         versions,
-        seam_lod_ranks(pos, lod, chunk_manager, query),
+        seam_lod_ranks(pos, lod, cap, chunk_manager, query),
     )
 }
 
-/// The chunk's field plus its `+x/+y/+z` apron, as its surfaces to upload.
-/// None when the field asks not to be extracted.
+/// `data`, a `from` grid, resampled to a `to` grid (coarser or equal):
+/// each voxel of `to` reads the voxel of `from` it lands on (interpolated
+/// or nearest, as the field samples its apron) and is rescaled to `to`'s
+/// voxel units.
+pub fn resample<T: VoxelField>(data: &[T::Elem], from: LOD, to: LOD) -> Vec<T::Elem> {
+    let (n, m) = (from.size(), to.size());
+    if n == m {
+        return data.to_vec();
+    }
+    let ratio = f32_from_u32(n) / f32_from_u32(m);
+    let mut out = Vec::with_capacity(to.volume());
+    for z in 0..m {
+        for y in 0..m {
+            for x in 0..m {
+                let at = UVec3::new(x, y, z).as_vec3() * ratio;
+                let v = T::sample_apron(data, n, at.x, at.y, at.z);
+                out.push(T::rescale(v, ratio));
+            }
+        }
+    }
+    out
+}
+
+/// The chunk's field plus its `+x/+y/+z` apron, at the LOD it is
+/// uploaded at, as its surfaces to upload. None when the field asks not to
+/// be extracted.
 fn padded_surfaces<T>(
     field: &T,
     pos: IVec3,
     lod: LOD,
     chunk_manager: &ChunkManager,
     query: &FieldQuery<T>,
-    surfaces: Surfaces<T>,
+    config: ExtractConfig<T>,
 ) -> SurfaceBytes
 where
     T: VoxelField,
@@ -298,13 +351,66 @@ where
     if !field.should_extract() {
         return Vec::new();
     }
-    let size = lod.size();
+    let eff = effective(lod, config.upload_lod);
+    let own: Cow<[T::Elem]> = if eff == lod {
+        Cow::Borrowed(field.data_slice())
+    } else {
+        Cow::Owned(resample::<T>(field.data_slice(), lod, eff))
+    };
+    // The neighbours, each at the LOD it is uploaded at.
+    let sources: ApronSources<T::Elem> = NEIGHBORS_MASK.map(|offset| {
+        let (f, l) = apron_source(pos.wrapping_add(offset), chunk_manager, query)?;
+        let n_eff = effective(l, config.upload_lod);
+        Some(if n_eff == l {
+            (Cow::Borrowed(f.data_slice()), l.size())
+        } else {
+            (
+                Cow::Owned(resample::<T>(f.data_slice(), l, n_eff)),
+                n_eff.size(),
+            )
+        })
+    });
+    let Some(surfaces) = config.surfaces else {
+        // The field is its own surface: pad it as it is.
+        let mut vol = padded::<T>(&own, eff.size());
+        fill_apron_with::<T>(&mut vol, eff.size(), |offset| {
+            let i = NEIGHBORS_MASK.iter().position(|o| *o == offset)?;
+            sources.get(i)?.as_ref().map(|(d, n)| (d.as_ref(), *n))
+        });
+        return vec![(SubSurface(0), T::gpu_bytes(&vol))];
+    };
+    // Each surface's distances, from the chunk and from every neighbour in
+    // its own LOD; then each is padded as an SDF.
+    let own_surfaces = surfaces(&own, eff);
+    let neighbour_surfaces: NeighbourSurfaces = std::array::from_fn(|i| {
+        let (d, n) = sources.get(i)?.as_ref()?;
+        let n_lod = LOD::ALL.into_iter().find(|l| l.size() == *n)?;
+        Some((surfaces(d, n_lod), *n))
+    });
+    own_surfaces
+        .into_iter()
+        .map(|(sub, distances)| {
+            let mut vol = padded::<SDF>(&distances, eff.size());
+            fill_apron_with::<SDF>(&mut vol, eff.size(), |offset| {
+                let i = NEIGHBORS_MASK.iter().position(|o| *o == offset)?;
+                let (subs, n) = neighbour_surfaces.get(i)?.as_ref()?;
+                let (_, d) = subs.iter().find(|(s, _)| *s == sub)?;
+                Some((d.as_slice(), *n))
+            });
+            (sub, SDF::gpu_bytes(&vol))
+        })
+        .collect()
+}
+
+/// `data` (`size`^3, x fastest) in a padded volume, its apron still
+/// default.
+fn padded<T: VoxelField>(data: &[T::Elem], size: u32) -> Vec<T::Elem> {
     let padded_size = size.wrapping_add(PADDING);
     let mut vol = vec![T::Elem::default(); usize_from(padded_size).saturating_pow(3)];
     // Copy row by row: each source row of x lands at the start of the
     // same (y, z) row in the padded volume.
     let row_len = usize_from(size);
-    let mut src_rows = field.data_slice().chunks_exact(row_len);
+    let mut src_rows = data.chunks_exact(row_len);
     for z in 0..size {
         for y in 0..size {
             let dst = flatten_cube(0, y, z, padded_size);
@@ -314,8 +420,7 @@ where
             }
         }
     }
-    fill_apron::<T>(&mut vol, pos, chunk_manager, query);
-    surfaces(&vol, lod)
+    vol
 }
 
 /// Builds new padded volumes, in parallel, for the chunks whose inputs
@@ -333,10 +438,11 @@ pub fn pad_dirty_chunks<T>(
     T: VoxelField,
 {
     outbox.chunks.clear();
-    let (residency, surfaces) = (outbox.residency, outbox.surfaces);
+    let config = outbox.config;
+    let residency = config.residency;
     state.collect(&mut changes);
     if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
-        audit_extraction(&mut state, &chunk_manager, &query, &filter, residency);
+        audit_extraction(&mut state, &chunk_manager, &query, &filter, config);
     }
 
     // Which chunks need a new volume: cheap, sequential.
@@ -364,7 +470,7 @@ pub fn pad_dirty_chunks<T>(
         // Keyed by entity, not position: a chunk that despawns and respawns at
         // the same spot comes back at version 0 with unchanged neighbours, so a
         // position key matched and the new entity never got an arena slot.
-        let key = extract_key(field, *pos, *lod, &chunk_manager, &query);
+        let key = extract_key(field, *pos, *lod, config.upload_lod, &chunk_manager, &query);
         let Some(old) = last.insert(entity, key) else {
             jobs.push((entity, *pos, field, *lod, key.2));
             continue;
@@ -378,7 +484,7 @@ pub fn pad_dirty_chunks<T>(
         // around one that changed LOD, and only the mesher reads those.
         if (old.0, old.1) == (key.0, key.1) {
             if T::GPU == GpuChannel::Shape {
-                meta_only.push((entity, *pos, *lod, key.2));
+                meta_only.push((entity, *pos, key.0, key.2));
             }
             continue;
         }
@@ -390,13 +496,14 @@ pub fn pad_dirty_chunks<T>(
     let mut built: Vec<(usize, SurfaceBytes)> = ComputeTaskPool::get().scope(|s| {
         for (i, &(_, pos, field, lod, _)) in jobs.iter().enumerate() {
             s.spawn(async move {
-                let out = padded_surfaces(field, pos, lod, manager, fields, surfaces);
+                let out = padded_surfaces(field, pos, lod, manager, fields, config);
                 (i, out)
             });
         }
     });
     built.sort_unstable_by_key(|b| b.0);
     for (&(entity, pos, _, lod, seam_ranks), (_, now)) in jobs.iter().zip(built) {
+        let lod = effective(lod, config.upload_lod);
         let chunk = |sub: SubSurface, bytes: Vec<u8>| PaddedChunk {
             entity,
             pos,
@@ -520,10 +627,11 @@ fn audit_extraction<T>(
     chunk_manager: &ChunkManager,
     query: &FieldQuery<T>,
     filter: &ExtractFilter,
-    residency: LayerResidency,
+    config: ExtractConfig<T>,
 ) where
     T: VoxelField,
 {
+    let residency = config.residency;
     let mut missed = Vec::new();
     for (entity, pos, field, lod) in query.iter() {
         if state.dirty.contains(&pos.0) || state.positions.get(&entity) != Some(&pos.0) {
@@ -537,7 +645,14 @@ fn audit_extraction<T>(
         } else {
             field.data_slice().len() == lod.volume()
                 && state.last.get(&entity)
-                    != Some(&extract_key(field, pos.0, *lod, chunk_manager, query))
+                    != Some(&extract_key(
+                        field,
+                        pos.0,
+                        *lod,
+                        config.upload_lod,
+                        chunk_manager,
+                        query,
+                    ))
         };
         if out_of_date {
             missed.push(pos.0);
@@ -725,7 +840,7 @@ fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet, residency: 
 mod tests {
     use bevy::prelude::*;
 
-    use super::{PaddedOutbox, add_field_extraction};
+    use super::{ExtractConfig, PaddedOutbox, add_field_extraction, resample};
     use crate::{
         chunk::{Chunk, ChunkManager, ChunkPosition},
         field::{Field, GpuChannel, LOD, VoxelField, surface::HasSurface},
@@ -787,12 +902,19 @@ mod tests {
         }
     }
 
-    fn owners(vol: &[u8], _: LOD) -> Vec<(SubSurface, Vec<u8>)> {
+    /// One surface per owner present: inside its voxels, outside the rest.
+    fn owners(vol: &[u8], _: LOD) -> Vec<(SubSurface, Vec<f32>)> {
         let mut ids: Vec<u8> = vol.iter().copied().filter(|&v| v != 0).collect();
         ids.sort_unstable();
         ids.dedup();
         ids.into_iter()
-            .map(|id| (SubSurface(id), vec![id; vol.len()]))
+            .map(|id| {
+                let d = vol
+                    .iter()
+                    .map(|&v| if v == id { -1.0 } else { 1.0 })
+                    .collect();
+                (SubSurface(id), d)
+            })
             .collect()
     }
 
@@ -816,7 +938,14 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<ChunkManager>()
             .init_resource::<ForceResident>();
-        add_field_extraction::<Owners>(&mut app, LayerResidency::Loaded, owners);
+        add_field_extraction::<Owners>(
+            &mut app,
+            ExtractConfig {
+                residency: LayerResidency::Loaded,
+                upload_lod: None,
+                surfaces: Some(owners),
+            },
+        );
         let chunk = app
             .world_mut()
             .spawn((
@@ -862,5 +991,38 @@ mod tests {
         set(&mut app, &[(2, 0)]);
         app.update();
         assert_eq!(outbox(&app), vec![]);
+    }
+
+    /// A planar SDF downsampled 4x reads the same plane in the coarser
+    /// grid's voxel units.
+    #[test]
+    fn resample_keeps_a_plane() {
+        use crate::field::SDF;
+        let (from, to) = (LOD::Low, LOD::Lowest); // 16 -> 4 voxels
+        let plane = |p: Vec3| p.dot(Vec3::new(0.25, 0.5, -0.125)) - 3.0;
+        let mut data = vec![0.0f32; from.volume()];
+        for z in 0..from.size() {
+            for y in 0..from.size() {
+                for x in 0..from.size() {
+                    data[flatten_cube(x, y, z, from.size())] = plane(UVec3::new(x, y, z).as_vec3());
+                }
+            }
+        }
+        let coarse = resample::<SDF>(&data, from, to);
+        assert_eq!(coarse.len(), to.volume());
+        for z in 0..to.size() {
+            for y in 0..to.size() {
+                for x in 0..to.size() {
+                    // Coarse voxel (x, y, z) sits on fine voxel 4(x, y, z),
+                    // and its distances are 4x fewer, coarser voxels.
+                    let want = plane(UVec3::new(x, y, z).as_vec3() * 4.0) / 4.0;
+                    let got = coarse[flatten_cube(x, y, z, to.size())];
+                    assert!(
+                        (got - want).abs() < 1e-5,
+                        "({x}, {y}, {z}): {got} vs {want}"
+                    );
+                }
+            }
+        }
     }
 }

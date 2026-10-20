@@ -31,10 +31,11 @@ use bevy::{
 
 use crate::{
     chunk::CHUNK_SIZE,
+    field::LOD,
     num::{f32_from_u32, u64_from_usize, usize_from},
     voxel::{
         arena::VoxelChunkArena,
-        layer::{LayerIndex, LayerPass, VoxelLayers},
+        layer::{Layer, LayerIndex, LayerPass, VoxelLayers},
         pipeline::layouts::storage_buffer_entry,
         types::{CreateStorage, DrawIndexedIndirectArgs},
     },
@@ -276,17 +277,7 @@ pub fn prepare_voxel_view_draws(
         });
         for (layer, l, lod, index, arena) in arenas {
             {
-                // Front to back, so nearer terrain can hide what's behind
-                // it before that is shaded; a transparent layer the other
-                // way, so what's behind shows through what's in front.
-                by_distance.clear();
-                by_distance.extend(arena.active_slots.iter().filter_map(|&slot| {
-                    chunk_distance(arena, slot, frustum, eye).map(|d| (d, slot))
-                }));
-                by_distance.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-                if l.raster.pass == LayerPass::Transparent {
-                    by_distance.reverse();
-                }
+                cull_arena(arena, l, frustum, eye, &mut by_distance);
                 let normals_end = l.normals_end();
                 for list in &mut *visible {
                     list.clear();
@@ -329,19 +320,7 @@ pub fn prepare_voxel_view_draws(
                                 index,
                                 variant,
                             ));
-                            // Draw order: by layer; within one, chunks
-                            // without a mask first (they fill the early
-                            // depth buffer), then the finest LOD and nearer
-                            // chunks first.
-                            per_view.sort_by_key(|d| {
-                                (
-                                    d.layer,
-                                    d.variant.masked,
-                                    std::cmp::Reverse(d.lod),
-                                    d.variant.far,
-                                    d.arena,
-                                )
-                            });
+                            per_view.sort_by_key(|d| draw_order(&layers, d));
                             per_view.iter().position(is_this).unwrap_or_default()
                         }
                     };
@@ -355,6 +334,53 @@ pub fn prepare_voxel_view_draws(
             }
         }
     }
+}
+
+/// The arena's resident chunks in view, nearest first (farthest first for
+/// a transparent layer, so what's behind shows through what's in front).
+/// A chunk's surfaces are at one distance: they go in id order, so a layer
+/// can rely on it (water, then the flood above it).
+fn cull_arena(
+    arena: &VoxelChunkArena,
+    layer: &Layer,
+    frustum: &Frustum,
+    eye: Vec3,
+    by_distance: &mut Vec<(f32, u32)>,
+) {
+    by_distance.clear();
+    by_distance.extend(
+        arena
+            .active_slots
+            .iter()
+            .filter_map(|&slot| chunk_distance(arena, slot, frustum, eye).map(|d| (d, slot))),
+    );
+    let sub = |slot: u32| arena.sub_of_slot.get(usize_from(slot)).copied();
+    let transparent = layer.raster.pass == LayerPass::Transparent;
+    by_distance.sort_unstable_by(|a, b| {
+        let by_distance = if transparent {
+            b.0.total_cmp(&a.0)
+        } else {
+            a.0.total_cmp(&b.0)
+        };
+        by_distance.then_with(|| sub(a.1).cmp(&sub(b.1)))
+    });
+}
+
+/// Where a group of draws goes in a view's order: by layer; within one,
+/// chunks without a mask first (they fill the early depth buffer), then
+/// the finest LOD (the nearest ring) first, nearer chunks first. A
+/// transparent layer's rings go the other way, so a far ring's surfaces
+/// show through a near ring's.
+fn draw_order(layers: &VoxelLayers, d: &ArenaDraws) -> (LayerIndex, bool, usize, bool, usize) {
+    let far_first = layers
+        .get(d.layer)
+        .is_some_and(|l| l.raster.pass == LayerPass::Transparent);
+    let lod_order = if far_first {
+        d.lod
+    } else {
+        LOD::COUNT.saturating_sub(1).saturating_sub(d.lod)
+    };
+    (d.layer, d.variant.masked, lod_order, d.variant.far, d.arena)
 }
 
 /// Packs one view's visible draw arguments. Record it before the view's

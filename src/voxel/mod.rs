@@ -31,6 +31,7 @@ pub(crate) mod upload;
 pub(crate) mod util;
 
 pub use arena::ArenaConfig;
+pub use extract::Surfaces;
 pub use layer::{
     LayerDesc, LayerIndex, LayerMaterial, LayerPass, LayerRaster, LayerResidency, NoChannel,
     SideChannel, SubSurface, SurfaceLayer, VoxelLayers,
@@ -51,13 +52,12 @@ use bevy::{
 };
 
 use extract::{
-    LiveOutbox, Surfaces, add_field_extraction, release_despawned_chunks, single_surface,
-    track_live_chunks,
+    ExtractConfig, LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks,
 };
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
-    field::{GpuChannel, VoxelField},
+    field::{GpuChannel, LOD, VoxelField},
     plugin::AppVoxelFieldExt,
     voxel::{
         draw::{
@@ -143,22 +143,25 @@ impl AppSurfaceLayerExt for App {
             L::RESIDENCY,
             L::QUERYABLE,
         );
-        add_shape_upload::<L::Shape>(self, layer, L::RESIDENCY, L::surfaces);
-        L::Material::register(self, layer, L::RESIDENCY);
-        L::Mask::register(self, layer, L::RESIDENCY);
+        add_shape_upload::<L::Shape>(
+            self,
+            layer,
+            ExtractConfig {
+                residency: L::RESIDENCY,
+                upload_lod: L::UPLOAD_LOD,
+                surfaces: L::SURFACES,
+            },
+        );
+        L::Material::register(self, layer, L::RESIDENCY, L::UPLOAD_LOD);
+        L::Mask::register(self, layer, L::RESIDENCY, L::UPLOAD_LOD);
         self
     }
 }
 
 /// Hands the shape field `F` to the render world and uploads its surfaces
 /// into `layer`'s arenas.
-fn add_shape_upload<F: VoxelField>(
-    app: &mut App,
-    layer: LayerIndex,
-    residency: LayerResidency,
-    surfaces: Surfaces<F>,
-) {
-    add_field_extraction::<F>(app, residency, surfaces);
+fn add_shape_upload<F: VoxelField>(app: &mut App, layer: LayerIndex, config: ExtractConfig<F>) {
+    add_field_extraction::<F>(app, config);
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
@@ -173,12 +176,13 @@ fn add_shape_upload<F: VoxelField>(
 }
 
 /// Hands the material or mask field `F` to the render world and uploads it
-/// into the slots of `layer`'s chunks. Nothing for a field without a GPU
-/// channel.
+/// into the slots of `layer`'s chunks, at the layer's upload LOD. Nothing
+/// for a field without a GPU channel.
 pub(crate) fn add_channel_upload<F: VoxelField>(
     app: &mut App,
     layer: LayerIndex,
     residency: LayerResidency,
+    upload_lod: Option<LOD>,
 ) {
     let system = match F::GPU {
         GpuChannel::Material => prepare_material_upload::<F>.in_set(UploadSet::Channels),
@@ -191,7 +195,14 @@ pub(crate) fn add_channel_upload<F: VoxelField>(
             return;
         }
     };
-    add_field_extraction::<F>(app, residency, single_surface::<F>);
+    add_field_extraction::<F>(
+        app,
+        ExtractConfig {
+            residency,
+            upload_lod,
+            surfaces: None,
+        },
+    );
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };

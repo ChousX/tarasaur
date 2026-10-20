@@ -249,6 +249,8 @@ pub struct VoxelChunkArena {
     /// Which surfaces of each chunk hold a slot here, so a chunk's slots
     /// can be released without a scan.
     pub subs_of_entity: HashMap<MainEntity, Vec<SubSurface>>,
+    /// `[slot] -> SubSurface`, the CPU copy of `slot_sub_buffer`.
+    pub sub_of_slot: Vec<SubSurface>,
     pub active_slots: Vec<u32>, // every slot holding a chunk; drawn each frame
     /// Slots to re-mesh this frame. Drained by the compute dispatch, so only
     /// chunks whose inputs changed pay for surface nets.
@@ -636,6 +638,7 @@ impl VoxelChunkArena {
             free_slots: (0..sizes.max_chunks).rev().collect(),
             slot_of_key: HashMap::new(),
             subs_of_entity: HashMap::new(),
+            sub_of_slot: vec![SubSurface(0); slots],
             active_slots: Vec::new(),
             dirty_slots: Vec::new(),
             slot_range: vec![(0, 0); slots],
@@ -725,6 +728,9 @@ impl VoxelChunkArena {
             .entry(key.entity)
             .or_default()
             .push(key.sub);
+        if let Some(s) = self.sub_of_slot.get_mut(usize_from(slot)) {
+            *s = key.sub;
+        }
         *range = (base, cap);
         self.active_slots.push(slot);
         Some(slot)

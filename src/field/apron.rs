@@ -1,6 +1,7 @@
 //! Padded volumes: a chunk's voxels plus a `PADDING`-wide apron on its
 //! +x/+y/+z sides, read from its neighbours, as the mesher and the GPU
-//! queries consume them.
+//! queries consume them. `voxel::extract` builds them with
+//! `fill_apron_with`.
 
 use bevy::prelude::*;
 
@@ -10,29 +11,6 @@ use crate::{
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
     num::{f32_from_u32, usize_from},
 };
-
-/// Fills the `+x/+y/+z` apron of a padded volume from the 7 neighbours in
-/// `NEIGHBORS_MASK`, resampling across LODs.
-///
-/// A missing neighbour (or one mid-LOD-change, whose data doesn't match its
-/// LOD) falls back to this chunk's own edge voxels. Every region writes only
-/// apron voxels and reads only interior ones, so the regions are independent.
-pub fn fill_apron<T>(
-    vol: &mut [T::Elem],
-    chunk_pos: IVec3,
-    chunk_manager: &ChunkManager,
-    query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
-) where
-    T: VoxelField,
-{
-    let Some((_, lod)) = field_at(chunk_pos, chunk_manager, query) else {
-        return;
-    };
-    fill_apron_with::<T>(vol, lod.size(), |offset| {
-        apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
-            .map(|(f, l)| (f.data_slice(), l.size()))
-    });
-}
 
 fn field_at<'a, T: Component>(
     pos: IVec3,
@@ -45,7 +23,7 @@ fn field_at<'a, T: Component>(
 
 /// The neighbour at `pos` if the apron can read it: present, and its data
 /// matching its LOD (not mid-LOD-change).
-fn apron_source<'a, T: VoxelField>(
+pub fn apron_source<'a, T: VoxelField>(
     pos: IVec3,
     chunk_manager: &ChunkManager,
     query: &'a Query<(Entity, &ChunkPosition, &T, &LOD)>,
@@ -66,22 +44,29 @@ fn apron_source<'a, T: VoxelField>(
 ///
 /// Keep in sync with `fill_apron` (which neighbours it reads) and the
 /// decoding in `voxel_common.wesl`.
+///
+/// `cap` is the layer's upload LOD: every chunk counts as the coarser of
+/// its own LOD and the cap, as its volume is resampled to that.
 #[must_use]
 pub fn seam_lod_ranks<T: VoxelField>(
     chunk_pos: IVec3,
     lod: LOD,
+    cap: Option<LOD>,
     chunk_manager: &ChunkManager,
     query: &Query<(Entity, &ChunkPosition, &T, &LOD)>,
 ) -> [u32; 2] {
+    let capped = |l: LOD| cap.map_or(l, |c| l.min(c));
     let mut ranks = [0u32; 2];
     for i in 0u32..27 {
         let offset = UVec3::new(i % 3, (i / 3) % 3, i / 9)
             .as_ivec3()
             .wrapping_sub(IVec3::ONE);
         // `apron_source` would read this chunk itself at offset 0.
-        let rank = apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
-            .map_or(lod, |(_, l)| l)
-            .rank();
+        let rank = capped(
+            apron_source(chunk_pos.wrapping_add(offset), chunk_manager, query)
+                .map_or(lod, |(_, l)| l),
+        )
+        .rank();
         if let Some(word) = ranks.get_mut(usize_from(i / 16)) {
             *word |= rank << (i % 16).wrapping_mul(2);
         }

@@ -460,6 +460,14 @@ pub fn prepare_shape_upload<F: VoxelField>(
     let mut any_out_of_room = false;
     for ((p, x), (_, count)) in batch.into_iter().zip(counts) {
         let (lod, size) = (x.lod, x.size);
+        debug!(
+            "[shape {}] {:?} {:?} sub {} count {}",
+            std::any::type_name::<F>().rsplit("::").next().unwrap_or(""),
+            x.chunk_pos,
+            lod,
+            x.sub.0,
+            count
+        );
         if count == 0 {
             // No geometry: holding a slot (575 KB of SDF at High) would draw
             // nothing. Any old slot drew nothing for this data either.
@@ -498,21 +506,9 @@ pub fn prepare_shape_upload<F: VoxelField>(
             )
         }) else {
             arena_set.deferred.insert(key);
-            let lod_idx = VoxelChunkArenaSet::lod_index(lod);
-            if arena_set
-                .arenas
-                .get(lod_idx)
-                .is_some_and(|arenas| arenas.iter().any(VoxelChunkArena::dirty_full))
-            {
-                continue; // out of scratch for this frame: just wait
+            if not_placed(arena_set, lod, x.chunk_pos, *out_of_room) {
+                any_out_of_room = true;
             }
-            if !*out_of_room {
-                warn!(
-                    "[prepare_voxel_arena] no room for LOD {:?} chunk {:?}; it keeps its current mesh until space frees up",
-                    lod, x.chunk_pos
-                );
-            }
-            any_out_of_room = true;
             continue;
         };
         if before != Some(placed) {
@@ -534,6 +530,27 @@ pub fn prepare_shape_upload<F: VoxelField>(
         let n = u32::try_from(arena_set.reslotted.len()).unwrap_or(u32::MAX);
         stats.reslotted = stats.reslotted.saturating_add(n);
     }
+}
+
+/// A surface that found no slot this frame: out of re-mesh scratch (it
+/// just waits), or out of room (warned once per stretch). Returns whether
+/// it was the latter.
+fn not_placed(arena_set: &VoxelChunkArenaSet, lod: LOD, chunk_pos: IVec3, warned: bool) -> bool {
+    let lod_idx = VoxelChunkArenaSet::lod_index(lod);
+    if arena_set
+        .arenas
+        .get(lod_idx)
+        .is_some_and(|arenas| arenas.iter().any(VoxelChunkArena::dirty_full))
+    {
+        return false;
+    }
+    if !warned {
+        warn!(
+            "[prepare_shape_upload] no room for LOD {:?} chunk {:?}; it keeps its current mesh until space frees up",
+            lod, chunk_pos
+        );
+    }
+    true
 }
 
 /// Writes a placed chunk's SDF, metadata, vertex range and draw args into

@@ -201,7 +201,12 @@ impl<M: VoxelMaterial> Default for MaterialFieldPlugin<M> {
 impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
         app.add_voxel_field::<MaterialField<M>>();
-        add_channel_upload::<MaterialField<M>>(app, LayerIndex::TERRAIN, LayerResidency::Terrain);
+        add_channel_upload::<MaterialField<M>>(
+            app,
+            LayerIndex::TERRAIN,
+            LayerResidency::Terrain,
+            None,
+        );
         app.add_systems(
             Update,
             (

@@ -26,7 +26,7 @@ use tarasaur::{
     grid::{flatten_cube, sample_neighbor},
     num::{f32_from_i32, f32_from_u32},
     storage::generator::ChunkGeneratorRegistry,
-    voxel::{LayerMaterial, LayerPass, NoChannel, SubSurface},
+    voxel::{LayerMaterial, LayerPass, NoChannel, SubSurface, Surfaces},
 };
 
 /// Height of the water table, world units.
@@ -62,7 +62,6 @@ impl Field<f32> for WaterField {
 
     fn set(&mut self, x: u32, y: u32, z: u32, value: f32) {
         let i = flatten_cube(x, y, z, self.lod.size());
-        let value = value.clamp(-SDF_BAND, SDF_BAND);
         if let Some(slot) = self.data.get_mut(i)
             && slot.to_bits() != value.to_bits()
         {
@@ -102,7 +101,8 @@ impl VoxelField for WaterField {
     }
 
     fn gpu_bytes(vol: &[f32]) -> Vec<u8> {
-        quantized(vol, 0.0)
+        let packed: Vec<i16> = vol.iter().map(|&v| quantize_sdf(v)).collect();
+        bytemuck::cast_slice(&packed).to_vec()
     }
 
     fn rescale(v: f32, ratio: f32) -> f32 {
@@ -121,12 +121,6 @@ impl VoxelField for WaterField {
     }
 }
 
-/// `vol` shifted up by `offset` voxels, as uploaded.
-fn quantized(vol: &[f32], offset: f32) -> Vec<u8> {
-    let packed: Vec<i16> = vol.iter().map(|&v| quantize_sdf(v - offset)).collect();
-    bytemuck::cast_slice(&packed).to_vec()
-}
-
 /// The water table's distances for one chunk: a horizontal plane.
 fn water_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     let voxel = lod.voxel_size();
@@ -136,7 +130,9 @@ fn water_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     for _z in 0..n {
         for y in 0..n {
             let wy = f32_from_u32(y).mul_add(voxel, origin_y);
-            let d = ((wy - WATER_LEVEL) / voxel).clamp(-SDF_BAND, SDF_BAND);
+            // Unclamped: the flood surface is this shifted by `FLOOD_ABOVE`,
+            // which must still cross zero. Quantizing clamps at upload.
+            let d = (wy - WATER_LEVEL) / voxel;
             out.extend(std::iter::repeat_n(d, n as usize));
         }
     }
@@ -202,19 +198,22 @@ impl SurfaceLayer for WaterLayer {
     type Material = NoChannel;
     type Mask = NoChannel;
     type Raster = FlatRaster;
+    /// Flat planes need no detail: a 64th of the arena memory of `High`.
+    const UPLOAD_LOD: Option<LOD> = Some(LOD::Low);
 
     /// The water table, and the flood level `FLOOD_ABOVE` over it.
-    fn surfaces(vol: &[f32], lod: LOD) -> Vec<(SubSurface, Vec<u8>)> {
-        vec![
-            (SubSurface(0), quantized(vol, 0.0)),
-            (
-                SubSurface(1),
-                quantized(vol, FLOOD_ABOVE / lod.voxel_size()),
-            ),
-        ]
-    }
+    const SURFACES: Option<Surfaces<WaterField>> = Some(water_surfaces);
 }
 
+/// The water table's distances as they are, and shifted up by
+/// `FLOOD_ABOVE` in this volume's own voxels.
+fn water_surfaces(data: &[f32], lod: LOD) -> Vec<(SubSurface, Vec<f32>)> {
+    let shift = FLOOD_ABOVE / lod.voxel_size();
+    vec![
+        (SubSurface(0), data.to_vec()),
+        (SubSurface(1), data.iter().map(|v| v - shift).collect()),
+    ]
+}
 /// Adds the water table: its shader, its generator and the layer.
 pub fn add_water_layer(app: &mut App) {
     load_internal_asset!(app, FLAT_LAYER_SHADER, "flat_layer.wesl", Shader::from_wesl);

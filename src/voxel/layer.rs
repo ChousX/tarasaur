@@ -21,6 +21,7 @@ use crate::{
     voxel::{
         add_channel_upload,
         arena::{VoxelChunkArena, VoxelChunkArenaSet},
+        extract::Surfaces,
     },
 };
 
@@ -89,42 +90,44 @@ pub trait SurfaceLayer: Send + Sync + 'static {
     /// layer may be queryable; the terrain is.
     const QUERYABLE: bool = false;
 
-    /// The surfaces in one padded volume (`(lod.size() + 2)^3` elements,
-    /// x fastest). Each is as many snorm16 distances (see `quantize_sdf`)
-    /// in voxels of `lod`, under its own `SubSurface` id. Default: one,
-    /// from `Shape::gpu_bytes`.
-    fn surfaces(
-        vol: &[<Self::Shape as VoxelField>::Elem],
-        _lod: LOD,
-    ) -> Vec<(SubSurface, Vec<u8>)> {
-        vec![(SubSurface(0), Self::Shape::gpu_bytes(vol))]
-    }
+    /// How the field becomes surfaces, when it isn't its own: from a
+    /// chunk's voxels (`lod.volume()` of them, x fastest, at `lod`), the
+    /// signed distances of each surface in voxels of `lod`, negative
+    /// inside, under its own `SubSurface` id. It runs on the chunk and on
+    /// each neighbour the apron reads, each in its own LOD, so a shift by
+    /// world units must be scaled by `lod.voxel_size()`.
+    ///
+    /// `None` (the default) meshes the field's own values through
+    /// `Shape::gpu_bytes`, without copying neighbours: an SDF-like field is
+    /// one surface, itself.
+    const SURFACES: Option<Surfaces<Self::Shape>> = None;
 }
 
 /// A layer's optional material or mask field.
 pub trait SideChannel: Send + Sync + 'static {
-    /// Registers the field (if any) and its upload into `layer`.
-    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency);
+    /// Registers the field (if any) and its upload into `layer`, with the
+    /// layer's residency and upload LOD.
+    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency, cap: Option<LOD>);
 }
 
 /// A layer without a material (or a mask).
 pub struct NoChannel;
 
 impl SideChannel for NoChannel {
-    fn register(_: &mut App, _: LayerIndex, _: LayerResidency) {}
+    fn register(_: &mut App, _: LayerIndex, _: LayerResidency, _: Option<LOD>) {}
 }
 
 impl<M: VoxelMaterial> SideChannel for MaterialField<M> {
-    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency) {
+    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency, cap: Option<LOD>) {
         app.add_voxel_field::<Self>();
-        add_channel_upload::<Self>(app, layer, residency);
+        add_channel_upload::<Self>(app, layer, residency, cap);
     }
 }
 
 impl SideChannel for VisibilityField {
-    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency) {
+    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency, cap: Option<LOD>) {
         app.add_voxel_field::<Self>();
-        add_channel_upload::<Self>(app, layer, residency);
+        add_channel_upload::<Self>(app, layer, residency, cap);
     }
 }
 
