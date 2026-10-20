@@ -21,7 +21,7 @@ use crate::{
     voxel::{
         add_channel_upload,
         arena::{VoxelChunkArena, VoxelChunkArenaSet},
-        extract::Surfaces,
+        extract::{NoClip, Surfaces},
     },
 };
 
@@ -42,9 +42,10 @@ pub enum LayerResidency {
     /// meshes to nothing holds no slot either way.
     #[default]
     Loaded,
-    /// Only chunks where the terrain has a surface and that its visibility
-    /// mask doesn't hide entirely (unless leased by `ForceResident`). The
-    /// terrain's own, and right for a layer that only exists on it.
+    /// Only chunks where the terrain has a surface and that its
+    /// `VisibilityField` doesn't hide entirely (unless leased by
+    /// `ForceResident`). The terrain's own, and right for a layer that only
+    /// exists on it.
     Terrain,
 }
 
@@ -60,11 +61,11 @@ impl SubSurface {
     pub const ALL: Self = Self(u8::MAX);
 }
 
-/// A meshed surface: a shape field, its optional side channels, and its
-/// look. Register one with `app.add_surface_layer::<L>()`.
+/// A meshed surface: a shape field, its optional material and clip, and
+/// its look. Register one with `app.add_surface_layer::<L>()`.
 ///
-/// Every const has a default. The terrain is `TerrainLayer`: `SDF`,
-/// `VisibilityField`, `PaletteRaster`, `Terrain` residency, queryable.
+/// Every const has a default. The terrain is `TerrainLayer`: `SDF` clipped
+/// by `VisibilityField`, `PaletteRaster`, `Terrain` residency, queryable.
 pub trait SurfaceLayer: Send + Sync + 'static {
     /// The field whose zero crossing is meshed. Its `GpuChannel` must be
     /// `Shape`.
@@ -72,7 +73,18 @@ pub trait SurfaceLayer: Send + Sync + 'static {
     /// Per-voxel ids blended into vertices and read per fragment
     /// (`MaterialField<M>`), or `NoChannel`.
     type Material: SideChannel;
-    /// A per-voxel discard mask (`VisibilityField`), or `NoChannel`.
+    /// A distance field that clips the shape (`VisibilityField`), or
+    /// `NoChannel`. Only where both are inside is meshed, so the shape is
+    /// cut where the clip is positive and the cut is closed by a surface
+    /// along the clip's zero crossing. Folded into the shape's padded
+    /// volume at extraction; the shape must hold `f32` distances, or
+    /// have `SURFACES`.
+    type Clip: ClipChannel;
+    /// A per-voxel discard mask (`VisibilityField` with the
+    /// `visibility-mask` feature), or `NoChannel`: the mesh is left whole
+    /// and the fragment shader discards hidden voxels, with hard,
+    /// voxel-aligned edges and no cap. The older way; `Clip` is the
+    /// default.
     type Mask: SideChannel;
     /// How the meshes are drawn.
     type Raster: LayerRaster;
@@ -110,7 +122,7 @@ pub trait SideChannel: Send + Sync + 'static {
     fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency, cap: Option<LOD>);
 }
 
-/// A layer without a material (or a mask).
+/// A layer without a material (or a mask, or a clip).
 pub struct NoChannel;
 
 impl SideChannel for NoChannel {
@@ -124,10 +136,35 @@ impl<M: VoxelMaterial> SideChannel for MaterialField<M> {
     }
 }
 
+/// With the `visibility-mask` feature the field is a `GpuChannel::Mask`
+/// (hidden = distance > 0) and can be a layer's `Mask`.
+#[cfg(feature = "visibility-mask")]
 impl SideChannel for VisibilityField {
     fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency, cap: Option<LOD>) {
         app.add_voxel_field::<Self>();
         add_channel_upload::<Self>(app, layer, residency, cap);
+    }
+}
+
+/// A layer's optional clip field (see `SurfaceLayer::Clip`).
+pub trait ClipChannel: Send + Sync + 'static {
+    /// The field the shape's extraction reads: `f32` distances in voxels
+    /// of the chunk's LOD, negative where the shape is kept. `NoClip` (a
+    /// component no chunk has) for a layer without one.
+    type Field: VoxelField<Elem = f32>;
+    /// Registers the field (if any) for editing, saving and loading.
+    fn register(app: &mut App);
+}
+
+impl ClipChannel for NoChannel {
+    type Field = NoClip;
+    fn register(_: &mut App) {}
+}
+
+impl ClipChannel for VisibilityField {
+    type Field = Self;
+    fn register(app: &mut App) {
+        app.add_voxel_field::<Self>();
     }
 }
 

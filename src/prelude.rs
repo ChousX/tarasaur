@@ -11,11 +11,11 @@ pub use crate::storage::generator::ChunkGeneratorRegistry;
 
 // Fields and editing
 pub use crate::field::{
-    Field, GpuChannel, LOD, MaterialField, MaxEditLod, SDF, TargetLOD, VisibilityField, VoxelField,
-    VoxelMaterial,
+    DistanceField, Field, GpuChannel, LOD, MaterialField, MaxEditLod, SDF, TargetLOD,
+    VisibilityField, VoxelField, VoxelMaterial,
     editor::{
         EditMode, MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, SdfSphereStamp,
-        WorldEditor,
+        VisibilityCsgSphere, WorldEditor,
     },
     ops::{AccumulateExt, BlendExt, PlaneMode, Sweep},
 };
@@ -32,6 +32,6 @@ pub use crate::texture_palette::{
     PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette,
 };
 pub use crate::voxel::{
-    AppSurfaceLayerExt, LayerMaterial, LayerPass, LayerRaster, LayerResidency, NoChannel,
-    PaletteRaster, SubSurface, SurfaceLayer, VoxelDepthPrepass,
+    AppSurfaceLayerExt, ClipChannel, LayerMaterial, LayerPass, LayerRaster, LayerResidency,
+    NoChannel, PaletteRaster, SubSurface, SurfaceLayer, VoxelDepthPrepass,
 };

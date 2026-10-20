@@ -1,12 +1,16 @@
-//! CPU ray casting and SDF sampling over the main world's chunks. Same
-//! frame, every LOD; used by the cursor and usable as terrain collision.
+//! CPU ray casting and SDF sampling over the main world's chunks.
+//!
+//! Same frame, every LOD; used by the cursor and usable as terrain
+//! collision. Sees what is drawn: the `SDF` clipped by the
+//! `VisibilityField`, as the mesher and the GPU queries do (with the
+//! `visibility-mask` feature the mesh isn't clipped, and neither is this).
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     chunk::{CHUNK_SIZE, Chunk, ChunkManager, world_pos_to_chunk_pos},
     field::Field,
-    field::SDF,
+    field::{SDF, SDF_BAND, VisibilityField},
     num::f32_from_u32,
 };
 
@@ -21,6 +25,7 @@ pub struct TerrainHit {
 pub struct TerrainRay<'w, 's> {
     chunks: Res<'w, ChunkManager>,
     sdfs: Query<'w, 's, &'static SDF, With<Chunk>>,
+    visibility: Query<'w, 's, &'static VisibilityField, With<Chunk>>,
 }
 
 #[inline]
@@ -29,12 +34,14 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 impl TerrainRay<'_, '_> {
-    /// Signed distance in WORLD units (negative = inside), trilinear.
-    /// `None` if no chunk is loaded at `pos`.
+    /// Signed distance in WORLD units (negative = inside) to the visible
+    /// terrain (`max` of the SDF and the visibility), trilinear. `None` if
+    /// no chunk is loaded at `pos`.
     #[must_use]
     pub fn sample(&self, pos: Vec3) -> Option<f32> {
         let cp = world_pos_to_chunk_pos(&pos);
-        let sdf = self.sdfs.get(self.chunks.get_chunk(&cp)?).ok()?;
+        let own = self.chunks.get_chunk(&cp)?;
+        let sdf = self.sdfs.get(own).ok()?;
         let size = sdf.size().x;
         let voxel = CHUNK_SIZE / f32_from_u32(size);
 
@@ -49,21 +56,32 @@ impl TerrainRay<'_, '_> {
         let at = |offset: UVec3| -> f32 {
             let q = base.saturating_add(offset);
             let over = q.cmpge(UVec3::splat(size));
-            if over.any() {
+            let (entity, c) = if over.any() {
                 let neighbor = cp.wrapping_add(IVec3::select(over, IVec3::ONE, IVec3::ZERO));
                 let in_neighbor = UVec3::select(over, q.saturating_sub(UVec3::splat(size)), q);
-                if let Some(nb) = self
+                let usable = self
                     .chunks
                     .get_chunk(&neighbor)
-                    .and_then(|e| self.sdfs.get(e).ok())
-                    && nb.size().x == size
-                {
-                    return nb.get(in_neighbor.x, in_neighbor.y, in_neighbor.z);
-                }
-                let own = q.min(edge); // no usable neighbour: own edge
-                return sdf.get(own.x, own.y, own.z);
+                    .filter(|&e| self.sdfs.get(e).is_ok_and(|nb| nb.size().x == size));
+                // No usable neighbour: this chunk's own edge.
+                usable.map_or_else(|| (own, q.min(edge)), |e| (e, in_neighbor))
+            } else {
+                (own, q)
+            };
+            let shape = self
+                .sdfs
+                .get(entity)
+                .map_or(SDF_BAND, |f| f.get(c.x, c.y, c.z));
+            // No field: fully visible.
+            let clip = self
+                .visibility
+                .get(entity)
+                .map_or(-SDF_BAND, |v| v.get(c.x, c.y, c.z));
+            if cfg!(feature = "visibility-mask") {
+                shape
+            } else {
+                shape.max(clip)
             }
-            sdf.get(q.x, q.y, q.z)
         };
 
         let corner = |x: u32, y: u32, z: u32| at(UVec3::new(x, y, z));

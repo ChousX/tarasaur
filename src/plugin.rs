@@ -11,8 +11,9 @@ use crate::{
         Field, FieldSet, FieldsPlugin, LOD, MaterialField, MaxEditLod, SDF, VisibilityField,
         VoxelField, VoxelMaterial, register_edits,
         surface::SurfaceCullPlugin,
+        editor::SdfCsgSphere,
         systems::{
-            apply_material_paint_voxels, forward_material_paint, process_sdf_csg_spheres,
+            apply_material_paint_voxels, forward_material_paint, process_csg_spheres,
             process_shape_edits,
         },
     },
@@ -32,7 +33,7 @@ use crate::{
 };
 
 /// Everything the engine needs, with the terrain layer registered: `SDF`
-/// and `VisibilityField`, drawn by the palette.
+/// clipped by `VisibilityField`, drawn by the palette.
 ///
 /// That's chunks, loading, fields, persistence, rendering and palettes. Add
 /// `MaterialFieldPlugin<M>` for materials, register generators in
@@ -136,15 +137,22 @@ impl Plugin for TarasaurPlugin {
     }
 }
 
-/// The terrain: the `SDF`, masked by `VisibilityField`, drawn by the
-/// palette, held for chunks with a surface, and what the GPU ray queries
-/// trace. Layer 0.
+/// The terrain: the `SDF`, clipped by `VisibilityField` (or masked by it,
+/// with the `visibility-mask` feature), drawn by the palette, held for
+/// chunks with a surface, and what the GPU ray queries trace. Layer 0.
 pub struct TerrainLayer;
 
 impl SurfaceLayer for TerrainLayer {
     type Shape = SDF;
     /// Added by `MaterialFieldPlugin<M>`, which attaches to this layer.
     type Material = NoChannel;
+    #[cfg(not(feature = "visibility-mask"))]
+    type Clip = VisibilityField;
+    #[cfg(not(feature = "visibility-mask"))]
+    type Mask = NoChannel;
+    #[cfg(feature = "visibility-mask")]
+    type Clip = NoChannel;
+    #[cfg(feature = "visibility-mask")]
     type Mask = VisibilityField;
     type Raster = PaletteRaster;
     const RESIDENCY: LayerResidency = LayerResidency::Terrain;
@@ -212,7 +220,7 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
             (
                 forward_material_paint::<M>
                     .before(process_shape_edits::<MaterialField<M>, Sphere, M>),
-                apply_material_paint_voxels::<M>.after(process_sdf_csg_spheres),
+                apply_material_paint_voxels::<M>.after(process_csg_spheres::<SdfCsgSphere>),
             )
                 .in_set(FieldSet::Edit),
         );

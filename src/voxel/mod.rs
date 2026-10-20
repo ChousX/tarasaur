@@ -1,17 +1,19 @@
 //! GPU rendering and querying of chunk fields.
 //!
 //! Per frame, in the render world:
-//! - **Upload** (`prepare_voxel_arena` + material/visibility siblings): new
-//!   padded volumes go into a slot of a per-LOD arena, with a vertex
-//!   range sized from an exact CPU count of active cells.
+//! - **Upload** (`prepare_shape_upload` + the material and mask siblings):
+//!   new padded volumes (the shape already clipped by the layer's clip
+//!   field) go into a slot of a per-LOD arena, with a vertex range sized
+//!   from an exact CPU count of active cells.
 //! - **Dispatch**: surface nets in two compute passes over dirty slots only.
 //!   `surface_nets_pass1` finds active cells and assigns vertices;
 //!   `surface_nets_pass3` places vertices, blends materials, stitches LOD
 //!   seams and writes indices and draw args.
 //! - **Draw** (`draw`): CPU frustum culling per view, a compaction pass,
 //!   then one `multi_draw_indexed_indirect` per arena (`voxel_raster.wesl`:
-//!   triplanar albedo + ARM, per-pixel visibility discard, Bevy PBR
-//!   lighting), optionally after a depth-only prepass (`VoxelDepthPrepass`).
+//!   triplanar albedo + ARM, a per-pixel discard for layers with a mask,
+//!   Bevy PBR lighting), optionally after a depth-only prepass
+//!   (`VoxelDepthPrepass`).
 //!
 //! GPU ray queries against the arenas live in `raycast::gpu`.
 
@@ -31,10 +33,10 @@ pub(crate) mod upload;
 pub(crate) mod util;
 
 pub use arena::ArenaConfig;
-pub use extract::Surfaces;
+pub use extract::{NoClip, Surfaces};
 pub use layer::{
-    LayerDesc, LayerIndex, LayerMaterial, LayerPass, LayerRaster, LayerResidency, NoChannel,
-    SideChannel, SubSurface, SurfaceLayer, VoxelLayers,
+    ClipChannel, LayerDesc, LayerIndex, LayerMaterial, LayerPass, LayerRaster, LayerResidency,
+    NoChannel, SideChannel, SubSurface, SurfaceLayer, VoxelLayers,
 };
 pub use pipeline::{PaletteRaster, VoxelDepthPrepass};
 pub use telemetry::GuardTelemetry;
@@ -54,6 +56,7 @@ use bevy::{
 use extract::{
     ExtractConfig, LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks,
 };
+
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
@@ -107,7 +110,7 @@ pub(crate) enum UploadSet {
 /// Registers a surface layer: a shape field meshed and drawn on the GPU.
 pub trait AppSurfaceLayerExt {
     /// Wires `L` in: its shape field (as `add_voxel_field` does, if not
-    /// already), its material and mask fields, and the layer's arenas,
+    /// already), its material, mask and clip fields, and the layer's arenas,
     /// uploads, meshing, culling and raster pipelines. Without a render
     /// app (headless), only the fields are registered.
     fn add_surface_layer<L: SurfaceLayer>(&mut self) -> &mut Self;
@@ -143,7 +146,8 @@ impl AppSurfaceLayerExt for App {
             L::RESIDENCY,
             L::QUERYABLE,
         );
-        add_shape_upload::<L::Shape>(
+        L::Clip::register(self);
+        add_shape_upload::<L::Shape, <L::Clip as ClipChannel>::Field>(
             self,
             layer,
             ExtractConfig {
@@ -158,10 +162,14 @@ impl AppSurfaceLayerExt for App {
     }
 }
 
-/// Hands the shape field `F` to the render world and uploads its surfaces
-/// into `layer`'s arenas.
-fn add_shape_upload<F: VoxelField>(app: &mut App, layer: LayerIndex, config: ExtractConfig<F>) {
-    add_field_extraction::<F>(app, config);
+/// Hands the shape field `F`, clipped by `C`, to the render world and
+/// uploads its surfaces into `layer`'s arenas.
+fn add_shape_upload<F: VoxelField, C: VoxelField<Elem = f32>>(
+    app: &mut App,
+    layer: LayerIndex,
+    config: ExtractConfig<F>,
+) {
+    add_field_extraction::<F, C>(app, config);
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
@@ -195,7 +203,7 @@ pub(crate) fn add_channel_upload<F: VoxelField>(
             return;
         }
     };
-    add_field_extraction::<F>(
+    add_field_extraction::<F, NoClip>(
         app,
         ExtractConfig {
             residency,

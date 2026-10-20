@@ -332,6 +332,16 @@ impl VoxelField for SDF {
     }
 }
 
+impl super::DistanceField for SDF {
+    fn reinit_input(&self) -> (Box<[f32]>, u32, u64) {
+        Self::reinit_input(self)
+    }
+
+    fn apply_reinit_result(&mut self, data: Box<[f32]>) {
+        Self::apply_reinit_result(self, data);
+    }
+}
+
 /// Quantizes an SDF value to snorm16 over +/-`SDF_BAND`, as the GPU copy
 /// stores it (the shaders decode with `unpack2x16snorm`).
 ///

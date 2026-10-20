@@ -26,13 +26,17 @@ hardware such as a Steam Deck.
 - **Generic voxel fields.** A field implements `VoxelField` (how to build,
   version, save and upload it) and `Field<T>` (how to edit it), and
   `app.add_voxel_field::<F>()` wires it into editing, saving and its GPU
-  channel (shape, material, mask, or CPU-only). Built-in fields:
+  channel (shape, material, or CPU-only). Built-in fields:
   - `SDF`: narrow-band signed distances that define the shape
-  - `VisibilityField`: an optional per-voxel mask, discarded per pixel
+  - `VisibilityField`: optional signed distances to the edge of what is
+    shown. The terrain is meshed where it is solid *and* visible, so a
+    hidden region is cut out and the cut closed by a smooth cap (the
+    `visibility-mask` feature keeps the older per-pixel discard instead)
   - `MaterialField<M>`: per-voxel ids from your own material enum
 - **Editing.** World-space sphere and box brushes (`WorldEditor`), exact
-  CSG spheres or swept capsules (`SdfCsgSphere`), smooth, flatten, fill
-  and scrape sculpts (`SdfSculptSphere`), and material painting by palette id
+  CSG spheres or swept capsules (`SdfCsgSphere`; `VisibilityCsgSphere` to
+  hide or reveal), smooth, flatten, fill and scrape sculpts
+  (`SdfSculptSphere`), and material painting by palette id
   (`MaterialPaint`). Edits that span chunks apply to every chunk they
   touch.
 - **Persistence.** Edited chunks autosave to `./saves/chunks/` (`SaveDirectory`). Saves load
@@ -147,11 +151,11 @@ is ready.
 
 ### Layers
 
-The terrain is one *surface layer*: a shape field (`SDF`), its side
-channels (`VisibilityField`, and `MaterialField<M>` from
-`MaterialFieldPlugin`) and a look (`PaletteRaster`). Any other shape field
-can be a layer too, meshed by the same GPU surface nets and drawn with its
-own fragment shader:
+The terrain is one *surface layer*: a shape field (`SDF`), its clip
+(`VisibilityField`, folded into the shape before meshing), its material
+(`MaterialField<M>` from `MaterialFieldPlugin`) and a look
+(`PaletteRaster`). Any other shape field can be a layer too, meshed by the
+same GPU surface nets and drawn with its own fragment shader:
 
 ```rust
 use tarasaur::prelude::*;
@@ -160,6 +164,7 @@ struct WaterLayer;
 impl SurfaceLayer for WaterLayer {
     type Shape = WaterField;      // your VoxelField, GpuChannel::Shape
     type Material = NoChannel;
+    type Clip = NoChannel;
     type Mask = NoChannel;
     type Raster = FlatRaster;     // your LayerRaster: a shader and a bind group
 }
@@ -254,7 +259,7 @@ cargo run --release --example sandbox
 
 | Example | What it shows |
 |---|---|
-| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-5 pick dig, build, smooth, flatten or paint, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening. F12 saves a screenshot, F10 starts and stops a recording (`tools/make-gif.sh` turns it into a GIF), H hides the HUD |
+| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-9 pick dig, build, smooth, flatten, paint, fill, scrape, hide or reveal, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening. F12 saves a screenshot, F10 starts and stops a recording (`tools/make-gif.sh` turns it into a GIF), H hides the HUD |
 | `lod_streaming` | The smallest streaming setup |
 | `edit_sphere` | Hand-spawned chunks and a resizable SDF sphere |
 | `normal_check` | Headless comparison of normal-estimation methods |
@@ -285,8 +290,9 @@ after every phase. `shots` saves four views to `bench_results/shots/`;
 five also check correctness: box brushes stay inside the box, GPU ray queries
 return one result per ray and agree with the CPU ray, chunks that lose and
 regain their arena slot get their materials back (read back from the GPU),
-visibility masks on the GPU match the edited and removed `VisibilityField`s,
-and a held, slanted dig keeps a real distance field instead of terracing.
+the shapes on the GPU are the SDF clipped by the edited and removed
+`VisibilityField`s, and a held, slanted dig keeps a real distance field
+instead of terracing.
 A failed check makes the bench exit with an error.
 
 `--small-arenas` shrinks the GPU arenas so High terrain spans several, and

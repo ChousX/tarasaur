@@ -1,15 +1,18 @@
-//! Edit application and SDF upkeep.
+//! Edit application and distance-field upkeep.
 //!
 //! Edit systems split each world-space edit across the chunks it overlaps
-//! and retry the ones not yet editable (`apply_edits`). Value edits leave the
-//! SDF as signs, so `spawn_sdf_reinit_tasks` / `resolve_sdf_reinit_tasks`
-//! rebuild real distances with an async jump flood; CSG edits write exact
-//! distances and skip that.
+//! and retry the ones not yet editable (`apply_edits`). Value edits leave a
+//! distance field (`SDF`, `VisibilityField`) as signs, so
+//! `spawn_reinit_tasks` / `resolve_reinit_tasks` rebuild real distances
+//! with an async jump flood; CSG edits write exact distances and skip that.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    marker::PhantomData,
+};
 
 use super::{
-    EditableChunks, Field, SDF, VoxelField,
+    DistanceField, EditableChunks, Field, SDF, VoxelField,
     editor::{EditFieldMessage, EditMode},
     ops::{AccumulateExt, BlendExt, CsgDelta, ShapeBounds, ShapeScale},
 };
@@ -19,8 +22,8 @@ use crate::{
     field::{
         DirtyField, MaterialField, MaxEditLod, VoxelMaterial,
         editor::{
-            MaterialPaint, MaterialPaintVoxels, SdfCsgSphere, SdfSculptOp, SdfSculptSphere,
-            SdfSphereStamp, WorldEditor,
+            CsgMessage, CsgSphere, MaterialPaint, MaterialPaintVoxels, SdfSculptOp,
+            SdfSculptSphere, SdfSphereStamp, WorldEditor,
         },
         ops::{FieldSphereOps, ShapeEditOps},
     },
@@ -28,7 +31,7 @@ use crate::{
     voxel::resident::ForceResident,
 };
 use bevy::{
-    ecs::message::MessageReader,
+    ecs::{message::MessageReader, system::SystemParam},
     prelude::*,
     tasks::{AsyncComputeTaskPool, ComputeTaskPool, Task, block_on, poll_once},
 };
@@ -164,30 +167,37 @@ pub fn process_sdf_sphere_stamps(
     );
 }
 
-/// In-flight async JFA recompute for one chunk's SDF.
+/// In-flight async JFA recompute for one chunk's distance field `F`.
 ///
-/// `started_version` is the `SDF::version` this task's input was cloned at — used by
-/// `resolve_sdf_reinit_tasks` to detect whether a newer edit landed while
-/// the task was running.
+/// `started_version` is the field's version this task's input was cloned
+/// at; `resolve_reinit_tasks` uses it to detect whether a newer edit landed
+/// while the task was running.
 #[derive(Component)]
-pub struct SdfReinitTask {
+pub struct ReinitTask<F> {
     task: Task<Box<[f32]>>,
     started_version: u64,
+    _field: PhantomData<F>,
 }
 
-/// Dirty SDF chunks with no reinit in flight.
-type NeedsReinit = (With<DirtyField<SDF, f32>>, Without<SdfReinitTask>);
+/// The `SDF`'s reinit: what loading and saving wait for.
+pub type SdfReinitTask = ReinitTask<SDF>;
 
-/// Spawns a background JFA task for every dirty SDF chunk that doesn't
+/// Dirty chunks of `F` with no reinit in flight.
+type NeedsReinit<F> = (With<DirtyField<F, f32>>, Without<ReinitTask<F>>);
+
+/// Spawns a background JFA task for every dirty chunk of `F` that doesn't
 /// already have one in flight.
 ///
-/// The `Without<SdfReinitTask>` filter is
-/// what prevents re-spawning a second task each frame while the sphere
-/// is still resizing — `DirtyField` stays set (see resolve, below) but no
-/// new task starts until the current one resolves.
-pub fn spawn_sdf_reinit_tasks(mut commands: Commands, query: Query<(Entity, &SDF), NeedsReinit>) {
-    for (entity, sdf) in query.iter() {
-        let (data, size, started_version) = sdf.reinit_input();
+/// The `Without<ReinitTask>` filter is what prevents re-spawning a second
+/// task each frame while the sphere is still resizing: `DirtyField` stays
+/// set (see resolve, below) but no new task starts until the current one
+/// resolves.
+pub fn spawn_reinit_tasks<F: DistanceField>(
+    mut commands: Commands,
+    query: Query<(Entity, &F), NeedsReinit<F>>,
+) {
+    for (entity, field) in query.iter() {
+        let (data, size, started_version) = field.reinit_input();
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let mut data = data.into_vec();
@@ -195,78 +205,38 @@ pub fn spawn_sdf_reinit_tasks(mut commands: Commands, query: Query<(Entity, &SDF
             data.into_boxed_slice()
         });
 
-        commands.entity(entity).insert(SdfReinitTask {
+        commands.entity(entity).insert(ReinitTask::<F> {
             task,
             started_version,
+            _field: PhantomData,
         });
     }
 }
 
 /// Runs every frame; non-blocking poll of every in-flight reinit task.
-pub fn resolve_sdf_reinit_tasks(
+pub fn resolve_reinit_tasks<F: DistanceField>(
     mut commands: Commands,
-    mut query: Query<(Entity, &mut SDF, &mut SdfReinitTask)>,
+    mut query: Query<(Entity, &mut F, &mut ReinitTask<F>)>,
 ) {
-    for (entity, mut sdf, mut pending) in query.iter_mut() {
+    for (entity, mut field, mut pending) in query.iter_mut() {
         let Some(data) = block_on(poll_once(&mut pending.task)) else {
             continue;
         };
 
-        if sdf.version != pending.started_version {
-            // A newer edit landed while this task was computing — its
-            // input is stale and applying it would erase that edit.
-            // Drop the result; DirtyField is still set, so next frame's
-            // spawn_sdf_reinit_tasks picks up the *current* data instead.
-            commands.entity(entity).remove::<SdfReinitTask>();
+        if field.version() != pending.started_version {
+            // A newer edit landed while this task was computing: its input
+            // is stale and applying it would erase that edit. Drop the
+            // result; DirtyField is still set, so next frame's
+            // spawn_reinit_tasks picks up the *current* data instead.
+            commands.entity(entity).remove::<ReinitTask<F>>();
             continue;
         }
 
-        sdf.apply_reinit_result(data);
+        field.apply_reinit_result(data);
         commands
             .entity(entity)
-            .remove::<SdfReinitTask>()
-            .remove::<DirtyField<SDF, f32>>();
-    }
-}
-
-/// (entity, SDF edited, visibility edited).
-#[cfg(debug_assertions)]
-type EditedFields = (
-    Entity,
-    Has<DirtyField<SDF, f32>>,
-    Has<DirtyField<crate::field::VisibilityField, bool>>,
-);
-
-/// Chunks with both fields, at least one edited, and no reinit in flight.
-#[cfg(debug_assertions)]
-type DesyncCandidate = (
-    With<SDF>,
-    With<crate::field::VisibilityField>,
-    Without<SdfReinitTask>,
-    Or<(
-        With<DirtyField<SDF, f32>>,
-        With<DirtyField<crate::field::VisibilityField, bool>>,
-    )>,
-);
-
-/// Debug builds only: warns when an edit cycle changed a chunk's SDF or its
-/// visibility but not both. Often deliberate (hiding a region), so it's a
-/// development aid, and release builds don't pay for it.
-#[cfg(debug_assertions)]
-pub fn detect_topology_desync(
-    query: Query<EditedFields, DesyncCandidate>,
-    positions: Query<&crate::chunk::ChunkPosition>,
-) {
-    for (entity, sdf_dirty, vis_dirty) in query.iter() {
-        if sdf_dirty != vis_dirty {
-            let pos = positions.get(entity).map(|p| p.0);
-            warn!(
-                "[topology_desync] chunk {:?} (entity {:?}): SDF edited={}, VisibilityField edited={} — \
-                 these usually need to change together (a solid-sphere edit that only touched one field \
-                 will render geometry that doesn't match its visibility mask, or vice versa)",
-                pos, entity, sdf_dirty, vis_dirty
-            );
-        }
+            .remove::<ReinitTask<F>>()
+            .remove::<DirtyField<F, f32>>();
     }
 }
 
@@ -286,19 +256,12 @@ where
 
 const SDF_CSG_REACH_VOXELS: f32 = 4.0;
 
-/// One chunk's share of a CSG edit, ready to work out.
-struct CsgWork {
-    entity: Entity,
-    chunk_pos: IVec3,
-    op: SdfCsgSphere,
-}
-
-/// The value one voxel past `sdf`'s face from `v` (on it), read from the
-/// face neighbour in `fields`: what a gradient on the chunk's border reads
-/// (see `FieldSphereOps::csg_sphere`). `None` if that neighbour isn't
-/// loaded at the same LOD.
-fn beyond_face(
-    fields: &HashMap<IVec3, &SDF>,
+/// The value one voxel past the field's face from `v` (on it), read from
+/// the face neighbour in `fields`: what a gradient on the chunk's border
+/// reads (see `FieldSphereOps::csg_sphere`). `None` if that neighbour
+/// isn't loaded at the same LOD.
+fn beyond_face<F: Field<f32>>(
+    fields: &HashMap<IVec3, &F>,
     chunk_pos: IVec3,
     size: u32,
     v: UVec3,
@@ -318,33 +281,46 @@ fn beyond_face(
     Some(sdf.get(n.x, n.y, n.z))
 }
 
-pub fn process_sdf_csg_spheres(
-    mut events: MessageReader<SdfCsgSphere>,
-    mut editable: EditableChunks<SDF>,
-    chunk_manager: Res<ChunkManager>,
-    max: Res<MaxEditLod>,
-    mut deferred: Local<Vec<DeferredEdit<SdfCsgSphere>>>,
-    mut resident: ResMut<ForceResident>,
-    mut paint: MessageWriter<MaterialPaintVoxels>,
+/// Queues `ops` (each with its `reinit_after`) against every chunk they
+/// overlap (their sphere plus `reach_world`), leasing those chunks resident
+/// meanwhile.
+fn queue_csg_edits(
+    queued: &mut Vec<DeferredEdit<(CsgSphere, bool)>>,
+    ops: impl Iterator<Item = (CsgSphere, bool)>,
+    reach_world: f32,
+    resident: &mut ForceResident,
 ) {
-    let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
-    // Like `apply_edits`: last frame's retries first, then the new edits on
-    // every chunk they overlap.
-    let mut queued = std::mem::take(&mut *deferred);
-    for op in events.read() {
+    for (op, reinit) in ops {
         let sweep = op.sweep();
         let (mid, half) = sweep.bounds(op.radius + reach_world);
         let half_len = sweep.from.distance(sweep.to) * 0.5;
         resident.touch_sphere(mid, op.radius + reach_world + half_len);
         queued.extend(overlapping_chunks(mid, half).map(|chunk_pos| DeferredEdit {
             chunk_pos,
-            edit: *op,
+            edit: (op, reinit),
             age: 0,
         }));
     }
+}
 
-    // The editable ones go into waves, each chunk at most once per wave, so
-    // a chunk hit by several edits takes them in order.
+/// One chunk's share of a CSG edit, ready to work out.
+struct CsgWork {
+    entity: Entity,
+    chunk_pos: IVec3,
+    op: CsgSphere,
+    /// See `CsgMessage::reinit_after`.
+    reinit: bool,
+}
+
+/// The editable edits of `queued` in waves, each chunk at most once per
+/// wave, so a chunk hit by several edits takes them in order. The rest
+/// wait in `deferred` (for `MAX_DEFER_FRAMES`, then they're dropped).
+fn csg_waves<F: DistanceField>(
+    queued: Vec<DeferredEdit<(CsgSphere, bool)>>,
+    chunk_manager: &ChunkManager,
+    editable: &mut EditableChunks<F>,
+    deferred: &mut Vec<DeferredEdit<(CsgSphere, bool)>>,
+) -> Vec<Vec<CsgWork>> {
     let mut waves: Vec<Vec<CsgWork>> = Vec::new();
     let mut wave_of: HashMap<Entity, usize> = HashMap::new();
     for mut e in queued {
@@ -360,7 +336,8 @@ pub fn process_sdf_csg_spheres(
                 w.push(CsgWork {
                     entity,
                     chunk_pos: e.chunk_pos,
-                    op: e.edit,
+                    op: e.edit.0,
+                    reinit: e.edit.1,
                 });
             }
             *wave = wave.saturating_add(1);
@@ -380,14 +357,44 @@ pub fn process_sdf_csg_spheres(
         let excess = deferred.len().saturating_sub(MAX_DEFERRED);
         deferred.drain(..excess); // drop the oldest
     }
+    waves
+}
 
+/// What `process_csg_spheres` writes besides the field.
+#[derive(SystemParam)]
+pub struct CsgOutputs<'w, 's> {
+    commands: Commands<'w, 's>,
+    resident: ResMut<'w, ForceResident>,
+    paint: MessageWriter<'w, MaterialPaintVoxels>,
+}
+
+/// Applies `M`'s CSG sphere edits to its distance field (`SdfCsgSphere` to
+/// the `SDF`, `VisibilityCsgSphere` to the `VisibilityField`): every chunk
+/// an edit overlaps, worked out in parallel from one state, then written.
+pub fn process_csg_spheres<M: CsgMessage>(
+    mut events: MessageReader<M>,
+    mut editable: EditableChunks<M::Field>,
+    chunk_manager: Res<ChunkManager>,
+    max: Res<MaxEditLod>,
+    mut deferred: Local<Vec<DeferredEdit<(CsgSphere, bool)>>>,
+    mut out: CsgOutputs,
+) {
+    let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
+    // Like `apply_edits`: last frame's retries first, then the new edits on
+    // every chunk they overlap.
+    let mut queued = std::mem::take(&mut *deferred);
+    let ops = events.read().map(|m| (m.csg(), m.reinit_after()));
+    queue_csg_edits(&mut queued, ops, reach_world, &mut out.resident);
+
+    let waves = csg_waves(queued, &chunk_manager, &mut editable, &mut deferred);
     for wave in waves {
         // Every chunk of the wave is worked out from the same state, reading
         // its neighbours' borders directly, on every core; then all are
-        // written. No DirtyField: CSG output is already a valid distance
-        // field. `set` bumps version/inside_count, which drives re-extract.
+        // written. No DirtyField unless the message asks: CSG output is a
+        // valid distance field. `set` bumps version/inside_count, which
+        // drives re-extract.
         let deltas: Vec<CsgDelta> = {
-            let mut fields: HashMap<IVec3, &SDF> = HashMap::new();
+            let mut fields: HashMap<IVec3, &M::Field> = HashMap::new();
             for w in &wave {
                 for offset in [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y]
                     .into_iter()
@@ -431,10 +438,15 @@ pub fn process_sdf_csg_spheres(
                 continue;
             };
             let filled = sdf.apply_csg_delta(delta);
+            if w.reinit {
+                out.commands
+                    .entity(w.entity)
+                    .insert(DirtyField::<M::Field, f32>::default());
+            }
             if let Some(material) = w.op.paint
                 && !filled.is_empty()
             {
-                paint.write(MaterialPaintVoxels {
+                out.paint.write(MaterialPaintVoxels {
                     chunk: w.entity,
                     voxels: sdf.with_air_neighbours(&filled),
                     material,
@@ -454,7 +466,7 @@ pub fn process_sdf_sculpts(
     let new = events.read().map(|&op| {
         let sweep = op.sweep();
         let (mid, half) = sweep.bounds(op.radius);
-        resident.touch_sphere(mid, op.radius + sweep.from.distance(sweep.to) * 0.5);
+        resident.touch_sphere(mid, sweep.from.distance(sweep.to).mul_add(0.5, op.radius));
         (mid, half, op)
     });
     apply_edits(

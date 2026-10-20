@@ -6,7 +6,7 @@
 //! pool and `install_chunk` swaps them and the `LOD` in atomically.
 
 use crate::{
-    field::systems::SdfReinitTask,
+    field::systems::{ReinitTask, SdfReinitTask},
     field::{DirtyField, SDF, VisibilityField},
 };
 use bevy::{
@@ -121,15 +121,23 @@ fn prepare_fields(
         .collect()
 }
 
+/// A chunk's distance fields mid-edit: a reinit in flight or still dirty,
+/// for the `SDF` and the `VisibilityField`.
+type Settling = (
+    Has<SdfReinitTask>,
+    Has<DirtyField<SDF, f32>>,
+    Has<ReinitTask<VisibilityField>>,
+    Has<DirtyField<VisibilityField, f32>>,
+);
+
 /// A chunk that may need a load: (entity, position, target, current LOD,
-/// reinit in flight, SDF dirty, edit-pinned).
+/// settling, edit-pinned).
 type LoadCandidate = (
     Entity,
     &'static ChunkPosition,
     &'static TargetLOD,
     Option<&'static LOD>,
-    Has<SdfReinitTask>,
-    Has<DirtyField<SDF, f32>>,
+    Settling,
     Has<EditPin>,
 );
 
@@ -175,7 +183,7 @@ pub(crate) fn start_chunk_loads(
         .filter(|(_, _, target, lod, ..)| *lod != Some(&target.0))
         .map(|item| {
             let pos = item.1.0;
-            let pinned = item.6;
+            let pinned = item.5;
             let dist = loaders
                 .iter()
                 .map(|c| chebyshev(pos, c.0))
@@ -186,12 +194,12 @@ pub(crate) fn start_chunk_loads(
         .collect();
     wanted.sort_unstable_by_key(|(d, _)| *d);
 
-    for (_, (entity, pos, target, lod, reinit, dirty, _)) in wanted {
+    for (_, (entity, pos, target, lod, settling, _)) in wanted {
         if slots == 0 {
             break;
         }
         if lod == Some(&sources.max.0) {
-            if reinit || dirty {
+            if settling.0 || settling.1 || settling.2 || settling.3 {
                 continue;
             } // let JFA finish so the save has real distances
             if let Some((data, _)) = build_if_dirty(world, entity) {
@@ -297,8 +305,9 @@ fn install_chunk(world: &mut World, entity: Entity, lod: LOD, fields: Vec<Prepar
         apply.apply(&mut em);
     }
     em.remove::<SdfReinitTask>();
+    em.remove::<ReinitTask<VisibilityField>>();
     em.remove::<DirtyField<SDF, f32>>();
-    em.remove::<DirtyField<VisibilityField, bool>>();
+    em.remove::<DirtyField<VisibilityField, f32>>();
     em.insert((lod, ChunkSaveState(0))); // fresh fields all start at version 0
     em.remove::<ChunkDataTask>();
 }

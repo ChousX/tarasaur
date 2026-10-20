@@ -1,7 +1,9 @@
 //! The terrain point under the mouse (`CursorHit`), the chunk focus it
-//! drives, and the default brush (`CursorBrush`: dig, build, smooth,
-//! flatten, paint, fill, scrape) with the stroke it's drawing
-//! (`BrushStroke`). F8 cycles the query backend.
+//! drives, and the default brush (`CursorBrush`).
+//!
+//! The brush digs, builds, smooths, flattens, paints, fills, scrapes, hides
+//! and reveals, with the stroke it's drawing in `BrushStroke`. F8 cycles the
+//! query backend.
 
 use bevy::{
     ecs::{message::MessageWriter, system::SystemParam},
@@ -12,7 +14,7 @@ use bevy::{
 use crate::{
     chunk::{CursorFocusChunk, FOCUS_RADIUS, chebyshev, world_pos_to_chunk_pos},
     field::{
-        editor::{MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere},
+        editor::{MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, VisibilityCsgSphere},
         ops::PlaneMode,
     },
     raycast::{
@@ -98,10 +100,15 @@ pub enum BrushTool {
     /// Like Flatten, but only removes material: shaves bumps down to the
     /// plane.
     Scrape,
+    /// Hides the sphere (exact CSG on the `VisibilityField`): the terrain
+    /// inside it is cut away and the cut closed by a cap.
+    Hide,
+    /// Reveals the sphere again.
+    Reveal,
 }
 
 impl BrushTool {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Dig,
         Self::Build,
         Self::Smooth,
@@ -109,6 +116,8 @@ impl BrushTool {
         Self::Paint,
         Self::Fill,
         Self::Scrape,
+        Self::Hide,
+        Self::Reveal,
     ];
 
     #[must_use]
@@ -121,11 +130,13 @@ impl BrushTool {
             Self::Paint => "Paint",
             Self::Fill => "Fill",
             Self::Scrape => "Scrape",
+            Self::Hide => "Hide",
+            Self::Reveal => "Reveal",
         }
     }
 
-    /// Dig and Build swap, and so do Fill and Scrape; the rest have no
-    /// opposite.
+    /// Dig and Build swap, and so do Fill and Scrape, and Hide and Reveal;
+    /// the rest have no opposite.
     #[must_use]
     pub const fn inverted(self) -> Self {
         match self {
@@ -133,6 +144,8 @@ impl BrushTool {
             Self::Build => Self::Dig,
             Self::Fill => Self::Scrape,
             Self::Scrape => Self::Fill,
+            Self::Hide => Self::Reveal,
+            Self::Reveal => Self::Hide,
             other => other,
         }
     }
@@ -158,6 +171,8 @@ impl BrushTool {
             Self::Paint => Color::srgb(1.0, 0.4, 1.0),
             Self::Fill => Color::srgb(0.6, 1.0, 0.8),
             Self::Scrape => Color::srgb(1.0, 0.6, 0.2),
+            Self::Hide => Color::srgb(0.5, 0.5, 0.6),
+            Self::Reveal => Color::srgb(0.9, 0.9, 1.0),
         }
     }
 }
@@ -342,6 +357,7 @@ pub struct BrushWriters<'w> {
     csg: MessageWriter<'w, SdfCsgSphere>,
     sculpt: MessageWriter<'w, SdfSculptSphere>,
     paint: MessageWriter<'w, MaterialPaint>,
+    visibility: MessageWriter<'w, VisibilityCsgSphere>,
 }
 
 /// A stroke that jumps further than this many brush radii in one frame (the
@@ -384,8 +400,8 @@ impl Stroke {
 ///
 /// Dig, Build, Smooth, Flatten, Fill and Scrape are gradual, scaled by the
 /// frame time, and sweep from the last frame's center so a fast stroke
-/// leaves no gaps. Dig, Build and Paint stop at the brush sphere, so
-/// holding them in place doesn't pile up.
+/// leaves no gaps. Dig, Build, Paint, Hide and Reveal stop at the brush
+/// sphere, so holding them in place doesn't pile up.
 pub fn cursor_brush(
     brush: Res<CursorBrush>,
     input: BrushInput,
@@ -465,6 +481,15 @@ pub fn cursor_brush(
                 material: brush.material,
             });
         }
+        BrushTool::Hide | BrushTool::Reveal => {
+            out.visibility.write(VisibilityCsgSphere {
+                center,
+                radius,
+                sweep_from,
+                hide: tool == BrushTool::Hide,
+                max_step: None,
+            });
+        }
     }
 }
 
@@ -494,7 +519,7 @@ pub fn draw_cursor_brush(
         // drawn where it cuts under the brush.
         let (point, normal) = stroke
             .0
-            .map_or((h.pos, brush.flatten_normal(&h)), |s| s.plane);
+            .map_or_else(|| (h.pos, brush.flatten_normal(&h)), |s| s.plane);
         let on_plane = center - normal * (center - point).dot(normal);
         let rotation = Quat::from_rotation_arc(Vec3::Z, normal);
         gizmos.circle(Isometry3d::new(on_plane, rotation), radius, color);

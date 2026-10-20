@@ -9,11 +9,12 @@
 //!    save (downsampled) or the registered generators, then install them
 //!    together with the chunk's `LOD`.
 //! 3. [`field`]: per-chunk voxel grids. `SDF` (shape), `VisibilityField`
-//!    (optional mask) and `MaterialField<M>` (opt-in). Edits go through
-//!    `WorldEditor` / CSG messages, only at `MaxEditLod`.
+//!    (optional: distances to the edge of what is shown) and
+//!    `MaterialField<M>` (opt-in). Edits go through `WorldEditor` / CSG
+//!    messages, only at `MaxEditLod`.
 //! 4. `voxel::extract`: changed chunks get padded volumes (own voxels plus
-//!    a 2-voxel apron from neighbours) built in parallel and handed to the
-//!    render world.
+//!    a 2-voxel apron from neighbours, the shape clipped by the visibility)
+//!    built in parallel and handed to the render world.
 //! 5. [`voxel`]: volumes are packed into GPU arenas and meshed with surface
 //!    nets in compute shaders, culled per view and drawn with one
 //!    multi-draw per arena, triplanar-textured from a [`texture_palette`].

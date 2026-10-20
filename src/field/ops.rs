@@ -55,21 +55,6 @@ impl BlendExt for u8 {
     }
 }
 
-// Concrete implementation for bool (Visibility fields)
-impl AccumulateExt for bool {
-    #[inline]
-    fn accumulate(self, delta: Self) -> Self {
-        self | delta // Binary addition/accumulation acts like an OR switch
-    }
-}
-
-impl BlendExt for bool {
-    #[inline]
-    fn blend_towards(self, target: Self, factor: f32) -> Self {
-        // If brush influence passes a threshold (e.g. 50%), flip the boolean state
-        if factor >= 0.5 { target } else { self }
-    }
-}
 
 /// Lets a field type be written directly from a signed-distance value —
 /// only meaningful for actual distance fields (f32), unlike `AccumulateExt`/
@@ -780,7 +765,7 @@ mod tests {
     use super::{Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sweep, UVec3, Vec3};
     use crate::{
         field::Field,
-        field::{LOD, SDF, VisibilityField},
+        field::{LOD, SDF, SDF_BAND, VisibilityField},
         num::{f32_from_u32, usize_from},
     };
 
@@ -1125,7 +1110,7 @@ mod tests {
         let n = field.size().x;
         (0..n)
             .flat_map(|z| (0..n).flat_map(move |y| (0..n).map(move |x| (x, y, z))))
-            .filter(|&(x, y, z)| !field.get(x, y, z))
+            .filter(|&(x, y, z)| !field.visible_at(x, y, z))
             .count()
     }
 
@@ -1136,18 +1121,18 @@ mod tests {
         let shape = Cuboid {
             half_size: Vec3::splat(0.4),
         };
-        field.fill_box(Vec3::splat(2.0), shape, false);
+        field.fill_box(Vec3::splat(2.0), shape, SDF_BAND);
         assert_eq!(hidden_count(&field), 1);
-        assert!(!field.get(2, 2, 2));
+        assert!(!field.visible_at(2, 2, 2));
 
         // Spans [2.1, 2.9]: holds no voxel at all.
         let mut field = VisibilityField::new(LOD::Lowest);
-        field.fill_box(Vec3::splat(2.5), shape, false);
+        field.fill_box(Vec3::splat(2.5), shape, SDF_BAND);
         assert_eq!(hidden_count(&field), 0);
 
         // Straddles the grid's low edge: [-0.9, -0.1] is outside the grid.
         let mut field = VisibilityField::new(LOD::Lowest);
-        field.fill_box(Vec3::splat(-0.5), shape, false);
+        field.fill_box(Vec3::splat(-0.5), shape, SDF_BAND);
         assert_eq!(hidden_count(&field), 0);
     }
 }

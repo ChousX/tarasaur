@@ -26,8 +26,10 @@
 //!   (a new slot), every 60 frames. Checks their material slots are
 //!   refilled, by reading them back from the GPU.
 //! - `visibility`: a hidden box across a chunk boundary, a sphere toggled
-//!   hidden and visible, and one chunk's mask removed. Checks every touched
-//!   chunk's mask on the GPU against the main world.
+//!   hidden and visible, and one chunk's `VisibilityField` removed. Checks
+//!   every touched chunk's shape on the GPU is the main world's SDF clipped
+//!   by its visibility (`max` of the two), read back from the arena. With
+//!   the `visibility-mask` feature it checks the GPU masks instead.
 //! - `dig`: the cursor brush's gradual dig, held at a slant and re-centered
 //!   on the surface every frame, like a player holding the mouse. Checks
 //!   the surface keeps a real distance field (no terraced, black crater)
@@ -97,7 +99,7 @@ use tarasaur::{
     },
     field::{
         Field, LOD, MaterialField, SDF, SDF_BAND, VisibilityField, VoxelField, VoxelMaterial,
-        editor::{SdfCsgSphere, WorldEditor},
+        editor::{SdfCsgSphere, VisibilityCsgSphere, WorldEditor},
     },
     grid::flatten_cube,
     num::{f32_from_u32, usize_from},
@@ -185,7 +187,8 @@ const VIS_TOGGLE_UNTIL: u32 = 200;
 const VIS_SPHERE_RADIUS: f32 = 1.5;
 /// When one chunk's `VisibilityField` is removed.
 const VIS_REMOVE_AT: u32 = 120;
-/// When the masks are read back (well after the last edit has landed).
+/// When the shapes are read back (well after the last edit, and the box's
+/// jump-flood reinit, have landed).
 const VIS_PROBE_AT: u32 = 260;
 const DIG_FRAMES: u32 = 540;
 /// The brush is held this long (8 s at 60 fps), then the edits settle. Deep
@@ -524,12 +527,15 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
                 Render,
                 (
                     read_back_slots,
-                    read_back_masks,
                     read_back_meshes,
                     report_arenas,
                 )
                     .in_set(RenderSystems::Cleanup),
             );
+        #[cfg(not(feature = "visibility-mask"))]
+        render_app.add_systems(Render, read_back_shapes.in_set(RenderSystems::Cleanup));
+        #[cfg(feature = "visibility-mask")]
+        render_app.add_systems(Render, read_back_masks.in_set(RenderSystems::Cleanup));
     }
     app.insert_resource(probe)
         .insert_resource(mesh_probe)
@@ -1126,9 +1132,10 @@ struct ProbeState {
     requests: Vec<SlotRequest>,
     /// One line per request, ending in ": ok" when the slot matched.
     results: Vec<String>,
-    /// Visibility masks to read back, and one result line per request.
-    mask_requests: Vec<MaskRequest>,
-    mask_results: Vec<(IVec3, String)>,
+    /// Clipped shapes (or, with `visibility-mask`, masks) to read back,
+    /// and one result line per request.
+    visibility_requests: Vec<VisibilityRequest>,
+    visibility_results: Vec<(IVec3, String)>,
     /// Set by the main world to ask for an `ArenaReport`.
     arena_request: bool,
     arena_report: Option<ArenaReport>,
@@ -2486,7 +2493,8 @@ fn apron_report_lines(probe: &MeshProbe) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// visibility: mask edits, mask removal, and the masks on the GPU
+// visibility: hide and reveal edits, field removal, and the clipped shapes
+// on the GPU
 // ---------------------------------------------------------------------------
 
 /// The hidden box: on the x = 240 chunk boundary, 0.45 of a High voxel off
@@ -2501,12 +2509,14 @@ fn vis_sphere_center() -> Vec3 {
     surface(230.0, START.z + 32.0)
 }
 
-/// The box's -x chunk, whose `VisibilityField` is removed mid-phase.
+/// The box's +x chunk, whose `VisibilityField` is removed mid-phase. The
+/// +x one: the sphere's CSG reach touches the -x one, and an edit gives a
+/// chunk without the field a fresh one.
 fn vis_removed_chunk() -> IVec3 {
-    world_pos_to_chunk_pos(&(vis_box_center() - Vec3::X * MATERIAL_BOX_HALF))
+    world_pos_to_chunk_pos(&(vis_box_center() + Vec3::X * MATERIAL_BOX_HALF))
 }
 
-/// Every chunk the phase's edits touch: the ones whose masks are checked.
+/// Every chunk the phase's edits touch: the ones whose shapes are checked.
 fn vis_chunks() -> Vec<IVec3> {
     let mut chunks: Vec<IVec3> =
         overlapping_chunks(vis_box_center(), Vec3::splat(MATERIAL_BOX_HALF))
@@ -2520,11 +2530,14 @@ fn vis_chunks() -> Vec<IVec3> {
     chunks
 }
 
+/// The box is a value edit (signs inside it, then the jump-flood reinit
+/// makes distances); the sphere is an exact CSG hide or reveal.
 fn drive_visibility(
     bench: Res<Bench>,
-    mut visibility: WorldEditor<VisibilityField, bool>,
+    mut visibility: WorldEditor<VisibilityField, f32>,
+    mut csg: MessageWriter<VisibilityCsgSphere>,
     chunks: Res<ChunkManager>,
-    fields: Query<&VisibilityField>,
+    fields: Query<(&SDF, Option<&VisibilityField>)>,
     probe: Res<SlotProbe>,
     mut commands: Commands,
 ) {
@@ -2533,13 +2546,17 @@ fn drive_visibility(
     }
     let f = bench.frame_in_phase;
     if f == 0 {
-        visibility.fill_box(vis_box_center(), Vec3::splat(MATERIAL_BOX_HALF), false);
+        visibility.fill_box(vis_box_center(), Vec3::splat(MATERIAL_BOX_HALF), SDF_BAND);
     }
-    // Hidden on odd toggles, so it ends visible: an all-visible chunk sends
-    // no mask at all.
+    // Hidden on odd toggles, so it ends visible.
     if f < VIS_TOGGLE_UNTIL && f.is_multiple_of(VIS_TOGGLE_PERIOD) {
-        let hide = (f / VIS_TOGGLE_PERIOD) % 2 == 1;
-        visibility.fill_sphere(vis_sphere_center(), VIS_SPHERE_RADIUS, !hide);
+        csg.write(VisibilityCsgSphere {
+            center: vis_sphere_center(),
+            radius: VIS_SPHERE_RADIUS,
+            sweep_from: None,
+            hide: (f / VIS_TOGGLE_PERIOD) % 2 == 1,
+            max_step: None,
+        });
     }
     if f == VIS_REMOVE_AT
         && let Some(entity) = chunks.get_chunk(&vis_removed_chunk())
@@ -2555,35 +2572,210 @@ fn drive_visibility(
     for pos in vis_chunks() {
         let Some(entity) = chunks.get_chunk(&pos) else {
             state
-                .mask_results
+                .visibility_results
                 .push((pos, format!("chunk {pos} isn't loaded")));
             continue;
         };
-        let field = fields.get(entity).ok();
-        state.mask_requests.push(MaskRequest {
+        let Ok((sdf, vis)) = fields.get(entity) else {
+            state
+                .visibility_results
+                .push((pos, format!("chunk {pos} has no SDF")));
+            continue;
+        };
+        let request = VisibilityRequest::new(pos, entity, sdf, vis);
+        state.visibility_requests.push(request);
+    }
+}
+
+/// A chunk whose GPU shape to read back. `expected` is the main world's
+/// SDF clipped by its visibility, `lod.size()`^3 snorm16 values.
+#[cfg(not(feature = "visibility-mask"))]
+struct VisibilityRequest {
+    pos: IVec3,
+    entity: Entity,
+    lod: LOD,
+    /// Voxels the visibility hides, for the result line.
+    hidden: usize,
+    /// The clipped interior has one sign: it may mesh to nothing (only its
+    /// apron could still cross), so holding no slot is fine.
+    uniform: bool,
+    expected: Arc<[i16]>,
+}
+
+#[cfg(not(feature = "visibility-mask"))]
+impl VisibilityRequest {
+    /// What extraction uploads for the interior: the SDF clipped by the
+    /// visibility (absent = fully visible), quantized.
+    fn new(pos: IVec3, entity: Entity, sdf: &SDF, vis: Option<&VisibilityField>) -> Self {
+        use tarasaur::field::quantize_sdf;
+        let mut hidden = 0usize;
+        let mut inside = 0usize;
+        let expected: Vec<i16> = sdf
+            .data_slice()
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                let c = vis.and_then(|v| v.data_slice().get(i).copied());
+                let c = c.unwrap_or(-SDF_BAND);
+                hidden = hidden.saturating_add(usize::from(c > 0.0));
+                inside = inside.saturating_add(usize::from(d.max(c) <= 0.0));
+                quantize_sdf(d.max(c))
+            })
+            .collect();
+        Self {
             pos,
             entity,
-            // Edits load chunks at max LOD; a chunk's mask slot is there too.
-            lod: field.map_or(LOD::High, VoxelField::lod),
-            expected: field
-                .filter(|f| f.should_extract())
-                .map(|f| f.data_slice().into()),
-        });
+            // Edits load chunks at max LOD; a chunk's slot is there too.
+            lod: sdf.lod(),
+            hidden,
+            uniform: inside == 0 || inside == expected.len(),
+            expected: expected.into(),
+        }
     }
+}
+
+/// Copies each requested chunk's shape slot into a mappable buffer and
+/// compares its interior (the padded volume minus the apron) with the main
+/// world's clipped SDF.
+#[cfg(not(feature = "visibility-mask"))]
+fn read_back_shapes(
+    probe: Res<SlotProbe>,
+    arenas: ArenaInspector,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    let requests = match probe.0.lock() {
+        Ok(mut s) => std::mem::take(&mut s.visibility_requests),
+        Err(_) => return,
+    };
+    for req in requests {
+        let pos = req.pos;
+        let Some(slot) = arenas.shape_slot(req.lod, req.entity) else {
+            let line = if req.uniform {
+                format!("chunk {pos} (no geometry, no slot, {} hidden): ok", req.hidden)
+            } else {
+                format!("chunk {pos}: no slot")
+            };
+            if let Ok(mut s) = probe.0.lock() {
+                s.visibility_results.push((pos, line));
+            }
+            continue;
+        };
+        let padded = slot.padded_size;
+        let bytes = u64::from(padded).pow(3).saturating_mul(2);
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("bench_shape_readback"),
+            size: bytes,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("bench_shape_readback"),
+        });
+        encoder.copy_buffer_to_buffer(&slot.buffer, slot.offset, &readback, 0, bytes);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let n = req.lod.size();
+        let state = probe.0.clone();
+        readback
+            .clone()
+            .slice(..)
+            .map_async(MapMode::Read, move |result| {
+                let line = if result.is_err() {
+                    format!("chunk {pos}: map failed")
+                } else {
+                    let line = readback.slice(..).get_mapped_range().ok().map(|gpu| {
+                        let got: &[i16] = bytemuck::cast_slice(&gpu);
+                        compare_shape(pos, got, &req.expected, req.hidden, padded, n)
+                    });
+                    readback.unmap();
+                    line.unwrap_or_else(|| format!("chunk {pos}: unreadable"))
+                };
+                if let Ok(mut s) = state.lock() {
+                    s.visibility_results.push((pos, line));
+                }
+            });
+    }
+}
+
+/// One result line: ": ok" when every interior voxel of the GPU's shape
+/// equals the main world's clipped SDF.
+#[cfg(not(feature = "visibility-mask"))]
+fn compare_shape(
+    pos: IVec3,
+    got: &[i16],
+    expected: &[i16],
+    hidden: usize,
+    padded: u32,
+    n: u32,
+) -> String {
+    let mut wrong = 0usize;
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let g = got.get(flatten_cube(x, y, z, padded));
+                let want = expected.get(flatten_cube(x, y, z, n));
+                if g != want {
+                    wrong = wrong.saturating_add(1);
+                }
+            }
+        }
+    }
+    if wrong == 0 {
+        format!("chunk {pos} ({hidden} hidden): ok")
+    } else {
+        format!(
+            "chunk {pos}: {wrong} of {} voxels wrong",
+            usize_from(n).pow(3)
+        )
+    }
+}
+
+/// The clip path's verdict on the result lines: every line ok, and at
+/// least one chunk really clipped.
+#[cfg(not(feature = "visibility-mask"))]
+const VISIBILITY_CHECK: &str = "visibility_clipped_shapes";
+#[cfg(not(feature = "visibility-mask"))]
+fn visibility_path_ran(results: &[(IVec3, String)]) -> bool {
+    results
+        .iter()
+        .any(|(_, l)| l.ends_with("hidden): ok") && !l.contains("(0 hidden)"))
+}
+/// The removed field's chunk reads back as its plain SDF.
+#[cfg(not(feature = "visibility-mask"))]
+fn visibility_plain(line: &str) -> bool {
+    line.ends_with("(0 hidden): ok")
 }
 
 /// A chunk whose GPU mask to read back. `expected` is the main world's
 /// mask (`lod.size()`^3 bytes, 0 = hidden), or `None` when the GPU should
 /// hold no mask for it (no field, or all visible).
-struct MaskRequest {
+#[cfg(feature = "visibility-mask")]
+struct VisibilityRequest {
     pos: IVec3,
     entity: Entity,
     lod: LOD,
     expected: Option<Arc<[u8]>>,
 }
 
+#[cfg(feature = "visibility-mask")]
+impl VisibilityRequest {
+    fn new(pos: IVec3, entity: Entity, sdf: &SDF, vis: Option<&VisibilityField>) -> Self {
+        Self {
+            pos,
+            entity,
+            // Edits load chunks at max LOD; a chunk's mask slot is there too.
+            lod: sdf.lod(),
+            expected: vis
+                .filter(|v| v.should_extract())
+                .map(|v| VisibilityField::gpu_bytes(v.data_slice()).into()),
+        }
+    }
+}
+
 /// Copies each requested chunk's mask words and its "has a mask" word into
 /// one mappable buffer and compares them with the main world.
+#[cfg(feature = "visibility-mask")]
 fn read_back_masks(
     probe: Res<SlotProbe>,
     arenas: ArenaInspector,
@@ -2591,7 +2783,7 @@ fn read_back_masks(
     queue: Res<RenderQueue>,
 ) {
     let requests = match probe.0.lock() {
-        Ok(mut s) => std::mem::take(&mut s.mask_requests),
+        Ok(mut s) => std::mem::take(&mut s.visibility_requests),
         Err(_) => return,
     };
     for req in requests {
@@ -2600,7 +2792,7 @@ fn read_back_masks(
         // nothing is drawn there for a mask to hide.
         let Some(slot) = arenas.mask_slot(req.lod, req.entity) else {
             if let Ok(mut s) = probe.0.lock() {
-                s.mask_results
+                s.visibility_results
                     .push((pos, format!("chunk {pos} (no geometry, no slot): ok")));
             }
             continue;
@@ -2646,7 +2838,7 @@ fn read_back_masks(
                     line.unwrap_or_else(|| format!("chunk {pos}: unreadable"))
                 };
                 if let Ok(mut s) = state.lock() {
-                    s.mask_results.push((pos, line));
+                    s.visibility_results.push((pos, line));
                 }
             });
     }
@@ -2654,6 +2846,7 @@ fn read_back_masks(
 
 /// One result line: ": ok" when the GPU's flag and bits match the main
 /// world for every interior voxel.
+#[cfg(feature = "visibility-mask")]
 fn compare_mask(
     pos: IVec3,
     words: &[u32],
@@ -2698,8 +2891,25 @@ fn compare_mask(
     }
 }
 
-/// Every touched chunk's GPU mask matches the main world, both the masked
-/// and the mask-free path ran, and the removed field's mask is gone.
+/// The mask path's verdict: every line ok, and both the masked and the
+/// mask-free path ran.
+#[cfg(feature = "visibility-mask")]
+const VISIBILITY_CHECK: &str = "visibility_mask_slots";
+#[cfg(feature = "visibility-mask")]
+fn visibility_path_ran(results: &[(IVec3, String)]) -> bool {
+    let masked = results.iter().any(|(_, l)| l.contains("hidden): ok"));
+    let unmasked = results.iter().any(|(_, l)| l.contains("(no mask): ok"));
+    masked && unmasked
+}
+/// The removed field's chunk holds no mask.
+#[cfg(feature = "visibility-mask")]
+fn visibility_plain(line: &str) -> bool {
+    line.ends_with("(no mask): ok")
+}
+
+/// Every touched chunk's GPU shape (or mask) matches the main world, the
+/// path under test really ran, and the removed field's chunk is back to
+/// its plain SDF.
 fn check_visibility(
     mut bench: ResMut<Bench>,
     probe: Res<SlotProbe>,
@@ -2712,17 +2922,9 @@ fn check_visibility(
     let results = probe
         .0
         .lock()
-        .map_or_else(|_| Vec::new(), |s| s.mask_results.clone());
+        .map_or_else(|_| Vec::new(), |s| s.visibility_results.clone());
     let expected = vis_chunks().len();
     let ok = results.iter().filter(|(_, l)| l.ends_with(": ok")).count();
-    let masked = results
-        .iter()
-        .filter(|(_, l)| l.contains("hidden): ok"))
-        .count();
-    let unmasked = results
-        .iter()
-        .filter(|(_, l)| l.contains("(no mask): ok"))
-        .count();
     let detail = if results.is_empty() {
         "no readback finished".into()
     } else {
@@ -2734,8 +2936,8 @@ fn check_visibility(
     };
     bench.checks.record(
         Phase::Visibility,
-        "visibility_mask_slots",
-        ok == expected && results.len() == expected && masked > 0 && unmasked > 0,
+        VISIBILITY_CHECK,
+        ok == expected && results.len() == expected && visibility_path_ran(&results),
         detail,
     );
 
@@ -2743,14 +2945,14 @@ fn check_visibility(
     let field_gone = chunks
         .get_chunk(&removed)
         .is_some_and(|e| fields.get(e).is_err());
-    let gpu_cleared = results
+    let gpu_plain = results
         .iter()
-        .any(|(p, l)| *p == removed && l.ends_with("(no mask): ok"));
+        .any(|(p, l)| *p == removed && visibility_plain(l));
     bench.checks.record(
         Phase::Visibility,
         "visibility_removed",
-        field_gone && gpu_cleared,
-        format!("chunk {removed}: field removed {field_gone}, GPU mask cleared {gpu_cleared}"),
+        field_gone && gpu_plain,
+        format!("chunk {removed}: field removed {field_gone}, GPU back to the plain SDF {gpu_plain}"),
     );
 }
 

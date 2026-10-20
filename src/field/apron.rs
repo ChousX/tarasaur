@@ -339,10 +339,11 @@ mod tests {
             1 => -0.0,
             _ => f32_from_u32(lcg(s, 1601)) / 100.0 - 8.0,
         };
-        let id = |s: &mut u64| u8::try_from(lcg(s, 4)).unwrap();
+        // The visibility is compared as the clip quantizes it: its -0.0s
+        // and 0.0s differ bitwise, not to the GPU.
         for layout in layouts {
             check_apron::<SDF>(16, layout, sdf, SDF::gpu_bytes);
-            check_apron::<VisibilityField>(16, layout, id, <[u8]>::to_vec);
+            check_apron::<VisibilityField>(16, layout, sdf, SDF::gpu_bytes);
         }
     }
 }

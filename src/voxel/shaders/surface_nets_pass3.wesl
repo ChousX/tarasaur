@@ -318,7 +318,7 @@ fn pack_material_a(id_a: u32, weight_u8: u32, uniform_mat: bool, macro_n: f32) -
 }
 
 // real_slot occupies bits 8-22 (15 bits). id_b keeps bits 0-7. The fragment
-// shader unpacks real_slot for its per-pixel visibility discard test.
+// shader unpacks real_slot for its per-pixel material lookups.
 fn pack_material_b(id_b: u32, real_slot: u32) -> f32 {
     let packed = (id_b & 0xFFu) | ((real_slot & 0x7FFFu) << 8u) | 0x3F800000u;
     return bitcast<f32>(packed);

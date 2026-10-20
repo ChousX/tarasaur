@@ -40,9 +40,9 @@ pub(crate) const NEIGHBORS_MASK: [IVec3; 7] = [
     ivec3(1, 1, 1),
 ];
 
-/// Trilinear neighbor sampling, for continuous data like SDF distances.
-/// Categorical fields (material ids, visibility) must never blend; they use
-/// `nearest_neighbor_sample` instead.
+/// Trilinear neighbor sampling, for continuous data like SDF and
+/// visibility distances. Categorical fields (material ids) must never
+/// blend; they use `nearest_neighbor_sample` instead.
 ///
 /// Past the last voxel it extrapolates from the last cell instead of
 /// clamping. A finer chunk resamples a coarser neighbour at its own spacing,
@@ -74,12 +74,12 @@ pub fn sample_neighbor(data: &[f32], size: u32, x: f32, y: f32, z: f32) -> f32 {
     lerp(plane(p0.z), plane(p1.z), frac.z)
 }
 
-/// Nearest-neighbor apron sampling for categorical byte data — material
-/// ids, visibility bits.
+/// Nearest-neighbor apron sampling for categorical byte data: material
+/// ids.
 ///
-/// The default `VoxelField::sample_apron`, used by materials and visibility
-/// rather than duplicated: unlike SDF distances, these values must never be
-/// blended across a chunk boundary. Reads 0 if `data` is shorter than `size^3`.
+/// The default `VoxelField::sample_apron`, used by materials rather than
+/// duplicated: unlike distances, these values must never be blended across
+/// a chunk boundary. Reads 0 if `data` is shorter than `size^3`.
 #[must_use]
 pub fn nearest_neighbor_sample<E: Copy + Default>(
     data: &[E],

@@ -15,7 +15,7 @@ use bevy::{
 
 use crate::{
     chunk::Chunk,
-    field::systems::SdfReinitTask,
+    field::{VisibilityField, systems::{ReinitTask, SdfReinitTask}},
     field::{LOD, TargetLOD},
     storage::loading::ChunkDataTask,
     voxel::{arena::VoxelChunkArena, draw::VoxelViewDraws, layer::VoxelLayers},
@@ -137,7 +137,7 @@ type ChunkState = (
     Option<&'static LOD>,
     Option<&'static TargetLOD>,
     Has<ChunkDataTask>,
-    Has<SdfReinitTask>,
+    (Has<SdfReinitTask>, Has<ReinitTask<VisibilityField>>),
 );
 
 fn publish_voxel_diagnostics(
@@ -149,7 +149,7 @@ fn publish_voxel_diagnostics(
     for (lod, target, load, reinit) in &chunks {
         total = total.saturating_add(1);
         loading = loading.saturating_add(usize::from(load));
-        reinits = reinits.saturating_add(usize::from(reinit));
+        reinits = reinits.saturating_add(usize::from(reinit.0 || reinit.1));
         let at_target = matches!((lod, target), (Some(l), Some(t)) if *l == t.0);
         lod_pending = lod_pending.saturating_add(usize::from(!at_target));
     }

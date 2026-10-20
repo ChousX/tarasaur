@@ -25,7 +25,10 @@ use crate::num::f32_from_u32;
 use crate::storage::generator::ChunkGeneratorRegistry;
 use crate::storage::loading::ChunkDataTask;
 use crate::{chunk::ReplanRequested, field::SDF};
-use crate::{field::DirtyField, field::systems::SdfReinitTask};
+use crate::{
+    field::{DirtyField, VisibilityField},
+    field::systems::{ReinitTask, SdfReinitTask},
+};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::tasks::AsyncComputeTaskPool;
@@ -599,7 +602,10 @@ impl Plugin for ChunkPersistencePlugin {
 /// Edits are still being turned into real distances. Saving now would
 /// persist pre-JFA data, and replacing the fields now would discard the edits.
 pub(crate) fn is_settling(world: &World, e: Entity) -> bool {
-    world.get::<SdfReinitTask>(e).is_some() || world.get::<DirtyField<SDF, f32>>(e).is_some()
+    world.get::<SdfReinitTask>(e).is_some()
+        || world.get::<DirtyField<SDF, f32>>(e).is_some()
+        || world.get::<ReinitTask<VisibilityField>>(e).is_some()
+        || world.get::<DirtyField<VisibilityField, f32>>(e).is_some()
 }
 
 #[cfg(test)]
@@ -693,9 +699,8 @@ mod tests {
                 downsample_bytes::<SDF>(sdf, LOD::Medium, to),
             );
         }
-        let mat = &data.fields[1].bytes;
-        let down = downsample_bytes::<VisibilityField>(mat, LOD::Medium, LOD::Low);
-        assert_eq!(down.len(), LOD::Low.volume());
+        let down = downsample_bytes::<VisibilityField>(sdf, LOD::Medium, LOD::Low);
+        assert_eq!(down.len(), LOD::Low.volume() * 4);
         // wrong size: rejected
         assert_eq!(
             downsample_bytes::<SDF>(&sdf[1..], LOD::Medium, LOD::Low),

@@ -52,6 +52,17 @@ pub struct MeshArena {
     pub slots: Vec<(IVec3, u32, u32)>,
 }
 
+/// Where a resident chunk's shape (its first surface) lives on the GPU.
+pub struct ShapeSlot {
+    /// The arena's shape buffer: one snorm16 distance per padded voxel
+    /// (over +/-`SDF_BAND`, see `quantize_sdf`), x fastest (`COPY_SRC`).
+    pub buffer: Buffer,
+    /// Byte offset of the chunk's padded volume in `buffer`.
+    pub offset: u64,
+    /// Edge of the padded volume: the chunk's voxels plus the apron.
+    pub padded_size: u32,
+}
+
 /// Where a resident chunk's visibility mask lives on the GPU.
 pub struct MaskSlot {
     /// The arena's mask buffer: one bit per padded voxel, 32 per `u32`,
@@ -154,6 +165,25 @@ impl ArenaInspector<'_> {
         let bytes = u64::from(arena.sdf_elems_per_chunk);
         Some(MaterialSlot {
             buffer: arena.material_buffer.clone(),
+            offset: u64::from(found.slot).saturating_mul(bytes),
+            padded_size: arena.texture_size,
+        })
+    }
+
+    /// The shape slot of `chunk` (a main-world entity) at `lod`, if it
+    /// holds one: the padded SDF the mesher read, clipped by the layer's
+    /// clip field.
+    #[must_use]
+    pub fn shape_slot(&self, lod: LOD, chunk: Entity) -> Option<ShapeSlot> {
+        let set = self.terrain()?;
+        let found = set.find_first(lod, MainEntity::from(chunk))?;
+        let arena = set
+            .arenas
+            .get(VoxelChunkArenaSet::lod_index(lod))?
+            .get(found.arena_idx)?;
+        let bytes = u64::from(arena.sdf_elems_per_chunk).saturating_mul(2);
+        Some(ShapeSlot {
+            buffer: arena.sdf_buffer.clone(),
             offset: u64::from(found.slot).saturating_mul(bytes),
             padded_size: arena.texture_size,
         })

@@ -3,6 +3,9 @@
 **Status:** implemented on the `surface-layers` branch, phases 1 to 6; see
 "As built" at the end for where the code departs from this draft and for
 the benchmark results. The design sections below are the draft as reviewed.
+Since then, `visibility-clip.md` replaced the `Mask` side channel (a
+per-pixel discard) with `Clip`, a distance field folded into the shape at
+extraction; references to the mask below describe the layers as first built.
 
 Tarasaur meshes and draws exactly one surface per chunk: the `SDF`, textured
 by the palette. This proposes generalizing that into *surface layers*, so an

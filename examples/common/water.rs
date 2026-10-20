@@ -24,7 +24,7 @@ use tarasaur::{
     chunk::CHUNK_SIZE,
     field::{Field, GpuChannel, LOD, SDF_BAND, VoxelField, quantize_sdf},
     grid::{flatten_cube, sample_neighbor},
-    num::{f32_from_i32, f32_from_u32},
+    num::{f32_from_i32, f32_from_u32, usize_from},
     storage::generator::ChunkGeneratorRegistry,
     voxel::{LayerMaterial, LayerPass, NoChannel, SubSurface, Surfaces},
 };
@@ -133,7 +133,7 @@ fn water_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
             // Unclamped: the flood surface is this shifted by `FLOOD_ABOVE`,
             // which must still cross zero. Quantizing clamps at upload.
             let d = (wy - WATER_LEVEL) / voxel;
-            out.extend(std::iter::repeat_n(d, n as usize));
+            out.extend(std::iter::repeat_n(d, usize_from(n)));
         }
     }
     out
@@ -196,6 +196,7 @@ pub struct WaterLayer;
 impl SurfaceLayer for WaterLayer {
     type Shape = WaterField;
     type Material = NoChannel;
+    type Clip = NoChannel;
     type Mask = NoChannel;
     type Raster = FlatRaster;
     /// Flat planes need no detail: a 64th of the arena memory of `High`.

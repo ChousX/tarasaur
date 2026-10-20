@@ -8,13 +8,13 @@ use bevy::shape::{Cuboid, Sphere};
 use crate::chunk::NewChunkSpawned;
 use crate::field::editor::{
     EditFieldMessage, MaterialPaint, MaterialPaintVoxels, SdfCsgSphere, SdfSculptSphere,
-    SdfSphereStamp,
+    SdfSphereStamp, VisibilityCsgSphere,
 };
 use crate::field::systems::{
-    clear_dirty, process_sdf_csg_spheres, process_sdf_sculpts, process_sdf_sphere_stamps,
-    process_shape_edits, resolve_sdf_reinit_tasks, spawn_sdf_reinit_tasks,
+    clear_dirty, process_csg_spheres, process_sdf_sculpts, process_sdf_sphere_stamps,
+    process_shape_edits, resolve_reinit_tasks, spawn_reinit_tasks,
 };
-use crate::field::{Field, LOD, TargetLOD, VoxelField};
+use crate::field::{Field, LOD, SDF, TargetLOD, VisibilityField, VoxelField};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldSet {
@@ -29,9 +29,11 @@ pub enum FieldSet {
     EndCycle,
 }
 
-/// The edit cycle and the SDF's own systems (jump-flood reinit, sphere
-/// stamps, CSG spheres). Fields themselves are registered with
-/// `add_voxel_field`.
+/// The edit cycle and the distance fields' own systems.
+///
+/// That's the jump-flood reinit and CSG spheres for the `SDF` and the
+/// `VisibilityField`, and sphere stamps and sculpts for the `SDF`. Fields
+/// themselves are registered with `add_voxel_field`.
 pub struct FieldsPlugin;
 
 impl Plugin for FieldsPlugin {
@@ -48,27 +50,31 @@ impl Plugin for FieldsPlugin {
         );
         app.add_systems(
             Update,
-            (spawn_sdf_reinit_tasks, resolve_sdf_reinit_tasks)
-                .chain()
+            (
+                (spawn_reinit_tasks::<SDF>, resolve_reinit_tasks::<SDF>).chain(),
+                (
+                    spawn_reinit_tasks::<VisibilityField>,
+                    resolve_reinit_tasks::<VisibilityField>,
+                )
+                    .chain(),
+            )
                 .in_set(FieldSet::Reinit),
-        );
-        // A development aid only: release builds neither run nor compile it.
-        #[cfg(debug_assertions)]
-        app.add_systems(
-            Update,
-            crate::field::systems::detect_topology_desync
-                .in_set(FieldSet::Reinit)
-                .before(spawn_sdf_reinit_tasks),
         );
 
         app.add_message::<SdfSphereStamp>()
             .add_systems(Update, process_sdf_sphere_stamps.in_set(FieldSet::Edit));
 
         app.add_message::<SdfCsgSphere>()
+            .add_message::<VisibilityCsgSphere>()
             .add_message::<SdfSculptSphere>()
             .add_systems(
                 Update,
-                (process_sdf_csg_spheres, process_sdf_sculpts).in_set(FieldSet::Edit),
+                (
+                    process_csg_spheres::<SdfCsgSphere>,
+                    process_csg_spheres::<VisibilityCsgSphere>,
+                    process_sdf_sculpts,
+                )
+                    .in_set(FieldSet::Edit),
             );
         // Applied by `MaterialFieldPlugin<M>`; registered here so writers
         // work without one.

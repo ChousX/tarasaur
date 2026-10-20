@@ -1,16 +1,25 @@
 //! Change-driven hand-off of chunk fields to the render world.
 //!
 //! The main world, in `Last`, works out which chunks' inputs changed this
-//! frame (their own field, a neighbour their apron reads, or their residency:
-//! surface, visibility, lease) and builds those chunks' padded volumes in
-//! parallel. `ExtractSchedule`, which stalls both worlds, only forwards the
-//! results. Building the volumes inside extract, one chunk at a time, cost up
-//! to ~50 ms in a frame while flying.
+//! frame (their own field, the layer's clip field, a neighbour their apron
+//! reads, or their residency: surface, visibility, lease) and builds those
+//! chunks' padded volumes in parallel. `ExtractSchedule`, which stalls both
+//! worlds, only forwards the results. Building the volumes inside extract,
+//! one chunk at a time, cost up to ~50 ms in a frame while flying.
+//!
+//! A shape's padded volume is clipped by the layer's clip field
+//! (`SurfaceLayer::Clip`, the terrain's `VisibilityField`) before upload:
+//! `max(shape, clip)` voxel by voxel, both padded the same way, so the
+//! mesher sees the intersection and closes the cut with a surface.
 //!
 //! Debug builds re-check every chunk every [`AUDIT_INTERVAL`] frames and warn
 //! about (and repair) anything the change tracking missed.
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{
+    any::TypeId,
+    marker::PhantomData,
+    sync::{Arc, OnceLock},
+};
 
 use bevy::{
     diagnostic::FrameCount,
@@ -25,7 +34,7 @@ use std::borrow::Cow;
 
 use crate::{
     chunk::{Chunk, ChunkManager, ChunkPosition},
-    field::{GpuChannel, LOD, SDF, VisibilityField, VoxelField},
+    field::{GpuChannel, LOD, SDF, SDF_BAND, VisibilityField, VoxelField},
     field::{
         apron::{apron_source, fill_apron_with, seam_lod_ranks},
         surface::HasSurface,
@@ -61,12 +70,40 @@ const AUDIT_INTERVAL: u32 = 120;
 
 /// What a chunk's upload depends on: its LOD, its own version, each
 /// `NEIGHBORS_MASK` neighbour's (border) version with that neighbour's LOD
-/// folded in, and its `seam_lod_ranks` (every neighbour's LOD). Unchanged
+/// folded in, the same for the layer's clip field (with a presence bit on
+/// its own), and its `seam_lod_ranks` (every neighbour's LOD). Unchanged
 /// key = unchanged upload.
-type ExtractKey = (LOD, [u64; 8], [u32; 2]);
+type ExtractKey = (LOD, [u64; 8], [u64; 8], [u32; 2]);
 
 type FieldQuery<'w, 's, T> =
     Query<'w, 's, (Entity, &'static ChunkPosition, &'static T, &'static LOD)>;
+
+/// The clip of a layer without one: a component no chunk ever has, so the
+/// clip query is empty and nothing is clipped.
+#[derive(Component, Clone)]
+pub struct NoClip;
+
+impl VoxelField for NoClip {
+    type Value = f32;
+    type Elem = f32;
+    const GPU: GpuChannel = GpuChannel::None;
+    const OPTIONAL: bool = true;
+    fn new_for_lod(_: LOD) -> Self {
+        Self
+    }
+    fn from_raw(_: LOD, _: Vec<f32>) -> Self {
+        Self
+    }
+    fn lod(&self) -> LOD {
+        LOD::default()
+    }
+    fn data_slice(&self) -> &[f32] {
+        &[]
+    }
+    fn version(&self) -> u64 {
+        0
+    }
+}
 
 /// Marks `pos` and its 26 neighbours: those whose apron reads `pos`
 /// (`pos - offset`), and all of them stitch seams by its LOD.
@@ -104,14 +141,16 @@ fn effective(lod: LOD, cap: Option<LOD>) -> LOD {
     cap.map_or(lod, |c| lod.min(c))
 }
 
-/// Registers the hand-off of field `T`: the main-world padding system and
-/// the render-world extract system that forwards its output.
-pub fn add_field_extraction<T>(app: &mut App, config: ExtractConfig<T>)
+/// Registers the hand-off of field `T`, clipped by `C` (`NoClip` for none):
+/// the main-world padding system and the render-world extract system that
+/// forwards its output.
+pub fn add_field_extraction<T, C>(app: &mut App, config: ExtractConfig<T>)
 where
     T: VoxelField,
+    C: VoxelField<Elem = f32>,
 {
     app.insert_resource(PaddedOutbox::<T>::new(config))
-        .add_systems(Last, pad_dirty_chunks::<T>);
+        .add_systems(Last, pad_dirty_chunks::<T, C>);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
     }
@@ -139,7 +178,7 @@ impl ExtractFilter<'_, '_> {
         let hidden = self
             .visibility
             .get(entity)
-            .is_ok_and(|v| v.is_some_and(VisibilityField::is_all_empty));
+            .is_ok_and(|v| v.is_some_and(VisibilityField::is_all_hidden));
         !self.surface.contains(entity) || (hidden && !self.forced.contains(&pos))
     }
 }
@@ -216,11 +255,15 @@ impl<T: VoxelField> PaddedOutbox<T> {
     }
 }
 
-/// Everything that can make chunks holding `T` need a new padded volume.
+/// Everything that can make chunks holding `T` need a new padded volume,
+/// including a change to the clip field `C` of the chunk or a neighbour.
 #[derive(SystemParam)]
-pub struct FieldChanges<'w, 's, T: Component> {
+pub struct FieldChanges<'w, 's, T: Component, C: Component> {
     changed: Query<'w, 's, (Entity, &'static ChunkPosition), Changed<T>>,
     removed: RemovedComponents<'w, 's, T>,
+    clip_changed: Query<'w, 's, &'static ChunkPosition, Changed<C>>,
+    clip_removed: RemovedComponents<'w, 's, C>,
+    positions: Query<'w, 's, &'static ChunkPosition>,
     residency: ResidencyChanges<'w, 's>,
 }
 
@@ -238,7 +281,7 @@ pub struct ExtractState {
 }
 
 impl ExtractState {
-    fn collect<T: Component>(&mut self, changes: &mut FieldChanges<T>) {
+    fn collect<T: Component, C: Component>(&mut self, changes: &mut FieldChanges<T, C>) {
         self.dirty.clear();
         // Removals first: a field removed and re-added this frame shows up in
         // both, and must end up recorded.
@@ -253,35 +296,97 @@ impl ExtractState {
             self.positions.insert(e, pos.0);
             dirty_with_dependents(&mut self.dirty, pos.0);
         }
+        // A clip that changed or went away: the chunk, and the neighbours
+        // whose apron reads it, re-clip.
+        for pos in changes.clip_changed.iter() {
+            dirty_with_dependents(&mut self.dirty, pos.0);
+        }
+        let clip_removed: Vec<Entity> = changes.clip_removed.read().collect();
+        for e in clip_removed {
+            if let Ok(pos) = changes.positions.get(e) {
+                dirty_with_dependents(&mut self.dirty, pos.0);
+            }
+        }
         changes.residency.collect(&mut self.dirty);
     }
 }
 
+/// What a padded volume reads: every chunk's shape `T` and clip `C`, by
+/// position.
+struct Sources<'a, 'w, 's, T: VoxelField, C: VoxelField> {
+    manager: &'a ChunkManager,
+    shape: &'a FieldQuery<'w, 's, T>,
+    clip: &'a FieldQuery<'w, 's, C>,
+}
+
+// By hand: a derive would ask `T: Clone` and `C: Clone`.
+impl<T: VoxelField, C: VoxelField> Clone for Sources<'_, '_, '_, T, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: VoxelField, C: VoxelField> Copy for Sources<'_, '_, '_, T, C> {}
+
 /// `lod` is the chunk's own; the key holds the LOD it is uploaded at.
-fn extract_key<T: VoxelField>(
+fn extract_key<T: VoxelField, C: VoxelField>(
+    entity: Entity,
     field: &T,
     pos: IVec3,
     lod: LOD,
     cap: Option<LOD>,
-    chunk_manager: &ChunkManager,
-    query: &FieldQuery<T>,
+    src: Sources<T, C>,
 ) -> ExtractKey {
     let eff = effective(lod, cap);
-    let mut versions = [0u64; 8];
-    let (own, neighbor_versions) = versions.split_at_mut(1);
-    if let Some(own) = own.first_mut() {
-        *own = field.version();
-    }
     // Per axis, whether the face neighbour across it is coarser (as
     // uploaded): then the apron steps by its voxel along that axis (see
     // `fill_apron_with`).
     let coarse_face = [IVec3::X, IVec3::Y, IVec3::Z].map(|axis| {
-        chunk_manager
+        src.manager
             .get_chunk(&pos.wrapping_add(axis))
-            .and_then(|e| query.get(e).ok())
+            .and_then(|e| src.shape.get(e).ok())
             .filter(|(_, _, f, l)| f.data_slice().len() == l.volume())
             .is_some_and(|(_, _, _, l)| effective(*l, cap).size() < eff.size())
     });
+    let shape = versions(
+        Some(field.version()),
+        pos,
+        eff,
+        src.manager,
+        src.shape,
+        coarse_face,
+    );
+    // A clip at version 0 and no clip must differ: removing a fresh one
+    // changes the volume.
+    let own_clip = src
+        .clip
+        .get(entity)
+        .ok()
+        .map(|(_, _, c, _)| c.version() ^ (1 << 63));
+    let clip = versions(own_clip, pos, eff, src.manager, src.clip, coarse_face);
+    (
+        eff,
+        shape,
+        clip,
+        seam_lod_ranks(pos, lod, cap, src.manager, src.shape),
+    )
+}
+
+/// `own`'s version (0 if absent), then each `NEIGHBORS_MASK` neighbour's
+/// version of `F` with its LOD folded in, for `extract_key`.
+fn versions<F: VoxelField>(
+    own: Option<u64>,
+    pos: IVec3,
+    eff: LOD,
+    chunk_manager: &ChunkManager,
+    query: &FieldQuery<F>,
+    coarse_face: [bool; 3],
+) -> [u64; 8] {
+    let mut versions = [0u64; 8];
+    let (first, neighbor_versions) = versions.split_at_mut(1);
+    if let Some(first) = first.first_mut() {
+        *first = own.unwrap_or(0);
+    }
     for ((i, offset), slot) in NEIGHBORS_MASK.iter().enumerate().zip(neighbor_versions) {
         if let Some(n_entity) = chunk_manager.get_chunk(&pos.wrapping_add(*offset))
             && let Ok((_, _, n_field, n_lod)) = query.get(n_entity)
@@ -304,11 +409,7 @@ fn extract_key<T: VoxelField>(
             *slot = v ^ (u64::from(n_lod.rank()).wrapping_add(1) << 56);
         }
     }
-    (
-        eff,
-        versions,
-        seam_lod_ranks(pos, lod, cap, chunk_manager, query),
-    )
+    versions
 }
 
 /// `data`, a `from` grid, resampled to a `to` grid (coarser or equal):
@@ -334,24 +435,118 @@ pub fn resample<T: VoxelField>(data: &[T::Elem], from: LOD, to: LOD) -> Vec<T::E
     out
 }
 
+/// A fully visible `size`^3 volume: what a loaded chunk without a clip
+/// field contributes to a neighbour's clipped apron.
+fn visible_volume(size: u32) -> Option<&'static [f32]> {
+    static VOLUMES: [OnceLock<Box<[f32]>>; LOD::COUNT] = [const { OnceLock::new() }; LOD::COUNT];
+    let i = LOD::ALL.iter().position(|l| l.size() == size)?;
+    let volume = VOLUMES.get(i)?.get_or_init(|| {
+        vec![-SDF_BAND; usize_from(size).saturating_pow(3)].into_boxed_slice()
+    });
+    Some(volume)
+}
+
+/// The clip `C` around the chunk, padded like its shape at `eff`: its own
+/// clip (or fully visible without one) plus the apron from its neighbours'
+/// (a loaded neighbour without one counts as fully visible). `None` when
+/// neither the chunk nor a neighbour the apron reads has a clip: nothing to
+/// clip, by far the common case.
+fn padded_clip<T, C>(
+    entity: Entity,
+    pos: IVec3,
+    eff: LOD,
+    cap: Option<LOD>,
+    src: Sources<T, C>,
+) -> Option<Vec<f32>>
+where
+    T: VoxelField,
+    C: VoxelField<Elem = f32>,
+{
+    let own = src
+        .clip
+        .get(entity)
+        .ok()
+        .filter(|(_, _, c, l)| c.data_slice().len() == l.volume())
+        .map(|(_, _, c, l)| {
+            if *l == eff {
+                Cow::Borrowed(c.data_slice())
+            } else {
+                Cow::Owned(resample::<C>(c.data_slice(), *l, eff))
+            }
+        });
+    let mut any = own.is_some();
+    let sources: ApronSources<f32> = NEIGHBORS_MASK.map(|offset| {
+        let n_pos = pos.wrapping_add(offset);
+        if let Some((c, l)) = apron_source(n_pos, src.manager, src.clip) {
+            any = true;
+            let n_eff = effective(l, cap);
+            return Some(if n_eff == l {
+                (Cow::Borrowed(c.data_slice()), l.size())
+            } else {
+                (Cow::Owned(resample::<C>(c.data_slice(), l, n_eff)), n_eff.size())
+            });
+        }
+        // Loaded, no clip: fully visible. Not loaded: the edge continues.
+        let (_, l) = apron_source(n_pos, src.manager, src.shape)?;
+        let n_size = effective(l, cap).size();
+        Some((Cow::Borrowed(visible_volume(n_size)?), n_size))
+    });
+    if !any {
+        return None;
+    }
+    let own = match own {
+        Some(own) => own,
+        None => Cow::Borrowed(visible_volume(eff.size())?),
+    };
+    let mut vol = padded::<C>(&own, eff.size());
+    fill_apron_with::<C>(&mut vol, eff.size(), |offset| {
+        let i = NEIGHBORS_MASK.iter().position(|o| *o == offset)?;
+        sources.get(i)?.as_ref().map(|(d, n)| (d.as_ref(), *n))
+    });
+    Some(vol)
+}
+
+/// `vol = max(vol, clip)` voxel by voxel: the shape where it is visible.
+fn clip_distances(vol: &mut [f32], clip: &[f32]) {
+    for (v, c) in vol.iter_mut().zip(clip) {
+        *v = v.max(*c);
+    }
+}
+
+/// [`clip_distances`] on a volume of `E`, if `E` is `f32`; `false` (and
+/// no change) for any other element type, whose values aren't distances.
+fn clip_elems<E: bytemuck::Pod>(vol: &mut [E], clip: &[f32]) -> bool {
+    if TypeId::of::<E>() != TypeId::of::<f32>() {
+        return false;
+    }
+    let Ok(distances) = bytemuck::try_cast_slice_mut::<E, f32>(vol) else {
+        return false;
+    };
+    clip_distances(distances, clip);
+    true
+}
+
 /// The chunk's field plus its `+x/+y/+z` apron, at the LOD it is
-/// uploaded at, as its surfaces to upload. None when the field asks not to
-/// be extracted.
-fn padded_surfaces<T>(
+/// uploaded at, clipped by `C`, as its surfaces to upload. None when the
+/// field asks not to be extracted.
+fn padded_surfaces<T, C>(
+    entity: Entity,
     field: &T,
     pos: IVec3,
     lod: LOD,
-    chunk_manager: &ChunkManager,
-    query: &FieldQuery<T>,
+    src: Sources<T, C>,
     config: ExtractConfig<T>,
 ) -> SurfaceBytes
 where
     T: VoxelField,
+    C: VoxelField<Elem = f32>,
 {
     if !field.should_extract() {
         return Vec::new();
     }
+    let (chunk_manager, query) = (src.manager, src.shape);
     let eff = effective(lod, config.upload_lod);
+    let clip_vol = padded_clip(entity, pos, eff, config.upload_lod, src);
     let own: Cow<[T::Elem]> = if eff == lod {
         Cow::Borrowed(field.data_slice())
     } else {
@@ -377,6 +572,16 @@ where
             let i = NEIGHBORS_MASK.iter().position(|o| *o == offset)?;
             sources.get(i)?.as_ref().map(|(d, n)| (d.as_ref(), *n))
         });
+        if let Some(c) = &clip_vol
+            && !clip_elems(&mut vol, c)
+        {
+            warn_once!(
+                "{} stores {}, not f32 distances: its layer's clip is ignored (give the layer \
+                 `SURFACES`, which clips the distances they produce)",
+                std::any::type_name::<T>(),
+                std::any::type_name::<T::Elem>()
+            );
+        }
         return vec![(SubSurface(0), T::gpu_bytes(&vol))];
     };
     // Each surface's distances, from the chunk and from every neighbour in
@@ -397,6 +602,9 @@ where
                 let (_, d) = subs.iter().find(|(s, _)| *s == sub)?;
                 Some((d.as_slice(), *n))
             });
+            if let Some(c) = &clip_vol {
+                clip_distances(&mut vol, c);
+            }
             (sub, SDF::gpu_bytes(&vol))
         })
         .collect()
@@ -423,43 +631,37 @@ fn padded<T: VoxelField>(data: &[T::Elem], size: u32) -> Vec<T::Elem> {
     vol
 }
 
-/// Builds new padded volumes, in parallel, for the chunks whose inputs
-/// changed this frame. Runs in `Last`, after every edit, load and surface
-/// flag of the frame.
-pub fn pad_dirty_chunks<T>(
-    chunk_manager: Res<ChunkManager>,
-    query: FieldQuery<T>,
-    filter: ExtractFilter,
-    mut changes: FieldChanges<T>,
-    mut state: Local<ExtractState>,
-    frame: Res<FrameCount>,
-    mut outbox: ResMut<PaddedOutbox<T>>,
-) where
-    T: VoxelField,
-{
-    outbox.chunks.clear();
-    let config = outbox.config;
-    let residency = config.residency;
-    state.collect(&mut changes);
-    if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
-        audit_extraction(&mut state, &chunk_manager, &query, &filter, config);
-    }
+/// A chunk to build a volume for: (entity, position, field, own LOD, seam
+/// ranks).
+type Job<'a, T> = (Entity, IVec3, &'a T, LOD, [u32; 2]);
+/// A chunk whose seam ranks alone moved: (entity, position, upload LOD,
+/// seam ranks).
+type MetaOnly = (Entity, IVec3, LOD, [u32; 2]);
 
-    // Which chunks need a new volume: cheap, sequential.
-    let ExtractState {
-        last, dirty, subs, ..
-    } = &mut *state;
+/// Which dirty chunks need a new volume, and which only new seam ranks:
+/// cheap, sequential.
+fn plan_jobs<'a, T, C>(
+    state: &mut ExtractState,
+    src: Sources<'a, '_, '_, T, C>,
+    filter: &ExtractFilter,
+    config: ExtractConfig<T>,
+) -> (Vec<Job<'a, T>>, Vec<MetaOnly>)
+where
+    T: VoxelField,
+    C: VoxelField,
+{
+    let ExtractState { last, dirty, .. } = state;
     let mut jobs = Vec::new();
     let mut meta_only = Vec::new();
     for pos in dirty.iter() {
-        let Some(entity) = chunk_manager.get_chunk(pos) else {
+        let Some(entity) = src.manager.get_chunk(pos) else {
             continue;
         };
-        let Ok((_, _, field, lod)) = query.get(entity) else {
+        let Ok((_, _, field, lod)) = src.shape.get(entity) else {
             last.remove(&entity);
             continue;
         };
-        if filter.skips(residency, entity, *pos) {
+        if filter.skips(config.residency, entity, *pos) {
             // so gaining a surface, or leasing/un-hiding, re-extracts
             last.remove(&entity);
             continue;
@@ -470,9 +672,9 @@ pub fn pad_dirty_chunks<T>(
         // Keyed by entity, not position: a chunk that despawns and respawns at
         // the same spot comes back at version 0 with unchanged neighbours, so a
         // position key matched and the new entity never got an arena slot.
-        let key = extract_key(field, *pos, *lod, config.upload_lod, &chunk_manager, &query);
+        let key = extract_key(entity, field, *pos, *lod, config.upload_lod, src);
         let Some(old) = last.insert(entity, key) else {
-            jobs.push((entity, *pos, field, *lod, key.2));
+            jobs.push((entity, *pos, field, *lod, key.3));
             continue;
         };
         if old == key {
@@ -482,26 +684,70 @@ pub fn pad_dirty_chunks<T>(
         // (it depends on the neighbours' LODs only through the versions, which
         // fold them in). Only the seam ranks moved, as they do for every chunk
         // around one that changed LOD, and only the mesher reads those.
-        if (old.0, old.1) == (key.0, key.1) {
+        if (old.0, old.1, old.2) == (key.0, key.1, key.2) {
             if T::GPU == GpuChannel::Shape {
-                meta_only.push((entity, *pos, key.0, key.2));
+                meta_only.push((entity, *pos, key.0, key.3));
             }
             continue;
         }
-        jobs.push((entity, *pos, field, *lod, key.2));
+        jobs.push((entity, *pos, field, *lod, key.3));
     }
+    (jobs, meta_only)
+}
+
+/// What `pad_dirty_chunks` reads: every chunk's shape `T` and clip `C`,
+/// and the residency filter.
+#[derive(SystemParam)]
+pub struct ExtractInputs<'w, 's, T: VoxelField, C: VoxelField> {
+    chunk_manager: Res<'w, ChunkManager>,
+    shape: FieldQuery<'w, 's, T>,
+    clip: FieldQuery<'w, 's, C>,
+    filter: ExtractFilter<'w, 's>,
+}
+
+impl<'w, 's, T: VoxelField, C: VoxelField> ExtractInputs<'w, 's, T, C> {
+    fn sources(&self) -> Sources<'_, 'w, 's, T, C> {
+        Sources {
+            manager: &self.chunk_manager,
+            shape: &self.shape,
+            clip: &self.clip,
+        }
+    }
+}
+
+/// Builds new padded volumes, in parallel, for the chunks whose inputs
+/// changed this frame. Runs in `Last`, after every edit, load and surface
+/// flag of the frame. `C` is the layer's clip field (`NoClip` for none).
+pub fn pad_dirty_chunks<T, C>(
+    inputs: ExtractInputs<T, C>,
+    mut changes: FieldChanges<T, C>,
+    mut state: Local<ExtractState>,
+    frame: Res<FrameCount>,
+    mut outbox: ResMut<PaddedOutbox<T>>,
+) where
+    T: VoxelField,
+    C: VoxelField<Elem = f32>,
+{
+    outbox.chunks.clear();
+    let config = outbox.config;
+    let src = inputs.sources();
+    state.collect(&mut changes);
+    if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
+        audit_extraction(&mut state, src, &inputs.filter, config);
+    }
+    let (jobs, meta_only) = plan_jobs(&mut state, src, &inputs.filter, config);
 
     // Building the volumes: the expensive part, one task per chunk.
-    let (manager, fields) = (&*chunk_manager, &query);
     let mut built: Vec<(usize, SurfaceBytes)> = ComputeTaskPool::get().scope(|s| {
-        for (i, &(_, pos, field, lod, _)) in jobs.iter().enumerate() {
+        for (i, &(entity, pos, field, lod, _)) in jobs.iter().enumerate() {
             s.spawn(async move {
-                let out = padded_surfaces(field, pos, lod, manager, fields, config);
+                let out = padded_surfaces(entity, field, pos, lod, src, config);
                 (i, out)
             });
         }
     });
     built.sort_unstable_by_key(|b| b.0);
+    let subs = &mut state.subs;
     for (&(entity, pos, _, lod, seam_ranks), (_, now)) in jobs.iter().zip(built) {
         let lod = effective(lod, config.upload_lod);
         let chunk = |sub: SubSurface, bytes: Vec<u8>| PaddedChunk {
@@ -570,7 +816,7 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
 }
 
 /// A chunk that lost an optional field `T` (it's still loaded, the field is
-/// gone): sends an empty volume, which for the mask clears the slot's flag.
+/// gone): sends an empty volume, which releases the chunk's slots.
 pub fn extract_removed<T: VoxelField>(
     mut commands: Commands,
     mut removed: Extract<RemovedComponents<T>>,
@@ -622,18 +868,18 @@ where
 
 /// Debug check: every chunk whose padded volume is out of date must be
 /// dirty. Anything missed is logged and made dirty, so it is also repaired.
-fn audit_extraction<T>(
+fn audit_extraction<T, C>(
     state: &mut ExtractState,
-    chunk_manager: &ChunkManager,
-    query: &FieldQuery<T>,
+    src: Sources<T, C>,
     filter: &ExtractFilter,
     config: ExtractConfig<T>,
 ) where
     T: VoxelField,
+    C: VoxelField,
 {
     let residency = config.residency;
     let mut missed = Vec::new();
-    for (entity, pos, field, lod) in query.iter() {
+    for (entity, pos, field, lod) in src.shape.iter() {
         if state.dirty.contains(&pos.0) || state.positions.get(&entity) != Some(&pos.0) {
             if !state.dirty.contains(&pos.0) {
                 missed.push(pos.0); // never recorded
@@ -646,12 +892,12 @@ fn audit_extraction<T>(
             field.data_slice().len() == lod.volume()
                 && state.last.get(&entity)
                     != Some(&extract_key(
+                        entity,
                         field,
                         pos.0,
                         *lod,
                         config.upload_lod,
-                        chunk_manager,
-                        query,
+                        src,
                     ))
         };
         if out_of_date {
@@ -804,7 +1050,7 @@ fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet, residency: 
             .live
             .iter()
             .filter(|(_, pos, v)| {
-                !v.is_some_and(VisibilityField::is_all_empty) || audit.forced.contains(&pos.0)
+                !v.is_some_and(VisibilityField::is_all_hidden) || audit.forced.contains(&pos.0)
             })
             .map(|(e, _, _)| MainEntity::from(e))
             .collect(),
@@ -840,7 +1086,7 @@ fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet, residency: 
 mod tests {
     use bevy::prelude::*;
 
-    use super::{ExtractConfig, PaddedOutbox, add_field_extraction, resample};
+    use super::{ExtractConfig, NoClip, PaddedOutbox, add_field_extraction, resample};
     use crate::{
         chunk::{Chunk, ChunkManager, ChunkPosition},
         field::{Field, GpuChannel, LOD, VoxelField, surface::HasSurface},
@@ -938,7 +1184,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<ChunkManager>()
             .init_resource::<ForceResident>();
-        add_field_extraction::<Owners>(
+        add_field_extraction::<Owners, NoClip>(
             &mut app,
             ExtractConfig {
                 residency: LayerResidency::Loaded,
@@ -991,6 +1237,81 @@ mod tests {
         set(&mut app, &[(2, 0)]);
         app.update();
         assert_eq!(outbox(&app), vec![]);
+    }
+
+    /// The shape arrives clipped: `max(sdf, visibility)` in the chunk's own
+    /// voxels and in the apron read from a neighbour's clip, a chunk with
+    /// no clip of its own counting as fully visible; removing the clip
+    /// sends the plain shape again.
+    #[test]
+    fn shape_is_clipped_by_the_visibility() {
+        use crate::{
+            field::{SDF, SDF_BAND, VisibilityField, quantize_sdf},
+            grid::PADDING,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ChunkManager>()
+            .init_resource::<ForceResident>();
+        add_field_extraction::<SDF, VisibilityField>(
+            &mut app,
+            ExtractConfig {
+                residency: LayerResidency::Loaded,
+                upload_lod: None,
+                surfaces: None,
+            },
+        );
+        let (lod, n) = (LOD::Lowest, LOD::Lowest.size());
+        let padded = n + PADDING;
+        let solid = || SDF::from_raw(lod, vec![-1.0; lod.volume()]);
+        // Hidden where x >= 2.
+        let mut half = VisibilityField::new(lod);
+        for z in 0..n {
+            for y in 0..n {
+                for x in 2..n {
+                    half.set(x, y, z, 1.0);
+                }
+            }
+        }
+        let a = app
+            .world_mut()
+            .spawn((Chunk, ChunkPosition(IVec3::ZERO), lod, solid(), half))
+            .id();
+        app.world_mut().spawn((
+            Chunk,
+            ChunkPosition(IVec3::X),
+            lod,
+            solid(),
+            VisibilityField::filled(lod, false),
+        ));
+        app.world_mut()
+            .spawn((Chunk, ChunkPosition(IVec3::Y), lod, solid()));
+        app.update();
+
+        let sent = |app: &App, pos: IVec3| -> Vec<i16> {
+            let outbox = app.world().resource::<PaddedOutbox<SDF>>();
+            let c = outbox.chunks.iter().find(|c| c.pos == pos).unwrap();
+            bytemuck::pod_collect_to_vec(&c.bytes)
+        };
+        let at = |v: &[i16], x: u32, y: u32, z: u32| v[flatten_cube(x, y, z, padded)];
+        let bytes = sent(&app, IVec3::ZERO);
+        assert_eq!(at(&bytes, 0, 0, 0), quantize_sdf(-1.0)); // visible solid
+        assert_eq!(at(&bytes, 3, 0, 0), quantize_sdf(1.0)); // hidden solid
+        assert_eq!(at(&bytes, 4, 0, 0), quantize_sdf(SDF_BAND)); // +x apron: hidden neighbour
+        assert_eq!(at(&bytes, 0, 4, 0), quantize_sdf(-1.0)); // +y apron: no clip there
+        // The +y chunk has no clip, but its +x neighbour (1, 1, 0) isn't
+        // loaded: its apron continues its own fully visible edge.
+        let bytes = sent(&app, IVec3::Y);
+        assert_eq!(at(&bytes, 0, 0, 0), quantize_sdf(-1.0));
+        assert_eq!(at(&bytes, 4, 0, 0), quantize_sdf(-1.0));
+
+        // The clip goes: the chunk, and the +y chunk whose apron read
+        // nothing of it, are re-sent; (0, 0, 0) is plain solid again.
+        app.world_mut().entity_mut(a).remove::<VisibilityField>();
+        app.update();
+        let bytes = sent(&app, IVec3::ZERO);
+        assert_eq!(at(&bytes, 3, 0, 0), quantize_sdf(-1.0));
+        assert_eq!(at(&bytes, 4, 0, 0), quantize_sdf(SDF_BAND));
     }
 
     /// A planar SDF downsampled 4x reads the same plane in the coarser

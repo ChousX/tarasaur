@@ -3,8 +3,9 @@
 
 use std::marker::PhantomData;
 
-use super::Field;
 use super::ops::{PlaneMode, Sweep};
+use super::{DistanceField, Field, SDF, VisibilityField};
+use bevy::ecs::message::Message;
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -170,10 +171,110 @@ impl SdfCsgSphere {
     /// The segment the edit covers (world space).
     #[must_use]
     pub fn sweep(&self) -> Sweep {
+        self.csg().sweep()
+    }
+}
+
+/// Hides or reveals an exact sphere, or the capsule it sweeps, in the
+/// `VisibilityField`.
+///
+/// A CSG subtraction from (or union with) the visible region, so the cap
+/// closing the cut follows the sphere at sub-voxel precision. Idempotent,
+/// no reinit needed. A chunk without the field gets one, fully visible,
+/// first.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct VisibilityCsgSphere {
+    pub center: Vec3,
+    pub radius: f32,
+    /// `Some(from)`: the capsule swept from `from` to `center`, as in
+    /// `SdfCsgSphere`.
+    pub sweep_from: Option<Vec3>,
+    /// `true` hides the sphere, `false` reveals it.
+    pub hide: bool,
+    /// As in `SdfCsgSphere`: `None` is the exact result at once, `Some(step)`
+    /// moves the cap at most `step` world units per message.
+    pub max_step: Option<f32>,
+}
+
+impl VisibilityCsgSphere {
+    /// The segment the edit covers (world space).
+    #[must_use]
+    pub fn sweep(&self) -> Sweep {
+        self.csg().sweep()
+    }
+}
+
+/// A CSG sphere edit as a distance field applies it; what a `CsgMessage`
+/// resolves to.
+#[derive(Clone, Copy, Debug)]
+pub struct CsgSphere {
+    pub center: Vec3,
+    pub radius: f32,
+    pub sweep_from: Option<Vec3>,
+    /// `max(field, -sphere)` (take the sphere out of the inside) rather
+    /// than `min(field, sphere)` (add it).
+    pub subtract: bool,
+    pub max_step: Option<f32>,
+    /// Palette id for the voxels the edit turns inside (`SDF` builds only).
+    pub paint: Option<u8>,
+}
+
+impl CsgSphere {
+    /// The segment the edit covers (world space).
+    #[must_use]
+    pub fn sweep(&self) -> Sweep {
         Sweep {
             from: self.sweep_from.unwrap_or(self.center),
             to: self.center,
         }
+    }
+}
+
+/// A message that CSG-edits one distance field: `SdfCsgSphere` the `SDF`,
+/// `VisibilityCsgSphere` the `VisibilityField`. `process_csg_spheres::<M>`
+/// applies it.
+pub trait CsgMessage: Message + Copy {
+    type Field: DistanceField;
+    fn csg(&self) -> CsgSphere;
+    /// Whether the chunks it edits get a jump-flood reinit afterwards.
+    /// `max`/`min` are exact only outside the shape they add or remove:
+    /// revealing a hidden sphere leaves its distances around where it was,
+    /// which `max(sdf, visibility)` would read as a dent in the terrain.
+    /// The reinit keeps the zero crossing and rebuilds the rest.
+    fn reinit_after(&self) -> bool {
+        false
+    }
+}
+
+impl CsgMessage for SdfCsgSphere {
+    type Field = SDF;
+    fn csg(&self) -> CsgSphere {
+        CsgSphere {
+            center: self.center,
+            radius: self.radius,
+            sweep_from: self.sweep_from,
+            subtract: self.subtract,
+            max_step: self.max_step,
+            paint: self.paint,
+        }
+    }
+}
+
+impl CsgMessage for VisibilityCsgSphere {
+    type Field = VisibilityField;
+    fn csg(&self) -> CsgSphere {
+        CsgSphere {
+            center: self.center,
+            radius: self.radius,
+            sweep_from: self.sweep_from,
+            subtract: self.hide,
+            max_step: self.max_step,
+            paint: None,
+        }
+    }
+    /// A reveal: the union leaves the sphere's distances where it was.
+    fn reinit_after(&self) -> bool {
+        !self.hide
     }
 }
 

@@ -1,10 +1,10 @@
 //! Main playground: streamed, textured heightfield terrain around a fly
 //! camera, edited with the library's `CursorBrush`. Hold right mouse to
-//! look, left mouse to apply the brush. 1-7 pick the tool (dig, build,
-//! smooth, flatten, paint, fill, scrape), Q/E the material, scroll the
-//! radius and Ctrl + scroll the strength; Ctrl + left mouse swaps dig and
-//! build (and fill and scrape), and R toggles the flatten, fill and scrape
-//! plane between level and along the slope.
+//! look, left mouse to apply the brush. 1-9 pick the tool (dig, build,
+//! smooth, flatten, paint, fill, scrape, hide, reveal), Q/E the material,
+//! scroll the radius and Ctrl + scroll the strength; Ctrl + left mouse
+//! swaps dig and build (fill and scrape, hide and reveal), and R toggles
+//! the flatten, fill and scrape plane between level and along the slope.
 //!
 //! Capture: F12 saves a screenshot, F10 starts and stops recording frames
 //! (turn them into a GIF with `tools/make-gif.sh`), H hides the HUD. Both
@@ -106,7 +106,7 @@ fn spawn_player(mut commands: Commands) {
 // Terrain editing
 // ---------------------------------------------------------------------------
 
-const TOOL_KEYS: [KeyCode; 7] = [
+const TOOL_KEYS: [KeyCode; 9] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
@@ -114,6 +114,8 @@ const TOOL_KEYS: [KeyCode; 7] = [
     KeyCode::Digit5,
     KeyCode::Digit6,
     KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
 ];
 
 /// Number keys pick the tool, Q/E cycle the material, R toggles level
@@ -195,7 +197,7 @@ fn update_hud(brush: Res<CursorBrush>, mut hud: Query<&mut Text, With<Hud>>) {
         text.0 = format!(
             "{tools}\nmaterial {material:?} (Q/E)   radius {:.1} (scroll)   strength {:.1} (ctrl+scroll)   \
              plane {:?} (R)\n\
-             LMB apply, ctrl+LMB swaps dig/build and fill/scrape, RMB look",
+             LMB apply, ctrl+LMB swaps dig/build, fill/scrape and hide/reveal, RMB look",
             brush.radius, brush.strength, brush.flatten
         );
     }

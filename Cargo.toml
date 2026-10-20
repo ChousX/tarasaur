@@ -88,3 +88,7 @@ all-features = true
 [features]
 # Profile with Tracy: `cargo run --release --features tracy --example bench`
 tracy = ["bevy/trace_tracy", "dep:tracy-client"]
+# Hide terrain the older way: `VisibilityField` is uploaded as a per-voxel
+# mask and hidden voxels are discarded per pixel (hard, voxel-aligned edges,
+# no cap, no re-mesh on a visibility change) instead of clipping the mesh.
+visibility-mask = []

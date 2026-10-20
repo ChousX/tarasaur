@@ -31,6 +31,20 @@ pub use plugin::{FieldSet, FieldsPlugin};
 pub use sdf::{SDF, SDF_BAND, quantize_sdf};
 pub use visibility::VisibilityField;
 
+/// A field of signed distances: the `SDF`, and `VisibilityField`.
+///
+/// Values are in voxels of the field's LOD, negative inside, clamped to
+/// `±SDF_BAND`. CSG edits (`CsgMessage`) write exact distances; value edits
+/// leave signs that the jump-flood reinit (`field::systems`) turns back into
+/// distances.
+pub trait DistanceField: VoxelField<Value = f32, Elem = f32> + Field<f32> + Sync {
+    /// Snapshot for an async reinit: the raw data and the version it was
+    /// cloned at.
+    fn reinit_input(&self) -> (Box<[f32]>, u32, u64);
+    /// Applies a completed reinit (the caller checks it isn't stale).
+    fn apply_reinit_result(&mut self, data: Box<[f32]>);
+}
+
 /// Marks a chunk whose `F` was edited this cycle. For `SDF` it means the
 /// values are signs, not distances, until the async JFA reinit finishes.
 #[derive(Component, Clone, Copy)]
@@ -70,9 +84,11 @@ pub enum GpuChannel {
     Material,
     /// One `u8` per voxel, 0 = hidden, discarded per fragment. Empty data
     /// (no field, or `should_extract() == false`) means fully visible.
-    /// `VisibilityField`.
+    /// `VisibilityField` with the `visibility-mask` feature.
     Mask,
-    /// Edited and saved on the CPU, never uploaded.
+    /// Edited and saved on the CPU, never uploaded on its own.
+    /// `VisibilityField` by default: a layer's clip is folded into its
+    /// shape's volume at extraction (see `SurfaceLayer::Clip`).
     None,
 }
 
@@ -112,7 +128,7 @@ pub trait VoxelField: Component<Mutability = Mutable> + Sized {
         self.version()
     }
     /// Whether to build and upload a padded volume at all. `false` sends an
-    /// empty one (for the mask: "no mask needed").
+    /// empty one.
     fn should_extract(&self) -> bool {
         true
     }
@@ -128,7 +144,7 @@ pub trait VoxelField: Component<Mutability = Mutable> + Sized {
         v
     }
     /// Samples a neighbour's data at a non-integer coordinate for the apron.
-    /// Default: nearest voxel, as categorical data (ids, masks) must never
+    /// Default: nearest voxel, as categorical data (ids) must never
     /// blend; `SDF` interpolates.
     fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem {
         nearest_neighbor_sample(data, size, x, y, z)

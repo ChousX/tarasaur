@@ -78,8 +78,9 @@ fn cs_main(
                 inside_count = inside_count + 1u;
             }
         }
-        // Depends ONLY on the sign crossing: visibility is handled by
-        // fragment discard, so it can never desync from pass3.
+        // Depends ONLY on the sign crossing (the shape arrives already
+        // clipped by its layer's clip field), so it can never desync from
+        // pass3.
         is_active = inside_count > 0u && inside_count < 8u;
     }
 
