@@ -16,7 +16,6 @@ exclude = [
     "/captures",
     "/docs",
     "/tools",
-    "/nix",
     "/devenv.nix",
     "/devenv.yaml",
     "/devenv.lock",

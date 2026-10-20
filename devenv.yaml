@@ -6,3 +6,8 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
+  chousx:
+    url: git+ssh://git@github.com/ChousX/NixOS
+    flake: false
+imports:
+  - chousx/devenv/bevy

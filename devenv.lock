@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "chousx": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792374422,
+        "narHash": "sha256-9bD2w42WhbAKJgClZTjyHgpQIMND7sO1GFXLNOMlpio=",
+        "ref": "refs/heads/main",
+        "rev": "8f4c285fbc408e70479248e0fe6d68bd3da87115",
+        "revCount": 164,
+        "type": "git",
+        "url": "ssh://git@github.com/ChousX/NixOS"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@github.com/ChousX/NixOS"
+      }
+    },
     "devenv": {
       "locked": {
         "dir": "src/modules",
@@ -35,6 +51,7 @@
     },
     "root": {
       "inputs": {
+        "chousx": "chousx",
         "devenv": "devenv",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
