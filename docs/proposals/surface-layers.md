@@ -294,6 +294,49 @@ Each phase builds and passes the existing tests and examples on its own.
 Phases 1 and 2 are the bulk of the diff and carry no new feature, which is
 why they go first: they are reviewable as pure refactors.
 
+### Benchmark gate
+
+Every phase is A/B benchmarked against the commit it branches from before it
+merges, with `tools/bench-ab`:
+
+```text
+cargo build --release --example bench            # on the base commit
+cp target/release/examples/bench /tmp/bench-base
+cargo build --release --example bench            # on the phase branch
+cp target/release/examples/bench /tmp/bench-layers
+tools/bench-ab/ab.sh layers-<phase> /tmp/bench-base /tmp/bench-layers 3
+```
+
+That runs the quick scenario three alternating pairs with the system sampler,
+reruns disturbed runs, and flags a per-phase change when it beats twice the
+spread between same-variant runs and 1%. The report lands in
+`target/bench-ab/exp/layers-<phase>.txt`.
+
+The bench has one layer, the terrain, so it measures the refactor's overhead
+and not the feature. The gate is:
+
+- **Phases 1 to 3: no flagged regression in any bench phase.** They add a
+  one-element layer loop and a `layer` field in the pipeline key, which is
+  not per-chunk work. A flag in `hold` or `spin` points at the second raster
+  pass not returning early on zero draws; a flag in `fly` or `load` at the
+  `(MainEntity, SubSurface)` slot key or the `surfaces()` allocation on the
+  extract path.
+- **Phases 4 and 5: no flagged regression in `hold`, `spin`, `fly`, `load`
+  or `query`.** `edit` and `dig` may move by up to the flag threshold, since
+  the sub-surface bookkeeping runs on dirty chunks; anything beyond that is
+  a regression.
+- **Every phase: all bench checks pass.** The `query`, `reslot`,
+  `visibility`, `box` and `dig` checks read GPU state back against the main
+  world, which is where a slot-keying mistake shows up first.
+- **Before phase 6: a two-layer measurement.** `examples/layers.rs` grows a
+  `--bench` scenario (the terrain plus a `Low` zone layer) so the feature's
+  own cost in `hold`, `spin` and `fly` is a number in the PR, not a guess.
+  The bench already notes that more arenas cost 7 to 11% in those phases;
+  the second layer's arenas are the same kind of cost.
+
+A full (not `--quick`) run is required for the final phase-3 and phase-5
+PRs, since `--quick` skips `box`, `query`, `reslot` and `dig`.
+
 ## Costs
 
 - **Memory.** A layer owns arenas. At `High`, one arena is about three times
