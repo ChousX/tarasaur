@@ -1,6 +1,8 @@
 # Surface layers
 
-**Status:** draft for review. Nothing in this document is implemented.
+**Status:** implemented on the `surface-layers` branch, phases 1 to 6; see
+"As built" at the end for where the code departs from this draft and for
+the benchmark results. The design sections below are the draft as reviewed.
 
 Tarasaur meshes and draws exactly one surface per chunk: the `SDF`, textured
 by the palette. This proposes generalizing that into *surface layers*, so an
@@ -382,3 +384,56 @@ PRs, since `--quick` skips `box`, `query`, `reslot` and `dig`.
 - CPU readback of a layer's mesh (collision for a layer). The queryable
   layer answers rays; nothing answers for the others.
 - More than one queryable layer.
+
+## As built
+
+Phases 1 to 5 are the five commits after the proposal on `surface-layers`;
+phase 6 is in Domain Expance's working tree (`src/domain/layer.rs` replaces
+its CPU mesher). Where the code departs from the draft:
+
+- **`VoxelChunkArenaSet` keeps its name** as the per-layer arena set. A
+  `Layer` wraps it with its `LayerDesc` (the raster, type-erased), its
+  group 2 layout and its `LayerMaterial`; `VoxelLayers` holds the layers.
+- **`LayerRaster::specialize` was dropped.** `LayerMaterial` carries the
+  palette's `has_arm`/`has_normal`/`normals_end`, and other rasters use
+  `LayerMaterial::plain`. The pipeline key is `(layer, view, arm, normal,
+  pass, masked)`, so a non-palette raster compiles one variant per view.
+- **`surfaces()` became `const SURFACES: Option<Surfaces<Shape>>`**, and
+  it returns signed distances (`f32`, in the source volume's own voxels)
+  per surface, not uploaded bytes. The draft ran it on the padded volume,
+  but apron texels hold the neighbour's voxel units (pass3 rescales them
+  by seam rank), so a layer's shift in its own units bent its surface at
+  every LOD seam. Now it runs on the chunk and on each neighbour the
+  apron reads, each in its own LOD; the engine pads each surface as an
+  SDF and quantizes. Layers that leave it `None` keep the zero-copy path,
+  so the terrain's extraction cost is unchanged.
+- **`SurfaceLayer::RESIDENCY`** was added: `Loaded` (every chunk) or
+  `Terrain` (chunks with a terrain surface that aren't hidden). The
+  draft's `ExtractFilter` was the terrain's rule applied to everything,
+  which would have dropped a layer from chunks the terrain has no surface
+  in.
+- **`MaterialFieldPlugin<M>` stays** and attaches `MaterialField<M>` to the
+  terrain layer; `TerrainLayer::Material` is `NoChannel`. Open question 1
+  resolved toward the existing API.
+- **`add_voxel_field` is idempotent** and no longer wires uploads;
+  `register_field_upload` and `ShapeFieldRegistered` are gone.
+- **Sub-surfaces** carry a per-slot `SubSurface` table (group 3, binding
+  5; `sub_surface()` in the vertex library), and a chunk's surfaces draw
+  in id order. Side channels ride in a chunk's first surface's slot.
+- **Transparent draw order** goes beyond the draft: far LOD rings before
+  near ones, so a far ring's film shows through a near ring's at the
+  boundary. Found by the two-surface water example, which composited in
+  the wrong order along one chunk row.
+- **The bench's `--layer` flag** adds the example's water layer (two
+  translucent sub-surfaces, capped at `Low`) for the two-layer measurement.
+
+Known limits found on the way:
+
+- The mesher emits one cell past each chunk's +x/+y/+z faces, which an
+  opaque layer hides by depth. A transparent layer blends that one-voxel
+  strip twice, visible as faint lines at chunk seams, widest at `Lowest`.
+  The fix belongs in pass3 (skip the strip when the neighbour across it
+  meshes at the same or a coarser LOD).
+- The pre-existing `field::ops` test `fill_only_adds_and_scrape_only_removes`
+  fails on `dev` before this branch, and the pre-existing five clippy
+  errors on `dev` are unchanged; every phase was gated on adding none.
