@@ -53,6 +53,12 @@ pub enum LayerResidency {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SubSurface(pub u8);
 
+impl SubSurface {
+    /// Every surface of a chunk: what an extraction with no data stands
+    /// for when the whole field is gone. Never a surface's own id.
+    pub const ALL: Self = Self(u8::MAX);
+}
+
 /// A meshed surface: a shape field, its optional side channels, and its
 /// look. Register one with `app.add_surface_layer::<L>()`.
 ///
@@ -83,10 +89,14 @@ pub trait SurfaceLayer: Send + Sync + 'static {
     /// layer may be queryable; the terrain is.
     const QUERYABLE: bool = false;
 
-    /// The surfaces in one padded volume. Each is `size^3` snorm16
-    /// distances (see `quantize_sdf`) under its own `SubSurface` id.
-    /// Default: one, from `Shape::gpu_bytes`.
-    fn surfaces(vol: &[<Self::Shape as VoxelField>::Elem]) -> Vec<(SubSurface, Vec<u8>)> {
+    /// The surfaces in one padded volume (`(lod.size() + 2)^3` elements,
+    /// x fastest). Each is as many snorm16 distances (see `quantize_sdf`)
+    /// in voxels of `lod`, under its own `SubSurface` id. Default: one,
+    /// from `Shape::gpu_bytes`.
+    fn surfaces(
+        vol: &[<Self::Shape as VoxelField>::Elem],
+        _lod: LOD,
+    ) -> Vec<(SubSurface, Vec<u8>)> {
         vec![(SubSurface(0), Self::Shape::gpu_bytes(vol))]
     }
 }

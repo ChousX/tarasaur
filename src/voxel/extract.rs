@@ -32,10 +32,23 @@ use crate::{
     num::usize_from,
     voxel::{
         arena::VoxelChunkArenaSet,
-        layer::{LayerResidency, VoxelLayers},
+        layer::{LayerResidency, SubSurface, VoxelLayers},
         resident::ForceResident,
     },
 };
+
+/// The surfaces in one padded volume, each as uploaded.
+pub type SurfaceBytes = Vec<(SubSurface, Vec<u8>)>;
+
+/// `SurfaceLayer::surfaces` for a field: the surfaces in one padded
+/// volume, as uploaded.
+pub type Surfaces<T> = fn(&[<T as VoxelField>::Elem], LOD) -> SurfaceBytes;
+
+/// One surface per volume, from `gpu_bytes`: every side channel, and a
+/// layer that doesn't override `surfaces`.
+pub fn single_surface<T: VoxelField>(vol: &[T::Elem], _: LOD) -> SurfaceBytes {
+    vec![(SubSurface(0), T::gpu_bytes(vol))]
+}
 
 /// Frames between full consistency checks in debug builds.
 const AUDIT_INTERVAL: u32 = 120;
@@ -63,12 +76,13 @@ fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
 
 /// Registers the hand-off of field `T`: the main-world padding system and
 /// the render-world extract system that forwards its output. `residency`
-/// is its layer's: which chunks are extracted at all.
-pub fn add_field_extraction<T>(app: &mut App, residency: LayerResidency)
+/// is its layer's: which chunks are extracted at all; `surfaces` turns a
+/// padded volume into what is uploaded.
+pub fn add_field_extraction<T>(app: &mut App, residency: LayerResidency, surfaces: Surfaces<T>)
 where
     T: VoxelField,
 {
-    app.insert_resource(PaddedOutbox::<T>::new(residency))
+    app.insert_resource(PaddedOutbox::<T>::new(residency, surfaces))
         .add_systems(Last, pad_dirty_chunks::<T>);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
@@ -137,11 +151,14 @@ impl ResidencyChanges<'_, '_> {
 // Fields: main-world padding, render-world forwarding
 // ---------------------------------------------------------------------------
 
-/// One chunk's padded volume, ready to upload.
+/// One of a chunk's surfaces, as a padded volume ready to upload.
 pub struct PaddedChunk {
     pub entity: Entity,
     pub pos: IVec3,
     pub lod: LOD,
+    /// Which surface; `SubSurface::ALL` with empty `bytes` releases every
+    /// surface of the chunk, and with `meta_only` restitches them all.
+    pub sub: SubSurface,
     /// See `seam_lod_ranks`.
     pub seam_ranks: [u32; 2],
     /// Only `seam_ranks` changed: `bytes` is empty and the slot keeps its
@@ -154,20 +171,22 @@ pub struct PaddedChunk {
 }
 
 /// This frame's padded volumes of field `T`, for `extract_voxel_chunks`,
-/// and which chunks its layer extracts.
+/// which chunks its layer extracts, and how a volume becomes surfaces.
 #[derive(Resource)]
-pub struct PaddedOutbox<T> {
+pub struct PaddedOutbox<T: VoxelField> {
     pub chunks: Vec<PaddedChunk>,
     pub residency: LayerResidency,
+    pub surfaces: Surfaces<T>,
     _type: PhantomData<T>,
 }
 
-impl<T> PaddedOutbox<T> {
+impl<T: VoxelField> PaddedOutbox<T> {
     #[must_use]
-    pub const fn new(residency: LayerResidency) -> Self {
+    pub const fn new(residency: LayerResidency, surfaces: Surfaces<T>) -> Self {
         Self {
             chunks: Vec::new(),
             residency,
+            surfaces,
             _type: PhantomData,
         }
     }
@@ -188,6 +207,9 @@ pub struct ExtractState {
     /// Position of every chunk holding the field, so removing it can dirty
     /// the neighbours whose apron read it.
     positions: EntityHashMap<IVec3>,
+    /// The surfaces each chunk's last volume had, so one that disappears
+    /// can be released.
+    subs: EntityHashMap<Vec<SubSurface>>,
     dirty: HashSet<IVec3>,
 }
 
@@ -198,6 +220,7 @@ impl ExtractState {
         // both, and must end up recorded.
         for e in changes.removed.read() {
             self.last.remove(&e);
+            self.subs.remove(&e);
             if let Some(pos) = self.positions.remove(&e) {
                 dirty_with_dependents(&mut self.dirty, pos);
             }
@@ -259,14 +282,16 @@ fn extract_key<T: VoxelField>(
     )
 }
 
-/// The chunk's field plus its `+x/+y/+z` apron, as uploaded.
-fn padded_bytes<T>(
+/// The chunk's field plus its `+x/+y/+z` apron, as its surfaces to upload.
+/// None when the field asks not to be extracted.
+fn padded_surfaces<T>(
     field: &T,
     pos: IVec3,
     lod: LOD,
     chunk_manager: &ChunkManager,
     query: &FieldQuery<T>,
-) -> Vec<u8>
+    surfaces: Surfaces<T>,
+) -> SurfaceBytes
 where
     T: VoxelField,
 {
@@ -290,7 +315,7 @@ where
         }
     }
     fill_apron::<T>(&mut vol, pos, chunk_manager, query);
-    T::gpu_bytes(&vol)
+    surfaces(&vol, lod)
 }
 
 /// Builds new padded volumes, in parallel, for the chunks whose inputs
@@ -308,14 +333,16 @@ pub fn pad_dirty_chunks<T>(
     T: VoxelField,
 {
     outbox.chunks.clear();
-    let residency = outbox.residency;
+    let (residency, surfaces) = (outbox.residency, outbox.surfaces);
     state.collect(&mut changes);
     if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
         audit_extraction(&mut state, &chunk_manager, &query, &filter, residency);
     }
 
     // Which chunks need a new volume: cheap, sequential.
-    let ExtractState { last, dirty, .. } = &mut *state;
+    let ExtractState {
+        last, dirty, subs, ..
+    } = &mut *state;
     let mut jobs = Vec::new();
     let mut meta_only = Vec::new();
     for pos in dirty.iter() {
@@ -360,23 +387,44 @@ pub fn pad_dirty_chunks<T>(
 
     // Building the volumes: the expensive part, one task per chunk.
     let (manager, fields) = (&*chunk_manager, &query);
-    let mut built: Vec<(usize, Vec<u8>)> = ComputeTaskPool::get().scope(|s| {
+    let mut built: Vec<(usize, SurfaceBytes)> = ComputeTaskPool::get().scope(|s| {
         for (i, &(_, pos, field, lod, _)) in jobs.iter().enumerate() {
-            s.spawn(async move { (i, padded_bytes(field, pos, lod, manager, fields)) });
+            s.spawn(async move {
+                let out = padded_surfaces(field, pos, lod, manager, fields, surfaces);
+                (i, out)
+            });
         }
     });
     built.sort_unstable_by_key(|b| b.0);
-    outbox.chunks.extend(jobs.iter().zip(built).map(
-        |(&(entity, pos, _, lod, seam_ranks), (_, bytes))| PaddedChunk {
+    for (&(entity, pos, _, lod, seam_ranks), (_, now)) in jobs.iter().zip(built) {
+        let chunk = |sub: SubSurface, bytes: Vec<u8>| PaddedChunk {
             entity,
             pos,
             lod,
+            sub,
             seam_ranks,
             meta_only: false,
             bytes: bytes.into(),
             seq: frame.0,
-        },
-    ));
+        };
+        let before = subs.remove(&entity).unwrap_or_default();
+        if now.is_empty() {
+            // Nothing to show: release whatever the chunk had.
+            if !before.is_empty() {
+                outbox.chunks.push(chunk(SubSurface::ALL, Vec::new()));
+            }
+            continue;
+        }
+        let ids: Vec<SubSurface> = now.iter().map(|(sub, _)| *sub).collect();
+        for (sub, bytes) in now {
+            outbox.chunks.push(chunk(sub, bytes));
+        }
+        // A surface the chunk no longer has releases its slot.
+        for &gone in before.iter().filter(|s| !ids.contains(s)) {
+            outbox.chunks.push(chunk(gone, Vec::new()));
+        }
+        subs.insert(entity, ids);
+    }
     outbox.chunks.extend(
         meta_only
             .into_iter()
@@ -384,6 +432,7 @@ pub fn pad_dirty_chunks<T>(
                 entity,
                 pos,
                 lod,
+                sub: SubSurface::ALL,
                 seam_ranks,
                 meta_only: true,
                 bytes: Arc::from([]),
@@ -401,6 +450,8 @@ pub struct ExtractedChunkField<T: Send + Sync + 'static> {
     pub padded_data: Arc<[u8]>,
     pub size: u32,
     pub lod: LOD,
+    /// See [`PaddedChunk::sub`].
+    pub sub: SubSurface,
     /// See [`seam_lod_ranks`]; only the SDF upload uses it.
     pub seam_ranks: [u32; 2],
     /// See [`PaddedChunk::meta_only`].
@@ -432,6 +483,7 @@ pub fn extract_removed<T: VoxelField>(
             padded_data: Arc::from([]),
             size: lod.size().wrapping_add(PADDING),
             lod: *lod,
+            sub: SubSurface::ALL,
             seam_ranks: [0; 2],
             meta_only: false,
             seq: frame.0,
@@ -443,7 +495,7 @@ pub fn extract_removed<T: VoxelField>(
 /// Forwards this frame's padded volumes of `T` to the render world.
 pub fn extract_voxel_chunks<T>(mut commands: Commands, outbox: Extract<Res<PaddedOutbox<T>>>)
 where
-    T: Send + Sync + 'static,
+    T: VoxelField,
 {
     for c in &outbox.chunks {
         commands.spawn(ExtractedChunkField::<T> {
@@ -452,6 +504,7 @@ where
             padded_data: Arc::clone(&c.bytes),
             size: c.lod.size().wrapping_add(PADDING),
             lod: c.lod,
+            sub: c.sub,
             seam_ranks: c.seam_ranks,
             meta_only: c.meta_only,
             seq: c.seq,
@@ -621,11 +674,11 @@ pub fn release_despawned_chunks(
 
 fn drop_chunk(arena_set: &mut VoxelChunkArenaSet, e: MainEntity) {
     arena_set.live.remove(&e);
-    arena_set.empty.remove(&e);
+    arena_set.empty.retain(|k| k.entity != e);
     for cache in arena_set.side_data.values_mut() {
         cache.remove(&e);
     }
-    arena_set.release(e);
+    arena_set.release_entity(e);
 }
 
 /// Debug check: `live` must match a full recount. Repairs and logs misses.
@@ -643,7 +696,7 @@ fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet, residency: 
     };
     let held = arena_set
         .iter()
-        .flat_map(|a| a.slot_of_main_entity.keys().copied());
+        .flat_map(|a| a.subs_of_entity.keys().copied());
     let extra: Vec<MainEntity> = arena_set
         .live
         .iter()
@@ -666,4 +719,148 @@ fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet, residency: 
         drop_chunk(arena_set, e);
     }
     arena_set.live = wanted;
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::prelude::*;
+
+    use super::{PaddedOutbox, add_field_extraction};
+    use crate::{
+        chunk::{Chunk, ChunkManager, ChunkPosition},
+        field::{Field, GpuChannel, LOD, VoxelField, surface::HasSurface},
+        grid::flatten_cube,
+        voxel::{
+            layer::{LayerResidency, SubSurface},
+            resident::ForceResident,
+        },
+    };
+
+    /// A field whose surfaces are the distinct nonzero ids it holds.
+    #[derive(Component, Clone)]
+    struct Owners {
+        lod: LOD,
+        data: Vec<u8>,
+        version: u64,
+    }
+
+    impl Field<u8> for Owners {
+        fn size(&self) -> UVec3 {
+            UVec3::splat(self.lod.size())
+        }
+        fn get(&self, x: u32, y: u32, z: u32) -> u8 {
+            self.data
+                .get(flatten_cube(x, y, z, self.lod.size()))
+                .copied()
+                .unwrap_or(0)
+        }
+        fn set(&mut self, x: u32, y: u32, z: u32, value: u8) {
+            if let Some(v) = self.data.get_mut(flatten_cube(x, y, z, self.lod.size())) {
+                *v = value;
+                self.version = self.version.wrapping_add(1);
+            }
+        }
+    }
+
+    impl VoxelField for Owners {
+        type Value = u8;
+        type Elem = u8;
+        const GPU: GpuChannel = GpuChannel::Shape;
+        fn new_for_lod(lod: LOD) -> Self {
+            Self::from_raw(lod, vec![0; lod.volume()])
+        }
+        fn from_raw(lod: LOD, data: Vec<u8>) -> Self {
+            Self {
+                lod,
+                data,
+                version: 0,
+            }
+        }
+        fn lod(&self) -> LOD {
+            self.lod
+        }
+        fn data_slice(&self) -> &[u8] {
+            &self.data
+        }
+        fn version(&self) -> u64 {
+            self.version
+        }
+    }
+
+    fn owners(vol: &[u8], _: LOD) -> Vec<(SubSurface, Vec<u8>)> {
+        let mut ids: Vec<u8> = vol.iter().copied().filter(|&v| v != 0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter()
+            .map(|id| (SubSurface(id), vec![id; vol.len()]))
+            .collect()
+    }
+
+    fn outbox(app: &App) -> Vec<(SubSurface, bool)> {
+        let mut out: Vec<(SubSurface, bool)> = app
+            .world()
+            .resource::<PaddedOutbox<Owners>>()
+            .chunks
+            .iter()
+            .map(|c| (c.sub, c.bytes.is_empty()))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Each owner in a chunk is extracted as its own surface; an owner that
+    /// leaves the chunk is released, and the last one leaving releases all.
+    #[test]
+    fn surfaces_come_and_go_with_their_owners() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ChunkManager>()
+            .init_resource::<ForceResident>();
+        add_field_extraction::<Owners>(&mut app, LayerResidency::Loaded, owners);
+        let chunk = app
+            .world_mut()
+            .spawn((
+                Chunk,
+                ChunkPosition(IVec3::ZERO),
+                LOD::Lowest,
+                HasSurface,
+                Owners::new_for_lod(LOD::Lowest),
+            ))
+            .id();
+        let set = |app: &mut App, cells: &[(u32, u8)]| {
+            let mut field = app.world_mut().get_mut::<Owners>(chunk).unwrap();
+            for &(x, id) in cells {
+                field.set(x, 0, 0, id);
+            }
+        };
+
+        set(&mut app, &[(0, 1), (1, 2)]);
+        app.update();
+        assert_eq!(
+            outbox(&app),
+            vec![(SubSurface(1), false), (SubSurface(2), false)]
+        );
+
+        // Nothing changed: nothing is sent.
+        app.update();
+        assert_eq!(outbox(&app), vec![]);
+
+        // Owner 2 leaves: its surface is released, owner 1's re-sent.
+        set(&mut app, &[(1, 0)]);
+        app.update();
+        assert_eq!(
+            outbox(&app),
+            vec![(SubSurface(1), false), (SubSurface(2), true)]
+        );
+
+        // The last owner leaves: everything is released at once.
+        set(&mut app, &[(0, 0)]);
+        app.update();
+        assert_eq!(outbox(&app), vec![(SubSurface::ALL, true)]);
+
+        // And with nothing held, an unchanged empty field sends nothing.
+        set(&mut app, &[(2, 0)]);
+        app.update();
+        assert_eq!(outbox(&app), vec![]);
+    }
 }

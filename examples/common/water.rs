@@ -1,11 +1,13 @@
 //! A second surface layer for the `layers` example and `bench --layer`: a
-//! flat water table. Its own shape field (signed distances like the
-//! `SDF`'s), generated per chunk, meshed by the GPU surface nets and drawn
-//! with one flat color (`flat_layer.wesl`).
+//! flat water table, and a flood level above it. One shape field (signed
+//! distances like the `SDF`'s), generated per chunk, meshed by the GPU
+//! surface nets as two sub-surfaces and drawn translucent, each in its own
+//! color (`flat_layer.wesl`).
 #![allow(dead_code)]
 
 use std::any::type_name;
 
+use bevy::render::render_resource::{BlendState, Face};
 use bevy::{
     asset::{load_internal_asset, uuid_handle},
     prelude::*,
@@ -24,14 +26,16 @@ use tarasaur::{
     grid::{flatten_cube, sample_neighbor},
     num::{f32_from_i32, f32_from_u32},
     storage::generator::ChunkGeneratorRegistry,
-    voxel::{LayerMaterial, NoChannel},
+    voxel::{LayerMaterial, LayerPass, NoChannel, SubSurface},
 };
 
 /// Height of the water table, world units.
 pub const WATER_LEVEL: f32 = 3.0;
+/// How far above the water table the flood level (the second surface) is.
+pub const FLOOD_ABOVE: f32 = 6.0;
 
-/// The water's color, linear RGBA.
-const WATER_COLOR: [f32; 4] = [0.15, 0.45, 0.8, 1.0];
+/// The two surfaces' colors, premultiplied linear RGBA: water, then flood.
+const COLORS: [[f32; 4]; 2] = [[0.08, 0.25, 0.45, 0.55], [0.35, 0.1, 0.05, 0.35]];
 
 pub const FLAT_LAYER_SHADER: Handle<Shader> = uuid_handle!("7a8b9c0d-1e2f-4a5b-8c6d-7e8f9a0b1c2d");
 
@@ -98,8 +102,7 @@ impl VoxelField for WaterField {
     }
 
     fn gpu_bytes(vol: &[f32]) -> Vec<u8> {
-        let packed: Vec<i16> = vol.iter().map(|&v| quantize_sdf(v)).collect();
-        bytemuck::cast_slice(&packed).to_vec()
+        quantized(vol, 0.0)
     }
 
     fn rescale(v: f32, ratio: f32) -> f32 {
@@ -118,6 +121,12 @@ impl VoxelField for WaterField {
     }
 }
 
+/// `vol` shifted up by `offset` voxels, as uploaded.
+fn quantized(vol: &[f32], offset: f32) -> Vec<u8> {
+    let packed: Vec<i16> = vol.iter().map(|&v| quantize_sdf(v - offset)).collect();
+    bytemuck::cast_slice(&packed).to_vec()
+}
+
 /// The water table's distances for one chunk: a horizontal plane.
 fn water_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     let voxel = lod.voxel_size();
@@ -134,10 +143,15 @@ fn water_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     out
 }
 
-/// One flat color, lit by a fixed light; opaque, like the terrain.
+/// One flat color per sub-surface, lit by a fixed light, translucent.
 pub struct FlatRaster;
 
 impl LayerRaster for FlatRaster {
+    const PASS: LayerPass = LayerPass::Transparent;
+    const BLEND: Option<BlendState> = Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+    /// Seen from below the water too.
+    const CULL: Option<Face> = None;
+
     fn shader() -> Handle<Shader> {
         FLAT_LAYER_SHADER
     }
@@ -165,8 +179,8 @@ impl LayerRaster for FlatRaster {
         }
         let device = world.resource::<RenderDevice>();
         let color = device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("flat_layer_color"),
-            contents: bytemuck::bytes_of(&WATER_COLOR),
+            label: Some("flat_layer_colors"),
+            contents: bytemuck::bytes_of(&COLORS),
             usage: BufferUsages::UNIFORM,
         });
         let bind_group = device.create_bind_group(
@@ -188,6 +202,17 @@ impl SurfaceLayer for WaterLayer {
     type Material = NoChannel;
     type Mask = NoChannel;
     type Raster = FlatRaster;
+
+    /// The water table, and the flood level `FLOOD_ABOVE` over it.
+    fn surfaces(vol: &[f32], lod: LOD) -> Vec<(SubSurface, Vec<u8>)> {
+        vec![
+            (SubSurface(0), quantized(vol, 0.0)),
+            (
+                SubSurface(1),
+                quantized(vol, FLOOD_ABOVE / lod.voxel_size()),
+            ),
+        ]
+    }
 }
 
 /// Adds the water table: its shader, its generator and the layer.

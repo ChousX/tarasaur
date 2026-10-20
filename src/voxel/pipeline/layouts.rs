@@ -107,6 +107,7 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(2, ShaderStages::FRAGMENT, true), // chunk_has_mask_buffer
         uniform_buffer_entry(3, ShaderStages::FRAGMENT, NonZeroU64::new(16)), // BatchUniforms
         storage_buffer_entry(4, ShaderStages::FRAGMENT, true), // material_buffer (packed u8 ids in u32 words)
+        storage_buffer_entry(5, ShaderStages::FRAGMENT, true), // slot_sub_buffer: [slot] -> SubSurface
     ]
 }
 

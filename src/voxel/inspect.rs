@@ -146,7 +146,7 @@ impl ArenaInspector<'_> {
     #[must_use]
     pub fn material_slot(&self, lod: LOD, chunk: Entity) -> Option<MaterialSlot> {
         let set = self.terrain()?;
-        let found = set.find_slot(lod, MainEntity::from(chunk))?;
+        let found = set.find_first(lod, MainEntity::from(chunk))?;
         let arena = set
             .arenas
             .get(VoxelChunkArenaSet::lod_index(lod))?
@@ -164,7 +164,7 @@ impl ArenaInspector<'_> {
     #[must_use]
     pub fn mask_slot(&self, lod: LOD, chunk: Entity) -> Option<MaskSlot> {
         let set = self.terrain()?;
-        let found = set.find_slot(lod, MainEntity::from(chunk))?;
+        let found = set.find_first(lod, MainEntity::from(chunk))?;
         let arena = set
             .arenas
             .get(VoxelChunkArenaSet::lod_index(lod))?

@@ -26,10 +26,31 @@ use crate::{
     field::LOD,
     num::{f32_from_u32, u32_from_f32, u64_from_usize, usize_from},
     voxel::{
+        layer::SubSurface,
         types::{CreateStorage, DrawIndexedIndirectArgs, entries},
         util::{hash_chunk_pos, make_batch_uniform_buffer},
     },
 };
+
+/// What a slot holds: one of a chunk's surfaces in its layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SlotKey {
+    pub entity: MainEntity,
+    pub sub: SubSurface,
+}
+
+impl SlotKey {
+    #[must_use]
+    pub const fn new(entity: MainEntity, sub: SubSurface) -> Self {
+        Self { entity, sub }
+    }
+
+    /// A chunk's first (for most layers, only) surface.
+    #[must_use]
+    pub const fn first(entity: MainEntity) -> Self {
+        Self::new(entity, SubSurface(0))
+    }
+}
 
 // Average fraction of cells per chunk provisioned for vertex/index output.
 // Each chunk gets an exact-size range from a shared heap (see `RangeHeap`),
@@ -202,6 +223,9 @@ pub struct VoxelChunkArena {
     pub material_buffer: Buffer,
     pub visibility_mask_buffer: Buffer,
     pub chunk_has_mask_buffer: Buffer,
+    /// `[slot] -> SubSurface`, CPU-written when a slot is placed, read by
+    /// the raster pass.
+    pub slot_sub_buffer: Buffer,
     /// Per-dispatch scratch from pass1: `[vertex] -> cell` per chunk.
     pub active_cells_buffer: Buffer,
     /// Per-dispatch scratch from pass1: `[cell] -> vertex` per chunk.
@@ -221,7 +245,10 @@ pub struct VoxelChunkArena {
 
     pub mask_slots: Vec<bool>,
     pub free_slots: Vec<u32>,
-    pub slot_of_main_entity: HashMap<MainEntity, u32>,
+    pub slot_of_key: HashMap<SlotKey, u32>,
+    /// Which surfaces of each chunk hold a slot here, so a chunk's slots
+    /// can be released without a scan.
+    pub subs_of_entity: HashMap<MainEntity, Vec<SubSurface>>,
     pub active_slots: Vec<u32>, // every slot holding a chunk; drawn each frame
     /// Slots to re-mesh this frame. Drained by the compute dispatch, so only
     /// chunks whose inputs changed pay for surface nets.
@@ -242,8 +269,10 @@ pub struct VoxelChunkArena {
     pub guard_readback_buffer: Buffer,
     pub guard_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 
-    /// `chunk_pos` <-> slot, for the collision query's merged lookup table
-    /// (see `VoxelChunkArenaSet::rebuild_merged_lookup`).
+    /// `chunk_pos` -> the slot of a chunk's first surface, for the collision
+    /// query's merged lookup table (see
+    /// `VoxelChunkArenaSet::rebuild_merged_lookup`). Other surfaces' slots
+    /// aren't in it.
     pub slot_of_chunk_pos: HashMap<IVec3, u32>,
     pub chunk_pos_of_slot: Vec<Option<IVec3>>, // len == max_chunks, O(1) release
 }
@@ -311,6 +340,7 @@ struct ArenaBuffers {
     material: Buffer,
     visibility_mask: Buffer,
     chunk_has_mask: Buffer,
+    slot_sub: Buffer,
     active_cells: Buffer,
     cell_vertex: Buffer,
     chunk_counts: Buffer,
@@ -374,6 +404,7 @@ impl ArenaBuffers {
                 has_mask_words.saturating_mul(4),
                 STORAGE_DST | BufferUsages::COPY_SRC,
             ),
+            slot_sub: dev.storage("arena_slot_sub_buffer", per_chunk(4), STORAGE_DST),
             active_cells: dev.storage(
                 "arena_active_cells_buffer",
                 total_cells.saturating_mul(4).saturating_mul(scratch),
@@ -540,6 +571,7 @@ fn arena_bind_groups(
             (2, &b.chunk_has_mask),
             (3, &b.batch_uniform_pass3),
             (4, &b.material),
+            (5, &b.slot_sub),
         ]),
     );
     [pass1, pass3, raster]
@@ -563,6 +595,7 @@ impl VoxelChunkArena {
             material,
             visibility_mask,
             chunk_has_mask,
+            slot_sub,
             active_cells,
             cell_vertex,
             chunk_counts,
@@ -601,7 +634,8 @@ impl VoxelChunkArena {
             pass1_bind_group,
             pass3_bind_group,
             free_slots: (0..sizes.max_chunks).rev().collect(),
-            slot_of_main_entity: HashMap::new(),
+            slot_of_key: HashMap::new(),
+            subs_of_entity: HashMap::new(),
             active_slots: Vec::new(),
             dirty_slots: Vec::new(),
             slot_range: vec![(0, 0); slots],
@@ -619,6 +653,7 @@ impl VoxelChunkArena {
             material_buffer: material,
             visibility_mask_buffer: visibility_mask,
             chunk_has_mask_buffer: chunk_has_mask,
+            slot_sub_buffer: slot_sub,
             mask_slots: vec![false; slots],
             raster_chunk_bind_group,
             slot_of_chunk_pos: HashMap::new(),
@@ -636,29 +671,34 @@ impl VoxelChunkArena {
     }
 
     /// Records/updates which chunk coordinate owns `slot`, keeping
-    /// `slot_of_chunk_pos` and `chunk_pos_of_slot` in sync.
+    /// `slot_of_chunk_pos` (first surfaces only) and `chunk_pos_of_slot` in
+    /// sync.
     ///
-    /// Called from `prepare_voxel_arena` right after slot allocation.
-    pub fn register_chunk_pos(&mut self, slot: u32, chunk_pos: IVec3) {
+    /// Called from `prepare_shape_upload` right after slot allocation.
+    pub fn register_chunk_pos(&mut self, slot: u32, chunk_pos: IVec3, sub: SubSurface) {
         let Some(owner) = self.chunk_pos_of_slot.get_mut(usize_from(slot)) else {
             return;
         };
         if *owner == Some(chunk_pos) {
             return;
         }
-        if let Some(old) = owner.replace(chunk_pos) {
+        if let Some(old) = owner.replace(chunk_pos)
+            && self.slot_of_chunk_pos.get(&old) == Some(&slot)
+        {
             self.slot_of_chunk_pos.remove(&old);
         }
-        self.slot_of_chunk_pos.insert(chunk_pos, slot);
+        if sub == SubSurface(0) {
+            self.slot_of_chunk_pos.insert(chunk_pos, slot);
+        }
     }
 
-    /// Gives this chunk a slot (reusing its current one) and a vertex range
-    /// of at least `count` cells.
+    /// Gives this surface a slot (reusing its current one) and a vertex
+    /// range of at least `count` cells.
     ///
     /// `None` = no free slot or no room in the heap; nothing is changed, so
     /// the chunk keeps whatever mesh it has.
-    pub fn place(&mut self, main_entity: MainEntity, count: u32) -> Option<u32> {
-        let existing = self.slot_of_main_entity.get(&main_entity).copied();
+    pub fn place(&mut self, key: SlotKey, count: u32) -> Option<u32> {
+        let existing = self.slot_of_key.get(&key).copied();
         if !existing.is_some_and(|s| self.can_mark_dirty(s)) && self.dirty_full() {
             return None; // no scratch left to mesh it this frame
         }
@@ -680,16 +720,36 @@ impl VoxelChunkArena {
         let cap = reserve_for(count);
         let base = self.heap.alloc(cap)?;
         self.free_slots.pop();
-        self.slot_of_main_entity.insert(main_entity, slot);
+        self.slot_of_key.insert(key, slot);
+        self.subs_of_entity
+            .entry(key.entity)
+            .or_default()
+            .push(key.sub);
         *range = (base, cap);
         self.active_slots.push(slot);
         Some(slot)
     }
 
-    pub fn release(&mut self, main_entity: MainEntity) {
-        let Some(slot) = self.slot_of_main_entity.remove(&main_entity) else {
+    /// Releases every slot of `main_entity`'s surfaces.
+    pub fn release_entity(&mut self, main_entity: MainEntity) {
+        let Some(subs) = self.subs_of_entity.remove(&main_entity) else {
             return;
         };
+        for sub in subs {
+            self.release(SlotKey::new(main_entity, sub));
+        }
+    }
+
+    pub fn release(&mut self, key: SlotKey) {
+        let Some(slot) = self.slot_of_key.remove(&key) else {
+            return;
+        };
+        if let Some(subs) = self.subs_of_entity.get_mut(&key.entity) {
+            subs.retain(|&s| s != key.sub);
+            if subs.is_empty() {
+                self.subs_of_entity.remove(&key.entity);
+            }
+        }
         self.free_slots.push(slot);
         let i = usize_from(slot);
         if let Some(range) = self.slot_range.get_mut(i) {
@@ -704,7 +764,9 @@ impl VoxelChunkArena {
         if let Some(m) = self.mask_slots.get_mut(i) {
             *m = false;
         }
-        if let Some(pos) = self.chunk_pos_of_slot.get_mut(i).and_then(Option::take) {
+        if let Some(pos) = self.chunk_pos_of_slot.get_mut(i).and_then(Option::take)
+            && self.slot_of_chunk_pos.get(&pos) == Some(&slot)
+        {
             self.slot_of_chunk_pos.remove(&pos);
         }
     }
@@ -730,8 +792,8 @@ impl VoxelChunkArena {
     }
 
     #[must_use]
-    pub fn existing_slot(&self, main_entity: MainEntity) -> Option<u32> {
-        self.slot_of_main_entity.get(&main_entity).copied()
+    pub fn existing_slot(&self, key: SlotKey) -> Option<u32> {
+        self.slot_of_key.get(&key).copied()
     }
 }
 
@@ -793,17 +855,19 @@ pub struct VoxelChunkArenaSet {
     /// Chunks that should be resident, written each frame by
     /// `release_despawned_chunks`. Pending uploads for anything else are dropped.
     pub live: HashSet<MainEntity>,
-    /// Chunks whose SDF upload is waiting this frame (budget or no room).
-    /// Their material/visibility uploads wait too, so the three stay in step.
-    pub deferred: HashSet<MainEntity>,
-    /// Live chunks whose latest SDF meshes to nothing (exact CPU count of 0).
-    /// They hold no slot; their material/visibility uploads are only cached.
-    pub empty: HashSet<MainEntity>,
-    /// Chunks whose SDF went into a different slot this frame (a new
+    /// Surfaces whose shape upload is waiting this frame (budget or no
+    /// room). Their chunk's material/visibility uploads wait too, so the
+    /// three stay in step.
+    pub deferred: HashSet<SlotKey>,
+    /// Live surfaces whose latest shape meshes to nothing (exact CPU count
+    /// of 0). They hold no slot; their chunk's material/visibility uploads
+    /// are only cached.
+    pub empty: HashSet<SlotKey>,
+    /// Surfaces whose shape went into a different slot this frame (a new
     /// placement, or a move to another arena). The main world only re-sends
     /// a field when it changes, so their material/visibility slots are
     /// refilled from `side_data`.
-    pub reslotted: HashSet<MainEntity>,
+    pub reslotted: HashSet<SlotKey>,
     /// Latest material/visibility upload of every live chunk, per channel
     /// type.
     pub side_data: HashMap<TypeId, SideChannelCache>,
@@ -845,20 +909,20 @@ impl VoxelChunkArenaSet {
             .get_mut(arena_idx)
     }
 
-    /// Finds which arena (within `lod`) already holds this entity, if any.
+    /// Finds which arena (within `lod`) already holds this surface, if any.
     #[must_use]
-    pub fn find_slot(&self, lod: LOD, main_entity: MainEntity) -> Option<ArenaSlot> {
+    pub fn find_slot(&self, lod: LOD, key: SlotKey) -> Option<ArenaSlot> {
         self.arenas
             .get(Self::lod_index(lod))?
             .iter()
             .enumerate()
             .find_map(|(arena_idx, a)| {
-                a.existing_slot(main_entity)
+                a.existing_slot(key)
                     .map(|slot| ArenaSlot { arena_idx, slot })
             })
     }
 
-    /// Places this chunk in a `lod` arena with room for `count` vertices.
+    /// Places this surface in a `lod` arena with room for `count` vertices.
     ///
     /// In order of preference:
     /// 1. the arena already holding it, if its range fits or can grow
@@ -871,12 +935,12 @@ impl VoxelChunkArenaSet {
     pub fn place(
         &mut self,
         lod: LOD,
-        main_entity: MainEntity,
+        key: SlotKey,
         count: u32,
         make_arena: impl FnOnce() -> VoxelChunkArena,
     ) -> Option<ArenaSlot> {
         let lod_idx = Self::lod_index(lod);
-        let found = self.find_slot(lod, main_entity);
+        let found = self.find_slot(lod, key);
         let max_arenas = self.config.max_arenas.get(lod_idx).copied().unwrap_or(0);
         let empty_chunks = self.empty.len();
         let arenas = self.arenas.get_mut(lod_idx)?;
@@ -893,7 +957,7 @@ impl VoxelChunkArenaSet {
         let current = found.map(|s| s.arena_idx);
         let others = (0..arenas.len()).filter(move |i| Some(*i) != current);
         let mut placed = current.into_iter().chain(others).find_map(|arena_idx| {
-            let slot = arenas.get_mut(arena_idx)?.place(main_entity, count)?;
+            let slot = arenas.get_mut(arena_idx)?.place(key, count)?;
             Some(ArenaSlot { arena_idx, slot })
         });
         if placed.is_none() && arenas.iter().any(VoxelChunkArena::dirty_full) {
@@ -915,7 +979,7 @@ impl VoxelChunkArenaSet {
                 );
             }
             let mut arena = make_arena();
-            if let Some(slot) = arena.place(main_entity, count) {
+            if let Some(slot) = arena.place(key, count) {
                 placed = Some(ArenaSlot {
                     arena_idx: arenas.len(),
                     slot,
@@ -933,18 +997,53 @@ impl VoxelChunkArenaSet {
         for (i, arenas) in self.arenas.iter_mut().enumerate() {
             for (j, a) in arenas.iter_mut().enumerate() {
                 if (i, j) != (lod_idx, placed.arena_idx) {
-                    a.release(main_entity);
+                    a.release(key);
                 }
             }
         }
         Some(placed)
     }
 
-    /// Releases the entity from whichever arena holds it, across all LODs.
-    pub fn release(&mut self, main_entity: MainEntity) {
+    /// Releases the surface from whichever arena holds it, across all LODs.
+    pub fn release(&mut self, key: SlotKey) {
         for a in self.iter_mut() {
-            a.release(main_entity);
+            a.release(key);
         }
+    }
+
+    /// Releases every surface of `main_entity`, across all LODs.
+    pub fn release_entity(&mut self, main_entity: MainEntity) {
+        for a in self.iter_mut() {
+            a.release_entity(main_entity);
+        }
+    }
+
+    /// The slot of `main_entity`'s first surface at `lod`.
+    #[must_use]
+    pub fn find_first(&self, lod: LOD, main_entity: MainEntity) -> Option<ArenaSlot> {
+        self.find_slot(lod, SlotKey::first(main_entity))
+    }
+
+    /// The slots of every surface of `main_entity` at `lod`.
+    #[must_use]
+    pub fn slots_of_entity(&self, lod: LOD, main_entity: MainEntity) -> Vec<ArenaSlot> {
+        let Some(arenas) = self.arenas.get(Self::lod_index(lod)) else {
+            return Vec::new();
+        };
+        arenas
+            .iter()
+            .enumerate()
+            .flat_map(|(arena_idx, a)| {
+                a.subs_of_entity
+                    .get(&main_entity)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |&sub| {
+                        a.existing_slot(SlotKey::new(main_entity, sub))
+                            .map(|slot| ArenaSlot { arena_idx, slot })
+                    })
+            })
+            .collect()
     }
 
     #[must_use]

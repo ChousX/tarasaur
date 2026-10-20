@@ -5,7 +5,7 @@
 //!
 //! The water layer is what `bench --layer` adds, so this is also where to
 //! look at what that measures. `--shot <file.png>` saves a screenshot after
-//! the world has streamed in and exits.
+//! the world has streamed in (`--shot-frame <n>`, default 400) and exits.
 
 mod common;
 
@@ -40,15 +40,21 @@ fn main() {
         .position(|a| a == "--shot")
         .and_then(|i| args.get(i.saturating_add(1)))
     {
-        app.insert_resource(Shot(path.clone()))
+        let frame = args
+            .iter()
+            .position(|a| a == "--shot-frame")
+            .and_then(|i| args.get(i.saturating_add(1)))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(SHOT_FRAME);
+        app.insert_resource(Shot(path.clone(), frame))
             .add_systems(Update, take_shot);
     }
     app.run();
 }
 
-/// `--shot`: where to save the screenshot.
+/// `--shot`: where to save the screenshot, and at which frame.
 #[derive(Resource)]
-struct Shot(String);
+struct Shot(String, u32);
 
 /// Frames to let the world stream in before the shot.
 const SHOT_FRAME: u32 = 400;
@@ -59,12 +65,12 @@ fn take_shot(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if frame.0 == SHOT_FRAME {
+    if frame.0 == shot.1 {
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(shot.0.clone()));
     }
-    if frame.0 == SHOT_FRAME.saturating_add(60) {
+    if frame.0 == shot.1.saturating_add(60) {
         exit.write(AppExit::Success);
     }
 }

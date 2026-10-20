@@ -21,6 +21,13 @@ import bevy_pbr::render::mesh_view_bindings::view;
 @group(3) @binding(2) var<storage, read> chunk_has_mask_buffer: array<u32>;
 @group(3) @binding(3) var<uniform> vis_uniforms: BatchUniforms; // pass3's, reused
 @group(3) @binding(4) var<storage, read> material_buffer: array<u32>;
+// [slot] -> which of its chunk's surfaces the slot holds (SubSurface).
+@group(3) @binding(5) var<storage, read> slot_sub_buffer: array<u32>;
+
+// Which of its chunk's surfaces `slot` holds; 0 for most layers.
+fn sub_surface(slot: u32) -> u32 {
+    return slot_sub_buffer[slot];
+}
 
 struct VertexInput {
     @location(0) position: vec4<f32>, // .xyz = world position, .w = bitcast-packed material_id_a (low byte) + blend weight (next byte), uniform flag (bit 16), macro noise (bits 17-22)

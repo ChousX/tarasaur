@@ -50,7 +50,10 @@ use bevy::{
     shader::load_shader_library,
 };
 
-use extract::{LiveOutbox, add_field_extraction, release_despawned_chunks, track_live_chunks};
+use extract::{
+    LiveOutbox, Surfaces, add_field_extraction, release_despawned_chunks, single_surface,
+    track_live_chunks,
+};
 use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
@@ -140,17 +143,22 @@ impl AppSurfaceLayerExt for App {
             L::RESIDENCY,
             L::QUERYABLE,
         );
-        add_shape_upload::<L::Shape>(self, layer, L::RESIDENCY);
+        add_shape_upload::<L::Shape>(self, layer, L::RESIDENCY, L::surfaces);
         L::Material::register(self, layer, L::RESIDENCY);
         L::Mask::register(self, layer, L::RESIDENCY);
         self
     }
 }
 
-/// Hands the shape field `F` to the render world and uploads it into
-/// `layer`'s arenas.
-fn add_shape_upload<F: VoxelField>(app: &mut App, layer: LayerIndex, residency: LayerResidency) {
-    add_field_extraction::<F>(app, residency);
+/// Hands the shape field `F` to the render world and uploads its surfaces
+/// into `layer`'s arenas.
+fn add_shape_upload<F: VoxelField>(
+    app: &mut App,
+    layer: LayerIndex,
+    residency: LayerResidency,
+    surfaces: Surfaces<F>,
+) {
+    add_field_extraction::<F>(app, residency, surfaces);
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
@@ -183,7 +191,7 @@ pub(crate) fn add_channel_upload<F: VoxelField>(
             return;
         }
     };
-    add_field_extraction::<F>(app, residency);
+    add_field_extraction::<F>(app, residency, single_surface::<F>);
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };

@@ -28,9 +28,10 @@ use crate::{
     voxel::extract::ExtractedChunkField,
     voxel::{
         arena::{
-            ARGS_BYTES, ArenaSlot, ChunkMeta, INDICES_PER_CELL, VoxelChunkArena, VoxelChunkArenaSet,
+            ARGS_BYTES, ArenaSlot, ChunkMeta, INDICES_PER_CELL, SlotKey, VoxelChunkArena,
+            VoxelChunkArenaSet,
         },
-        layer::LayerOf,
+        layer::{LayerOf, SubSurface},
         pipeline::VoxelPipelineLayouts,
         stats::VoxelFrameStats,
         types::DrawIndexedIndirectArgs,
@@ -98,17 +99,19 @@ fn newest_pending<T: Send + Sync + 'static>(
         data: Option<(u32, Entity)>,
         meta: Option<(u32, Entity)>,
     }
-    let mut newest: HashMap<MainEntity, Newest> = HashMap::new();
+    let mut newest: HashMap<SlotKey, Newest> = HashMap::new();
     for (e, x) in extracted.iter() {
         if !arena_set.live.contains(&x.main_entity) {
             commands.entity(e).despawn();
             continue;
         }
-        let entry = newest.entry(x.main_entity).or_insert(Newest {
-            since: x.seq,
-            data: None,
-            meta: None,
-        });
+        let entry = newest
+            .entry(SlotKey::new(x.main_entity, x.sub))
+            .or_insert(Newest {
+                since: x.seq,
+                data: None,
+                meta: None,
+            });
         entry.since = entry.since.min(x.seq);
         let slot = if x.meta_only {
             &mut entry.meta
@@ -127,9 +130,25 @@ fn newest_pending<T: Send + Sync + 'static>(
             }
         }
     }
+    // A release of every surface (no data, `SubSurface::ALL`) outdates any
+    // older upload of one of them.
+    let released: HashMap<MainEntity, u32> = newest
+        .iter()
+        .filter(|(k, n)| k.sub == SubSurface::ALL && n.data.is_some())
+        .map(|(k, n)| (k.entity, n.data.map_or(0, |d| d.0)))
+        .collect();
     let mut pending: Vec<Pending> = newest
-        .into_values()
-        .filter_map(|n| {
+        .into_iter()
+        .filter_map(|(key, n)| {
+            if key.sub != SubSurface::ALL
+                && let Some(&at) = released.get(&key.entity)
+                && n.data.is_some_and(|d| d.0 <= at)
+            {
+                for (_, e) in n.data.into_iter().chain(n.meta) {
+                    commands.entity(e).despawn();
+                }
+                return None;
+            }
             // Data newer than the metadata already carries newer ranks.
             let (meta, folded) = match (n.data, n.meta) {
                 (Some((d, _)), Some((m, me))) if m <= d => {
@@ -236,17 +255,7 @@ fn admit<'a, F: VoxelField>(
     pending: Vec<Pending>,
     extracted: &'a Query<(Entity, &ExtractedChunkField<F>)>,
 ) -> Vec<(Pending, &'a ExtractedChunkField<F>)> {
-    let items: Vec<_> = pending
-        .into_iter()
-        .filter_map(|p| {
-            let (_, x) = extracted.get(p.entity).ok()?;
-            let new = !x.meta_only && arena_set.find_slot(x.lod, x.main_entity).is_none();
-            let shown = LOD::ALL
-                .iter()
-                .any(|&l| arena_set.find_slot(l, x.main_entity).is_some());
-            Some((p, x, new, shown))
-        })
-        .collect();
+    let items = classify(arena_set, pending, extracted);
     let cluster = clusters(
         &items
             .iter()
@@ -337,9 +346,32 @@ fn admit<'a, F: VoxelField>(
         .zip(admitted)
         .filter_map(|((p, x, new, _), go)| {
             if !go && new {
-                arena_set.deferred.insert(x.main_entity);
+                arena_set
+                    .deferred
+                    .insert(SlotKey::new(x.main_entity, x.sub));
             }
             go.then_some((p, x))
+        })
+        .collect()
+}
+
+/// Each pending upload with its extraction, whether it is a new placement
+/// (no slot at its LOD yet) and whether it is on screen at any LOD.
+fn classify<'a, F: VoxelField>(
+    arena_set: &VoxelChunkArenaSet,
+    pending: Vec<Pending>,
+    extracted: &'a Query<(Entity, &ExtractedChunkField<F>)>,
+) -> Vec<(Pending, &'a ExtractedChunkField<F>, bool, bool)> {
+    pending
+        .into_iter()
+        .filter_map(|p| {
+            let (_, x) = extracted.get(p.entity).ok()?;
+            let key = SlotKey::new(x.main_entity, x.sub);
+            let new = !x.meta_only && arena_set.find_slot(x.lod, key).is_none();
+            let shown = LOD::ALL
+                .iter()
+                .any(|&l| arena_set.find_slot(l, key).is_some());
+            Some((p, x, new, shown))
         })
         .collect()
 }
@@ -431,31 +463,41 @@ pub fn prepare_shape_upload<F: VoxelField>(
         if count == 0 {
             // No geometry: holding a slot (575 KB of SDF at High) would draw
             // nothing. Any old slot drew nothing for this data either.
-            arena_set.release(x.main_entity);
-            arena_set.empty.insert(x.main_entity);
+            if x.sub == SubSurface::ALL {
+                arena_set.release_entity(x.main_entity);
+            } else {
+                let key = SlotKey::new(x.main_entity, x.sub);
+                arena_set.release(key);
+                arena_set.empty.insert(key);
+            }
             p.despawn(&mut commands);
             continue;
         }
-        arena_set.empty.remove(&x.main_entity);
+        // Data under `ALL` would be a bug upstream; show it as the first surface.
+        let sub = if x.sub == SubSurface::ALL {
+            SubSurface(0)
+        } else {
+            x.sub
+        };
+        let key = SlotKey::new(x.main_entity, sub);
+        arena_set.empty.remove(&key);
         let cell_count = size.saturating_sub(1);
-        let before = arena_set.find_slot(lod, x.main_entity);
+        let before = arena_set.find_slot(lod, key);
         let max_buffer_bytes = arena_set.config.max_buffer_bytes;
-        let Some(placed @ ArenaSlot { arena_idx, slot }) =
-            arena_set.place(lod, x.main_entity, count, || {
-                info!(
-                    "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
-                    lod, cell_count, size
-                );
-                VoxelChunkArena::new(
-                    &gpu.render_device,
-                    &gpu.layouts,
-                    max_buffer_bytes,
-                    cell_count,
-                    size,
-                )
-            })
-        else {
-            arena_set.deferred.insert(x.main_entity);
+        let Some(placed @ ArenaSlot { arena_idx, slot }) = arena_set.place(lod, key, count, || {
+            info!(
+                "[VoxelChunkArenaSet] creating arena for {:?} (cell_count={}, texture_size={})",
+                lod, cell_count, size
+            );
+            VoxelChunkArena::new(
+                &gpu.render_device,
+                &gpu.layouts,
+                max_buffer_bytes,
+                cell_count,
+                size,
+            )
+        }) else {
+            arena_set.deferred.insert(key);
             let lod_idx = VoxelChunkArenaSet::lod_index(lod);
             if arena_set
                 .arenas
@@ -474,17 +516,17 @@ pub fn prepare_shape_upload<F: VoxelField>(
             continue;
         };
         if before != Some(placed) {
-            arena_set.reslotted.insert(x.main_entity);
+            arena_set.reslotted.insert(key);
         }
         let Some(arena) = arena_set.arena_mut(lod, arena_idx) else {
             continue;
         };
-        arena.register_chunk_pos(slot, x.chunk_pos);
+        arena.register_chunk_pos(slot, x.chunk_pos, sub);
         debug_assert_eq!(
             size, arena.texture_size,
             "mixed LOD in one arena — bucket by LOD"
         );
-        upload_chunk(&gpu.render_queue, arena, slot, x, p.seam_ranks, count);
+        upload_chunk(&gpu.render_queue, arena, slot, x, sub, p.seam_ranks, count);
         p.despawn(&mut commands);
     }
     *out_of_room = any_out_of_room;
@@ -501,6 +543,7 @@ fn upload_chunk<F: Send + Sync + 'static>(
     arena: &mut VoxelChunkArena,
     slot: u32,
     x: &ExtractedChunkField<F>,
+    sub: SubSurface,
     seam_ranks: [u32; 2],
     count: u32,
 ) {
@@ -527,6 +570,11 @@ fn upload_chunk<F: Send + Sync + 'static>(
         slot_word,
         bytemuck::bytes_of(&count),
     );
+    render_queue.write_buffer(
+        &arena.slot_sub_buffer,
+        slot_word,
+        bytemuck::bytes_of(&u32::from(sub.0)),
+    );
     let args = DrawIndexedIndirectArgs {
         index_count: 0, // pass3 fills it in this frame
         instance_count: 1,
@@ -544,27 +592,37 @@ fn upload_chunk<F: Send + Sync + 'static>(
 }
 
 /// Applies a metadata-only extraction: the chunk's data is unchanged, its
-/// seam ranks aren't, so rewrite its slot's metadata and re-mesh it. No slot
-/// means it meshed to nothing, which the ranks can't change. `false`: out of
-/// re-mesh scratch this frame, retry next.
+/// seam ranks aren't, so rewrite its surfaces' slots' metadata and re-mesh
+/// them. No slot means a surface meshed to nothing, which the ranks can't
+/// change. `false`: out of re-mesh scratch this frame for some of them,
+/// retry next.
 fn restitch<F: Send + Sync + 'static>(
     arena_set: &mut VoxelChunkArenaSet,
     render_queue: &RenderQueue,
     x: &ExtractedChunkField<F>,
     seam_ranks: [u32; 2],
 ) -> bool {
-    let Some(ArenaSlot { arena_idx, slot }) = arena_set.find_slot(x.lod, x.main_entity) else {
-        return true;
+    let slots: Vec<ArenaSlot> = if x.sub == SubSurface::ALL {
+        arena_set.slots_of_entity(x.lod, x.main_entity)
+    } else {
+        arena_set
+            .find_slot(x.lod, SlotKey::new(x.main_entity, x.sub))
+            .into_iter()
+            .collect()
     };
-    let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
-        return true;
-    };
-    if !arena.can_mark_dirty(slot) {
-        return false;
+    let mut done = true;
+    for ArenaSlot { arena_idx, slot } in slots {
+        let Some(arena) = arena_set.arena_mut(x.lod, arena_idx) else {
+            continue;
+        };
+        if !arena.can_mark_dirty(slot) {
+            done = false;
+            continue;
+        }
+        write_chunk_meta(render_queue, arena, slot, x.chunk_pos, seam_ranks);
+        arena.mark_dirty(slot);
     }
-    write_chunk_meta(render_queue, arena, slot, x.chunk_pos, seam_ranks);
-    arena.mark_dirty(slot);
-    true
+    done
 }
 
 /// Writes a slot's `ChunkMeta`.
@@ -616,8 +674,8 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
         let Ok((_, x)) = extracted.get(e) else {
             continue;
         };
-        if arena_set.deferred.contains(&x.main_entity) {
-            continue; // waits with its SDF
+        if arena_set.deferred.contains(&SlotKey::first(x.main_entity)) {
+            continue; // waits with its shape
         }
         fresh.push((e, x.main_entity, x.lod, Arc::clone(&x.padded_data)));
     }
@@ -629,7 +687,7 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
     let mut out = Vec::new();
     let mut written = HashSet::new();
     for (e, main, lod, data) in fresh {
-        let Some(slot) = arena_set.find_slot(lod, main) else {
+        let Some(slot) = arena_set.find_first(lod, main) else {
             commands.entity(e).despawn(); // cached; written once the chunk has a slot
             continue;
         };
@@ -642,11 +700,17 @@ fn side_channel_uploads<T: Send + Sync + 'static>(
         });
     }
     if let Some(cache) = arena_set.side_data.get(&TypeId::of::<T>()) {
-        for main in arena_set.reslotted.iter().filter(|m| !written.contains(*m)) {
+        // Side channels ride in a chunk's first surface's slot.
+        let reslotted = arena_set
+            .reslotted
+            .iter()
+            .filter(|k| k.sub == SubSurface(0) && !written.contains(&k.entity));
+        for key in reslotted {
+            let main = &key.entity;
             let Some((lod, data)) = cache.get(main) else {
                 continue;
             };
-            let Some(slot) = arena_set.find_slot(*lod, *main) else {
+            let Some(slot) = arena_set.find_first(*lod, *main) else {
                 continue; // cached at another LOD: that LOD's upload is on its way
             };
             out.push(SideUpload {
