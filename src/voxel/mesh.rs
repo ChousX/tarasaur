@@ -12,7 +12,8 @@ use bevy::{
     render::{
         diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
         render_resource::{
-            CommandEncoder, CommandEncoderDescriptor, ComputePipeline, PipelineCache,
+            CachedPipelineState, CommandEncoder, CommandEncoderDescriptor, ComputePipeline,
+            PipelineCache,
         },
         renderer::{RenderDevice, RenderQueue},
     },
@@ -46,12 +47,11 @@ pub fn dispatch_voxel_compute_passes_batched(
     let [Some(pass1_pipeline), Some(pass3_pipeline)] =
         ids.map(|(_, id)| pipeline_cache.get_compute_pipeline(id))
     else {
+        // Still queued or compiling is normal for the first frames; only a
+        // failed compile is worth saying.
         for (name, id) in ids {
-            if pipeline_cache.get_compute_pipeline(id).is_none() {
-                warn!(
-                    "[dispatch] {name} not ready: {:?}",
-                    pipeline_cache.get_compute_pipeline_state(id)
-                );
+            if let CachedPipelineState::Err(err) = pipeline_cache.get_compute_pipeline_state(id) {
+                warn_once!("[dispatch] {name} failed to compile: {err}");
             }
         }
         return; // dirty slots stay dirty until the pipelines are ready

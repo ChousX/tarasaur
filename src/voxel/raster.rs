@@ -9,7 +9,8 @@ use bevy::{
     render::{
         diagnostic::RecordDiagnostics,
         render_resource::{
-            IndexFormat, PipelineCache, RenderPassDescriptor, RenderPipeline, StoreOp,
+            CachedPipelineState, IndexFormat, PipelineCache, RenderPassDescriptor,
+            RenderPipeline, StoreOp,
         },
         renderer::{RenderContext, ViewQuery},
         view::{ExtractedView, ViewDepthStencilTexture, ViewTarget},
@@ -35,15 +36,16 @@ pub struct RasterResources<'w> {
 }
 
 impl RasterResources<'_> {
-    /// The compiled pipeline for `key`, warning (once) while it isn't.
+    /// The compiled pipeline for `key`: `None` while it is still queued or
+    /// compiling (normal for the first frames, so silent), warning once if
+    /// its compile failed.
     fn pipeline(&self, key: VoxelRasterKey) -> Option<&RenderPipeline> {
         let id = self.raster_pipeline.id(key)?;
         let pipeline = self.pipeline_cache.get_render_pipeline(id);
-        if pipeline.is_none() {
-            warn_once!(
-                "raster pipeline: {:?}",
-                self.pipeline_cache.get_render_pipeline_state(id)
-            );
+        if pipeline.is_none()
+            && let CachedPipelineState::Err(err) = self.pipeline_cache.get_render_pipeline_state(id)
+        {
+            warn_once!("raster pipeline {key:?} failed to compile: {err}");
         }
         pipeline
     }
