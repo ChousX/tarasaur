@@ -4,7 +4,7 @@
 //! per-phase results:
 //!
 //! ```text
-//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes] [--quick]
+//! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--layer] [--gap-probes] [--quick]
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 //! ```
@@ -361,6 +361,8 @@ struct Output {
     depth_prepass: bool,
     /// `--small-arenas`: see `BENCH_ARENAS`.
     small_arenas: bool,
+    /// `--layer`: a second surface layer (`common::water`) over the terrain.
+    layer: bool,
     /// `--quick`: see `QUICK`.
     quick: bool,
     /// Seconds since the epoch at startup, in the result file names.
@@ -398,6 +400,7 @@ fn main() -> AppExit {
         label: flag("--label").unwrap_or_else(|| "run".into()),
         depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
         small_arenas: args.iter().any(|a| a == "--small-arenas"),
+        layer: args.iter().any(|a| a == "--layer"),
         quick: args.iter().any(|a| a == "--quick"),
         commit: std::process::Command::new("git")
             .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
@@ -456,6 +459,9 @@ fn main() -> AppExit {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     register_terrain(&mut app);
+    if out.layer {
+        common::water::add_water_layer(&mut app);
+    }
     let Some(msaa) = parse_msaa(flag("--msaa").as_deref()) else {
         return AppExit::error();
     };
@@ -3070,7 +3076,7 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         .join(format!("{}-{}", bench.out.label, bench.out.stamp));
     let commit = &bench.out.commit;
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} quick={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} layer={} quick={}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
@@ -3079,6 +3085,7 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         },
         bench.out.depth_prepass,
         bench.out.small_arenas,
+        bench.out.layer,
         bench.out.quick,
     );
 

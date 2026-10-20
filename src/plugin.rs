@@ -25,17 +25,19 @@ use crate::{
     },
     texture_palette::plugin::PalettePlugin,
     voxel::{
-        ArenaConfig, GuardTelemetry, RemeshBudget, VoxelDepthPrepass, VoxelRenderPlugin,
-        layer::{LayerIndex, VoxelLayers},
-        register_field_upload,
+        AppSurfaceLayerExt, ArenaConfig, GuardTelemetry, PaletteRaster, RemeshBudget,
+        VoxelDepthPrepass, VoxelRenderPlugin, add_channel_upload,
+        layer::{LayerIndex, LayerResidency, NoChannel, SurfaceLayer, VoxelLayers},
     },
 };
 
-/// Everything the engine needs, with `SDF` and `VisibilityField` registered.
+/// Everything the engine needs, with the terrain layer registered: `SDF`
+/// and `VisibilityField`, drawn by the palette.
 ///
 /// That's chunks, loading, fields, persistence, rendering and palettes. Add
-/// `MaterialFieldPlugin<M>` for materials and register generators in
-/// `ChunkGeneratorRegistry` for terrain.
+/// `MaterialFieldPlugin<M>` for materials, register generators in
+/// `ChunkGeneratorRegistry` for terrain, and `add_surface_layer` for more
+/// surfaces.
 ///
 /// The fields are the engine's settings; `TarasaurPlugin::default()` uses
 /// the defaults below. Each becomes a resource (render-world ones in the
@@ -129,17 +131,36 @@ impl Plugin for TarasaurPlugin {
             SurfaceCullPlugin,
             RaycastPlugin,
         ))
-        .add_voxel_field::<SDF>()
-        .add_voxel_field::<VisibilityField>();
+        .add_surface_layer::<TerrainLayer>();
         self.apply_settings(app);
     }
 }
 
-/// Registers a field type with every layer.
+/// The terrain: the `SDF`, masked by `VisibilityField`, drawn by the
+/// palette, held for chunks with a surface, and what the GPU ray queries
+/// trace. Layer 0.
+pub struct TerrainLayer;
+
+impl SurfaceLayer for TerrainLayer {
+    type Shape = SDF;
+    /// Added by `MaterialFieldPlugin<M>`, which attaches to this layer.
+    type Material = NoChannel;
+    type Mask = VisibilityField;
+    type Raster = PaletteRaster;
+    const RESIDENCY: LayerResidency = LayerResidency::Terrain;
+    const QUERYABLE: bool = true;
+}
+
+/// Marks `F` as registered, so `add_voxel_field` is idempotent.
+#[derive(Resource)]
+struct FieldRegistered<F>(PhantomData<F>);
+
+/// Registers a field type for editing, saving and loading.
 pub trait AppVoxelFieldExt {
     /// Wires `F` in: its edit messages and systems (`WorldEditor<F, _>`), a
-    /// default on new chunks, saving and loading, and, unless its
-    /// `GpuChannel` is `None`, extraction and upload into that channel.
+    /// default on new chunks, and saving and loading. Drawing it is a
+    /// layer's job (`add_surface_layer`). Registering a field twice does
+    /// nothing the second time.
     fn add_voxel_field<F>(&mut self) -> &mut Self
     where
         F: VoxelField + Field<F::Value>;
@@ -150,14 +171,18 @@ impl AppVoxelFieldExt for App {
     where
         F: VoxelField + Field<F::Value>,
     {
+        if self.world().contains_resource::<FieldRegistered<F>>() {
+            return self;
+        }
+        self.insert_resource(FieldRegistered::<F>(PhantomData));
         register_edits::<F>(self);
         register_saveable::<F>(self);
-        register_field_upload::<F>(self);
         self
     }
 }
 
-/// Registers a material channel: `MaterialField<M>` for your material enum.
+/// Registers the terrain's material channel: `MaterialField<M>` for your
+/// material enum, uploaded into the terrain layer's slots.
 pub struct MaterialFieldPlugin<M: VoxelMaterial>(PhantomData<M>);
 
 impl<M: VoxelMaterial> MaterialFieldPlugin<M> {
@@ -175,7 +200,9 @@ impl<M: VoxelMaterial> Default for MaterialFieldPlugin<M> {
 
 impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
     fn build(&self, app: &mut App) {
-        app.add_voxel_field::<MaterialField<M>>().add_systems(
+        app.add_voxel_field::<MaterialField<M>>();
+        add_channel_upload::<MaterialField<M>>(app, LayerIndex::TERRAIN, LayerResidency::Terrain);
+        app.add_systems(
             Update,
             (
                 forward_material_paint::<M>

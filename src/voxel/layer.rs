@@ -15,7 +15,14 @@ use bevy::{
     },
 };
 
-use crate::voxel::arena::{VoxelChunkArena, VoxelChunkArenaSet};
+use crate::{
+    field::{Field, LOD, MaterialField, VisibilityField, VoxelField, VoxelMaterial},
+    plugin::AppVoxelFieldExt,
+    voxel::{
+        add_channel_upload,
+        arena::{VoxelChunkArena, VoxelChunkArenaSet},
+    },
+};
 
 /// Which registered layer: an index into [`VoxelLayers`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -24,6 +31,91 @@ pub struct LayerIndex(pub usize);
 impl LayerIndex {
     /// The terrain, registered by `TarasaurPlugin`.
     pub const TERRAIN: Self = Self(0);
+}
+
+/// Which chunks a layer holds arena slots for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LayerResidency {
+    /// Every loaded chunk. The layer's shape field decides per chunk whether
+    /// it sends data (`VoxelField::should_extract`); a chunk whose volume
+    /// meshes to nothing holds no slot either way.
+    #[default]
+    Loaded,
+    /// Only chunks where the terrain has a surface and that its visibility
+    /// mask doesn't hide entirely (unless leased by `ForceResident`). The
+    /// terrain's own, and right for a layer that only exists on it.
+    Terrain,
+}
+
+/// Which of a layer's surfaces in a chunk a slot holds. 0 for most layers;
+/// a layer whose field stores several owners per voxel meshes one surface
+/// per owner (see `SurfaceLayer::surfaces`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubSurface(pub u8);
+
+/// A meshed surface: a shape field, its optional side channels, and its
+/// look. Register one with `app.add_surface_layer::<L>()`.
+///
+/// Every const has a default. The terrain is `TerrainLayer`: `SDF`,
+/// `VisibilityField`, `PaletteRaster`, `Terrain` residency, queryable.
+pub trait SurfaceLayer: Send + Sync + 'static {
+    /// The field whose zero crossing is meshed. Its `GpuChannel` must be
+    /// `Shape`.
+    type Shape: VoxelField + Field<<Self::Shape as VoxelField>::Value>;
+    /// Per-voxel ids blended into vertices and read per fragment
+    /// (`MaterialField<M>`), or `NoChannel`.
+    type Material: SideChannel;
+    /// A per-voxel discard mask (`VisibilityField`), or `NoChannel`.
+    type Mask: SideChannel;
+    /// How the meshes are drawn.
+    type Raster: LayerRaster;
+
+    /// Which chunks hold a slot.
+    const RESIDENCY: LayerResidency = LayerResidency::Loaded;
+
+    /// Coarsest LOD this layer is uploaded at. A chunk at a finer LOD is
+    /// resampled first. `None` = the chunk's own LOD. A smooth, coarse
+    /// surface at `Some(LOD::Low)` costs 1/64 of the arena memory of
+    /// `High`.
+    const UPLOAD_LOD: Option<LOD> = None;
+
+    /// Whether the GPU ray queries and the cursor trace this layer. One
+    /// layer may be queryable; the terrain is.
+    const QUERYABLE: bool = false;
+
+    /// The surfaces in one padded volume. Each is `size^3` snorm16
+    /// distances (see `quantize_sdf`) under its own `SubSurface` id.
+    /// Default: one, from `Shape::gpu_bytes`.
+    fn surfaces(vol: &[<Self::Shape as VoxelField>::Elem]) -> Vec<(SubSurface, Vec<u8>)> {
+        vec![(SubSurface(0), Self::Shape::gpu_bytes(vol))]
+    }
+}
+
+/// A layer's optional material or mask field.
+pub trait SideChannel: Send + Sync + 'static {
+    /// Registers the field (if any) and its upload into `layer`.
+    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency);
+}
+
+/// A layer without a material (or a mask).
+pub struct NoChannel;
+
+impl SideChannel for NoChannel {
+    fn register(_: &mut App, _: LayerIndex, _: LayerResidency) {}
+}
+
+impl<M: VoxelMaterial> SideChannel for MaterialField<M> {
+    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency) {
+        app.add_voxel_field::<Self>();
+        add_channel_upload::<Self>(app, layer, residency);
+    }
+}
+
+impl SideChannel for VisibilityField {
+    fn register(app: &mut App, layer: LayerIndex, residency: LayerResidency) {
+        app.add_voxel_field::<Self>();
+        add_channel_upload::<Self>(app, layer, residency);
+    }
 }
 
 /// Which of Bevy's passes a layer draws in.
@@ -136,6 +228,7 @@ impl LayerDesc {
 pub struct Layer {
     pub set: VoxelChunkArenaSet,
     pub raster: LayerDesc,
+    pub residency: LayerResidency,
     /// Group 2's layout, created once the render device exists.
     pub material_layout: Option<BindGroupLayout>,
     /// Built by `LayerRaster::material`; `None` until it has been.
@@ -156,18 +249,37 @@ impl Layer {
 #[derive(Resource, Default)]
 pub struct VoxelLayers {
     layers: Vec<Layer>,
+    /// The layer the GPU ray queries and the cursor trace.
+    queryable: Option<LayerIndex>,
 }
 
 impl VoxelLayers {
     /// Registers a layer and returns its index.
-    pub fn add(&mut self, raster: LayerDesc) -> LayerIndex {
+    pub fn add(
+        &mut self,
+        raster: LayerDesc,
+        residency: LayerResidency,
+        queryable: bool,
+    ) -> LayerIndex {
         self.layers.push(Layer {
             set: VoxelChunkArenaSet::default(),
             raster,
+            residency,
             material_layout: None,
             material: None,
         });
-        LayerIndex(self.layers.len().saturating_sub(1))
+        let index = LayerIndex(self.layers.len().saturating_sub(1));
+        if queryable {
+            if let Some(existing) = self.queryable {
+                warn!(
+                    "layer {} is queryable; layer {} stays the one the GPU queries trace",
+                    index.0, existing.0
+                );
+            } else {
+                self.queryable = Some(index);
+            }
+        }
+        index
     }
 
     #[must_use]
@@ -226,10 +338,10 @@ impl VoxelLayers {
         self.layers.iter_mut().flat_map(|l| l.set.iter_mut())
     }
 
-    /// The arenas the GPU ray queries and the cursor trace: the terrain's.
+    /// The arenas the GPU ray queries and the cursor trace.
     #[must_use]
     pub fn queryable(&self) -> Option<&VoxelChunkArenaSet> {
-        self.set(LayerIndex::TERRAIN)
+        self.set(self.queryable?)
     }
 }
 

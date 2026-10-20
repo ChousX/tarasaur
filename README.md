@@ -145,6 +145,36 @@ You can only edit a chunk at `MaxEditLod` (High by default). An edit that
 lands on a coarser chunk pins it, upgrades it, and retries until the chunk
 is ready.
 
+### Layers
+
+The terrain is one *surface layer*: a shape field (`SDF`), its side
+channels (`VisibilityField`, and `MaterialField<M>` from
+`MaterialFieldPlugin`) and a look (`PaletteRaster`). Any other shape field
+can be a layer too, meshed by the same GPU surface nets and drawn with its
+own fragment shader:
+
+```rust
+use tarasaur::prelude::*;
+
+struct WaterLayer;
+impl SurfaceLayer for WaterLayer {
+    type Shape = WaterField;      // your VoxelField, GpuChannel::Shape
+    type Material = NoChannel;
+    type Mask = NoChannel;
+    type Raster = FlatRaster;     // your LayerRaster: a shader and a bind group
+}
+
+app.add_surface_layer::<WaterLayer>();
+```
+
+A `LayerRaster` supplies the fragment side (`fs_main`, and `fs_prepass`
+for opaque layers) over a shared vertex stage, imported from the
+`tarasaur::voxel::shaders::voxel_raster_vertex` library, plus the group 2
+bind group its shader reads. Its pass, blend and cull default to the
+terrain's (opaque, replace, back-face); a `LayerPass::Transparent` layer
+draws after Bevy's transparent pass, back to front. See
+`examples/layers.rs` and `examples/common/water.rs`.
+
 ## How it works
 
 ```

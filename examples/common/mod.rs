@@ -1,6 +1,8 @@
 //! Shared by the examples and the bench: render settings, fly camera,
 //! heightfield terrain generators and its material palette.
 
+pub mod water;
+
 use std::any::type_name;
 
 use bevy::{

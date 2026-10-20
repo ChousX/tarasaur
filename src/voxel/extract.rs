@@ -30,7 +30,11 @@ use crate::{
     },
     grid::{NEIGHBORS_MASK, PADDING, flatten_cube},
     num::usize_from,
-    voxel::{arena::VoxelChunkArenaSet, layer::VoxelLayers, resident::ForceResident},
+    voxel::{
+        arena::VoxelChunkArenaSet,
+        layer::{LayerResidency, VoxelLayers},
+        resident::ForceResident,
+    },
 };
 
 /// Frames between full consistency checks in debug builds.
@@ -58,12 +62,13 @@ fn dirty_with_dependents(dirty: &mut HashSet<IVec3>, pos: IVec3) {
 }
 
 /// Registers the hand-off of field `T`: the main-world padding system and
-/// the render-world extract system that forwards its output.
-pub fn add_field_extraction<T>(app: &mut App)
+/// the render-world extract system that forwards its output. `residency`
+/// is its layer's: which chunks are extracted at all.
+pub fn add_field_extraction<T>(app: &mut App, residency: LayerResidency)
 where
     T: VoxelField,
 {
-    app.init_resource::<PaddedOutbox<T>>()
+    app.insert_resource(PaddedOutbox::<T>::new(residency))
         .add_systems(Last, pad_dirty_chunks::<T>);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
@@ -74,8 +79,9 @@ where
 // Residency: which chunks are extracted at all
 // ---------------------------------------------------------------------------
 
-/// Which chunks are not extracted: no surface, or fully hidden (unless
-/// forced resident).
+/// Which chunks a `LayerResidency::Terrain` layer doesn't extract: no
+/// terrain surface, or fully hidden (unless forced resident). A `Loaded`
+/// layer extracts every chunk.
 #[derive(SystemParam)]
 pub struct ExtractFilter<'w, 's> {
     surface: Query<'w, 's, (), With<HasSurface>>,
@@ -84,7 +90,10 @@ pub struct ExtractFilter<'w, 's> {
 }
 
 impl ExtractFilter<'_, '_> {
-    fn skips(&self, entity: Entity, pos: IVec3) -> bool {
+    fn skips(&self, residency: LayerResidency, entity: Entity, pos: IVec3) -> bool {
+        if residency == LayerResidency::Loaded {
+            return false;
+        }
         let hidden = self
             .visibility
             .get(entity)
@@ -144,17 +153,21 @@ pub struct PaddedChunk {
     pub seq: u32,
 }
 
-/// This frame's padded volumes of field `T`, for `extract_voxel_chunks`.
+/// This frame's padded volumes of field `T`, for `extract_voxel_chunks`,
+/// and which chunks its layer extracts.
 #[derive(Resource)]
 pub struct PaddedOutbox<T> {
     pub chunks: Vec<PaddedChunk>,
+    pub residency: LayerResidency,
     _type: PhantomData<T>,
 }
 
-impl<T> Default for PaddedOutbox<T> {
-    fn default() -> Self {
+impl<T> PaddedOutbox<T> {
+    #[must_use]
+    pub const fn new(residency: LayerResidency) -> Self {
         Self {
             chunks: Vec::new(),
+            residency,
             _type: PhantomData,
         }
     }
@@ -295,9 +308,10 @@ pub fn pad_dirty_chunks<T>(
     T: VoxelField,
 {
     outbox.chunks.clear();
+    let residency = outbox.residency;
     state.collect(&mut changes);
     if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
-        audit_extraction(&mut state, &chunk_manager, &query, &filter);
+        audit_extraction(&mut state, &chunk_manager, &query, &filter, residency);
     }
 
     // Which chunks need a new volume: cheap, sequential.
@@ -312,7 +326,7 @@ pub fn pad_dirty_chunks<T>(
             last.remove(&entity);
             continue;
         };
-        if filter.skips(entity, *pos) {
+        if filter.skips(residency, entity, *pos) {
             // so gaining a surface, or leasing/un-hiding, re-extracts
             last.remove(&entity);
             continue;
@@ -453,6 +467,7 @@ fn audit_extraction<T>(
     chunk_manager: &ChunkManager,
     query: &FieldQuery<T>,
     filter: &ExtractFilter,
+    residency: LayerResidency,
 ) where
     T: VoxelField,
 {
@@ -464,7 +479,7 @@ fn audit_extraction<T>(
             }
             continue;
         }
-        let out_of_date = if filter.skips(entity, pos.0) {
+        let out_of_date = if filter.skips(residency, entity, pos.0) {
             state.last.contains_key(&entity)
         } else {
             field.data_slice().len() == lod.volume()
@@ -491,13 +506,34 @@ fn audit_extraction<T>(
 // Live set: which chunks hold an arena slot
 // ---------------------------------------------------------------------------
 
+/// A chunk whose residency was re-evaluated this frame.
+#[derive(Clone, Copy)]
+pub struct LiveChange {
+    pub entity: Entity,
+    /// Loaded (`Chunk` with an `LOD`): what a `LayerResidency::Loaded`
+    /// layer wants.
+    pub loaded: bool,
+    /// Loaded, with a terrain surface and not hidden: what a
+    /// `LayerResidency::Terrain` layer wants.
+    pub terrain: bool,
+}
+
+impl LiveChange {
+    const fn wanted(self, residency: LayerResidency) -> bool {
+        match residency {
+            LayerResidency::Loaded => self.loaded,
+            LayerResidency::Terrain => self.terrain,
+        }
+    }
+}
+
 /// This frame's changes to the set of chunks that should hold an arena slot.
 #[derive(Resource, Default)]
 pub struct LiveOutbox {
     /// Chunks that despawned.
     pub despawned: Vec<Entity>,
-    /// Chunks whose residency was re-evaluated, and whether they're wanted.
-    pub changed: Vec<(Entity, bool)>,
+    /// Chunks whose residency was re-evaluated.
+    pub changed: Vec<LiveChange>,
 }
 
 /// What can change the set of chunks that should hold an arena slot.
@@ -530,8 +566,13 @@ pub fn track_live_chunks(
         let Some(e) = changes.chunk_manager.get_chunk(pos) else {
             continue;
         };
-        let wanted = changes.chunks.contains(e) && !changes.filter.skips(e, *pos);
-        outbox.changed.push((e, wanted));
+        let loaded = changes.chunks.contains(e);
+        let terrain = loaded && !changes.filter.skips(LayerResidency::Terrain, e, *pos);
+        outbox.changed.push(LiveChange {
+            entity: e,
+            loaded,
+            terrain,
+        });
     }
 }
 
@@ -541,36 +582,39 @@ type LiveChunkData = (
     Option<&'static VisibilityField>,
 );
 type LiveChunkFilter = (With<Chunk>, With<LOD>, With<HasSurface>);
+type LoadedChunks = Query<'static, 'static, Entity, (With<Chunk>, With<LOD>)>;
 
 /// The full live set, for the debug audit only.
 #[derive(SystemParam)]
 pub struct LiveAudit<'w, 's> {
     live: Extract<'w, 's, Query<'static, 'static, LiveChunkData, LiveChunkFilter>>,
+    loaded: Extract<'w, 's, LoadedChunks>,
     forced: Extract<'w, 's, Res<'static, ForceResident>>,
     frame: Extract<'w, 's, Res<'static, FrameCount>>,
 }
 
 /// Applies [`LiveOutbox`] to every layer: keeps its `live` set current and
-/// releases the slots of chunks that despawned, lost their surface or
-/// became hidden.
+/// releases the slots of chunks that despawned or, by the layer's
+/// residency, lost their surface or became hidden.
 pub fn release_despawned_chunks(
     outbox: Extract<Res<LiveOutbox>>,
     audit: LiveAudit,
     mut layers: ResMut<VoxelLayers>,
 ) {
-    for arena_set in layers.sets_mut() {
+    for (_, layer) in layers.iter_mut() {
+        let (residency, arena_set) = (layer.residency, &mut layer.set);
         for &e in &outbox.despawned {
             drop_chunk(arena_set, e.into());
         }
-        for &(e, wanted) in &outbox.changed {
-            if wanted {
-                arena_set.live.insert(e.into());
+        for change in &outbox.changed {
+            if change.wanted(residency) {
+                arena_set.live.insert(change.entity.into());
             } else {
-                drop_chunk(arena_set, e.into());
+                drop_chunk(arena_set, change.entity.into());
             }
         }
         if cfg!(debug_assertions) && audit.frame.0.is_multiple_of(AUDIT_INTERVAL) {
-            audit_live(&audit, arena_set);
+            audit_live(&audit, arena_set, residency);
         }
     }
 }
@@ -585,15 +629,18 @@ fn drop_chunk(arena_set: &mut VoxelChunkArenaSet, e: MainEntity) {
 }
 
 /// Debug check: `live` must match a full recount. Repairs and logs misses.
-fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet) {
-    let wanted: std::collections::HashSet<MainEntity> = audit
-        .live
-        .iter()
-        .filter(|(_, pos, v)| {
-            !v.is_some_and(VisibilityField::is_all_empty) || audit.forced.contains(&pos.0)
-        })
-        .map(|(e, _, _)| MainEntity::from(e))
-        .collect();
+fn audit_live(audit: &LiveAudit, arena_set: &mut VoxelChunkArenaSet, residency: LayerResidency) {
+    let wanted: std::collections::HashSet<MainEntity> = match residency {
+        LayerResidency::Loaded => audit.loaded.iter().map(MainEntity::from).collect(),
+        LayerResidency::Terrain => audit
+            .live
+            .iter()
+            .filter(|(_, pos, v)| {
+                !v.is_some_and(VisibilityField::is_all_empty) || audit.forced.contains(&pos.0)
+            })
+            .map(|(e, _, _)| MainEntity::from(e))
+            .collect(),
+    };
     let held = arena_set
         .iter()
         .flat_map(|a| a.slot_of_main_entity.keys().copied());

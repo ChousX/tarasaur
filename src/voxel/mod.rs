@@ -31,7 +31,10 @@ pub(crate) mod upload;
 pub(crate) mod util;
 
 pub use arena::ArenaConfig;
-pub use layer::{LayerDesc, LayerIndex, LayerMaterial, LayerPass, LayerRaster, VoxelLayers};
+pub use layer::{
+    LayerDesc, LayerIndex, LayerMaterial, LayerPass, LayerRaster, LayerResidency, NoChannel,
+    SideChannel, SubSurface, SurfaceLayer, VoxelLayers,
+};
 pub use pipeline::{PaletteRaster, VoxelDepthPrepass};
 pub use telemetry::GuardTelemetry;
 pub use upload::RemeshBudget;
@@ -52,6 +55,7 @@ use pipeline::{VoxelComputePipeline, VoxelPipelineLayouts};
 
 use crate::{
     field::{GpuChannel, VoxelField},
+    plugin::AppVoxelFieldExt,
     voxel::{
         draw::{
             DRAW_COMPACTION_SHADER_HANDLE, VoxelDrawPipeline, VoxelViewDraws,
@@ -97,38 +101,58 @@ pub(crate) enum UploadSet {
     Channels,
 }
 
-/// Marks that a `GpuChannel::Shape` field is registered (there can be one).
-#[derive(Resource)]
-struct ShapeFieldRegistered(&'static str);
+/// Registers a surface layer: a shape field meshed and drawn on the GPU.
+pub trait AppSurfaceLayerExt {
+    /// Wires `L` in: its shape field (as `add_voxel_field` does, if not
+    /// already), its material and mask fields, and the layer's arenas,
+    /// uploads, meshing, culling and raster pipelines. Without a render
+    /// app (headless), only the fields are registered.
+    fn add_surface_layer<L: SurfaceLayer>(&mut self) -> &mut Self;
+}
 
-/// Hands `F` to the render world and uploads it into its `GpuChannel`.
-/// Nothing for `GpuChannel::None`.
-pub(crate) fn register_field_upload<F: VoxelField>(app: &mut App) {
-    if F::GPU == GpuChannel::None {
-        return;
-    }
-    if F::GPU == GpuChannel::Shape {
-        let name = std::any::type_name::<F>();
-        if let Some(existing) = app.world().get_resource::<ShapeFieldRegistered>() {
+impl AppSurfaceLayerExt for App {
+    fn add_surface_layer<L: SurfaceLayer>(&mut self) -> &mut Self {
+        self.add_voxel_field::<L::Shape>();
+        if <L::Shape as VoxelField>::GPU != GpuChannel::Shape {
             error!(
-                "{name} is a second GpuChannel::Shape field ({} is already registered); not uploading it",
-                existing.0
+                "{}'s shape field {} is not a GpuChannel::Shape field; not drawing it",
+                std::any::type_name::<L>(),
+                std::any::type_name::<L::Shape>()
             );
-            return;
+            return self;
         }
-        app.insert_resource(ShapeFieldRegistered(name));
+        let Some(render_app) = self.get_sub_app_mut(RenderApp) else {
+            return self;
+        };
+        if render_app
+            .world()
+            .contains_resource::<FieldLayer<L::Shape>>()
+        {
+            error!(
+                "{} is already a layer's shape field; not registering {} again",
+                std::any::type_name::<L::Shape>(),
+                std::any::type_name::<L>()
+            );
+            return self;
+        }
+        let layer = render_app.world_mut().resource_mut::<VoxelLayers>().add(
+            LayerDesc::of::<L::Raster>(),
+            L::RESIDENCY,
+            L::QUERYABLE,
+        );
+        add_shape_upload::<L::Shape>(self, layer, L::RESIDENCY);
+        L::Material::register(self, layer, L::RESIDENCY);
+        L::Mask::register(self, layer, L::RESIDENCY);
+        self
     }
-    add_field_extraction::<F>(app);
+}
+
+/// Hands the shape field `F` to the render world and uploads it into
+/// `layer`'s arenas.
+fn add_shape_upload<F: VoxelField>(app: &mut App, layer: LayerIndex, residency: LayerResidency) {
+    add_field_extraction::<F>(app, residency);
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
-    };
-    let layer = match F::GPU {
-        GpuChannel::Shape => render_app
-            .world_mut()
-            .resource_mut::<VoxelLayers>()
-            .add(LayerDesc::of::<PaletteRaster>()),
-        // Side channels ride along with the terrain's shape.
-        _ => LayerIndex::TERRAIN,
     };
     render_app.insert_resource(FieldLayer::<F>::new(layer));
     if F::OPTIONAL {
@@ -137,21 +161,40 @@ pub(crate) fn register_field_upload<F: VoxelField>(app: &mut App) {
             extract_removed::<F>.after(release_despawned_chunks),
         );
     }
-    match F::GPU {
-        GpuChannel::Shape => {
-            render_app.add_systems(Render, prepare_shape_upload::<F>.in_set(UploadSet::Shape));
-        }
-        GpuChannel::Material => {
-            render_app.add_systems(
-                Render,
-                prepare_material_upload::<F>.in_set(UploadSet::Channels),
+    render_app.add_systems(Render, prepare_shape_upload::<F>.in_set(UploadSet::Shape));
+}
+
+/// Hands the material or mask field `F` to the render world and uploads it
+/// into the slots of `layer`'s chunks. Nothing for a field without a GPU
+/// channel.
+pub(crate) fn add_channel_upload<F: VoxelField>(
+    app: &mut App,
+    layer: LayerIndex,
+    residency: LayerResidency,
+) {
+    let system = match F::GPU {
+        GpuChannel::Material => prepare_material_upload::<F>.in_set(UploadSet::Channels),
+        GpuChannel::Mask => prepare_mask_upload::<F>.in_set(UploadSet::Channels),
+        GpuChannel::Shape | GpuChannel::None => {
+            error!(
+                "{} is not a material or mask field; not uploading it as a side channel",
+                std::any::type_name::<F>()
             );
+            return;
         }
-        GpuChannel::Mask => {
-            render_app.add_systems(Render, prepare_mask_upload::<F>.in_set(UploadSet::Channels));
-        }
-        GpuChannel::None => {}
+    };
+    add_field_extraction::<F>(app, residency);
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    render_app.insert_resource(FieldLayer::<F>::new(layer));
+    if F::OPTIONAL {
+        render_app.add_systems(
+            ExtractSchedule,
+            extract_removed::<F>.after(release_despawned_chunks),
+        );
     }
+    render_app.add_systems(Render, system);
 }
 
 /// Extraction, arenas, meshing, drawing, ray queries and the cursor.

@@ -35,4 +35,5 @@ pub mod storage;
 pub mod texture_palette;
 pub mod voxel;
 
-pub use plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin};
+pub use plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin, TerrainLayer};
+pub use voxel::{AppSurfaceLayerExt, LayerRaster, SurfaceLayer};

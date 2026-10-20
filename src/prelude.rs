@@ -3,7 +3,7 @@
 //! Everything here also has one canonical path in its module; the prelude
 //! only gathers what most apps touch.
 
-pub use crate::plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin};
+pub use crate::plugin::{AppVoxelFieldExt, MaterialFieldPlugin, TarasaurPlugin, TerrainLayer};
 
 // Chunks and streaming
 pub use crate::chunk::{CHUNK_SIZE, ChunkLoader, ChunkManager, ShowChunkBounds};
@@ -31,4 +31,7 @@ pub use crate::raycast::{
 pub use crate::texture_palette::{
     PaletteBuilder, PaletteMaterial, TexturePalette, plugin::ActivePalette,
 };
-pub use crate::voxel::VoxelDepthPrepass;
+pub use crate::voxel::{
+    AppSurfaceLayerExt, LayerMaterial, LayerPass, LayerRaster, LayerResidency, NoChannel,
+    PaletteRaster, SubSurface, SurfaceLayer, VoxelDepthPrepass,
+};
