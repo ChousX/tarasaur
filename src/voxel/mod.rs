@@ -36,7 +36,10 @@ pub use upload::RemeshBudget;
 
 use bevy::{
     asset::{load_internal_asset, uuid_handle},
-    core_pipeline::{Core3d, Core3dSystems},
+    core_pipeline::{
+        Core3d, Core3dSystems,
+        core_3d::{main_opaque_pass_3d, main_transparent_pass_3d},
+    },
     prelude::*,
     render::{Render, RenderApp, RenderSystems, extract_resource::ExtractResourcePlugin},
     shader::load_shader_library,
@@ -231,7 +234,15 @@ impl Plugin for VoxelRenderPlugin {
                     map_guard_readbacks.in_set(RenderSystems::Cleanup),
                 ),
             )
-            .add_systems(Core3d, voxel_raster_pass.in_set(Core3dSystems::MainPass));
+            // Opaque terrain: after Bevy's opaque pass, and before its transparent
+            // pass so blended meshes and gizmos land on top of it.
+            .add_systems(
+                Core3d,
+                voxel_raster_pass
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .before(main_transparent_pass_3d),
+            );
     }
 
     fn finish(&self, app: &mut App) {
