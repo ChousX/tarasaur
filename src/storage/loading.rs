@@ -198,7 +198,8 @@ pub(crate) fn start_chunk_loads(
                 commit_save(&sources.cache, &sources.dir.0, data);
             }
         }
-        commands.entity(entity).insert(ChunkDataTask {
+        // `plan_chunk_ops` may despawn this chunk before our commands apply.
+        commands.entity(entity).try_insert(ChunkDataTask {
             task: make_task(
                 pos.0,
                 target.0,
