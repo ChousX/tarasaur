@@ -146,6 +146,8 @@ impl AppSurfaceLayerExt for App {
             L::RESIDENCY,
             L::QUERYABLE,
         );
+        // The main world knows the index too, so ray hits can name the layer.
+        self.insert_resource(FieldLayer::<L::Shape>::new(layer));
         L::Clip::register(self);
         add_shape_upload::<L::Shape, <L::Clip as ClipChannel>::Field>(
             self,

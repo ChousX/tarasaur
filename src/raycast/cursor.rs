@@ -21,10 +21,13 @@ use crate::{
         ops::PlaneMode,
     },
     raycast::{
+        collider::{HitTarget, cast},
         gpu::{PendingVoxelQueries, RayQuery, VoxelQueryResults},
         terrain_ray::TerrainRay,
     },
+    voxel::layer::FieldLayer,
 };
+use crate::field::SDF;
 
 const MAX_RAY_DISTANCE: f32 = 100.0;
 
@@ -74,6 +77,27 @@ pub struct CursorSurfaceHit {
     pub normal: Vec3,
     pub distance: f32,
     pub source: HitSource,
+    /// What was hit: the terrain layer, from either backend.
+    pub target: HitTarget,
+}
+
+/// What the cursor ray sees of the terrain.
+///
+/// The built-in brush sets `clip` from its tool every frame it runs (off
+/// for Reveal, so hidden terrain can be pointed at); an app without the
+/// brush owns it. Only the CPU backend honours it: the GPU traces what is
+/// drawn.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorFilter {
+    /// Stop at the visibility clip (what is drawn), or see through hidden
+    /// regions to the terrain under them.
+    pub clip: bool,
+}
+
+impl Default for CursorFilter {
+    fn default() -> Self {
+        Self { clip: true }
+    }
 }
 
 /// The single resolved cursor hit. Gameplay and chunk focus read this and
@@ -314,11 +338,21 @@ pub fn cycle_cursor_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<Curso
     }
 }
 
+/// What the CPU backend of `resolve_cursor_hit` casts against, and how
+/// either backend names what it hit.
+#[derive(SystemParam)]
+pub struct CursorTerrain<'w, 's> {
+    filter: Res<'w, CursorFilter>,
+    terrain: TerrainRay<'w, 's>,
+    /// The terrain's layer index; absent without a render world.
+    layer: Option<Res<'w, FieldLayer<SDF>>>,
+}
+
 pub fn resolve_cursor_hit(
     mode: Res<CursorQueryMode>,
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    terrain: TerrainRay,
+    terrain: CursorTerrain,
     gpu: Res<VoxelQueryResults>,
     mut pending: ResMut<PendingVoxelQueries>,
     mut out: ResMut<CursorHit>,
@@ -347,14 +381,18 @@ pub fn resolve_cursor_hit(
 
     out.0 = match mode.backend() {
         HitSource::Cpu => {
-            terrain
-                .cast(ray.origin, dir, MAX_RAY_DISTANCE)
-                .map(|h| CursorSurfaceHit {
-                    pos: h.pos,
-                    normal: h.normal,
-                    distance: h.distance,
-                    source: HitSource::Cpu,
-                })
+            let collider = if terrain.filter.clip {
+                terrain.terrain.collider()
+            } else {
+                terrain.terrain.unclipped()
+            };
+            cast(&collider, ray.origin, dir, MAX_RAY_DISTANCE).map(|h| CursorSurfaceHit {
+                pos: h.pos,
+                normal: h.normal,
+                distance: h.distance,
+                source: HitSource::Cpu,
+                target: h.target,
+            })
         }
         HitSource::Gpu => {
             pending.0.push(RayQuery {
@@ -371,6 +409,10 @@ pub fn resolve_cursor_hit(
                     normal: Vec3::from(h.hit_normal),
                     distance: h.hit_distance,
                     source: HitSource::Gpu,
+                    target: HitTarget {
+                        layer: terrain.layer.as_ref().map(|l| l.layer),
+                        sub: default(),
+                    },
                 })
         }
     };
@@ -392,6 +434,8 @@ pub struct BrushWriters<'w> {
     paint: MessageWriter<'w, MaterialPaint>,
     visibility: MessageWriter<'w, VisibilityCsgSphere>,
     visibility_box: MessageWriter<'w, VisibilityCsgBox>,
+    /// What the next frame's cursor ray sees (see `CursorFilter`).
+    filter: ResMut<'w, CursorFilter>,
 }
 
 /// A stroke that jumps further than this many brush radii in one frame (the
@@ -446,6 +490,11 @@ pub fn cursor_brush(
     mut out: BrushWriters,
 ) {
     let tool = brush.active_tool(&input.keys);
+    // Reveal points at hidden terrain, so its ray must see through the clip.
+    let clip = tool != BrushTool::Reveal;
+    if out.filter.clip != clip {
+        out.filter.clip = clip;
+    }
     let held = input.mouse.pressed(MouseButton::Left);
     if stroke.0.is_some_and(|s| !held || s.tool != tool) {
         stroke.0 = None;

@@ -46,8 +46,13 @@ hardware such as a Steam Deck.
   normal map arrays, blended between voxel materials. Lighting is Bevy's
   own PBR, so terrain gets the scene's lights, shadows from other meshes,
   fog, light probes and tonemapping.
-- **Terrain ray casts.** A CPU `TerrainRay` answers in the same frame at any
-  LOD. A GPU query pipeline reads results back a few frames later.
+- **Ray casts.** Anything with a signed distance is a `RayCollider`: a
+  layer (`LayerCollider<L>`; `TerrainRay` is the terrain's, clipped by its
+  visibility or `unclipped`), or the `Union` or `Intersect` of colliders.
+  The CPU `cast` answers in the same frame at any LOD, says which layer and
+  surface it hit, and `cast_filtered` marches on past hits a predicate
+  rejects. A GPU query pipeline traces the terrain and reads results back a
+  few frames later.
 - **Batched drawing.** Chunks live in large per-LOD GPU arenas. Each view
   frustum-culls them and draws each arena with one
   `multi_draw_indexed_indirect`.

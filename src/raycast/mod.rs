@@ -1,7 +1,11 @@
-//! Ray casts against the terrain: the CPU `TerrainRay` (same frame, any
-//! LOD), GPU ray queries against the arenas (read back a few frames
-//! later), and the cursor built on them.
+//! Ray casts against the terrain and the other layers, and the cursor built
+//! on them.
+//!
+//! CPU colliders (`collider`: any layer, their unions and intersections,
+//! same frame, any LOD; `TerrainRay` is the terrain's) and GPU ray queries
+//! against the arenas (read back a few frames later).
 
+pub mod collider;
 pub mod cursor;
 pub mod gpu;
 pub mod terrain_ray;
@@ -17,8 +21,8 @@ use crate::{
     voxel::{UploadSet, VoxelPrepareSet, mesh::dispatch_voxel_compute_passes_batched},
 };
 use cursor::{
-    BrushStroke, CursorBrush, CursorHit, CursorQueryMode, cursor_brush, cycle_cursor_mode,
-    draw_cursor_brush, resolve_cursor_hit, update_cursor_focus,
+    BrushStroke, CursorBrush, CursorFilter, CursorHit, CursorQueryMode, cursor_brush,
+    cycle_cursor_mode, draw_cursor_brush, resolve_cursor_hit, update_cursor_focus,
 };
 use gpu::{
     ExtractedVoxelQueries, NextQuerySlot, PendingVoxelQueries, VoxelQueryBuffers,
@@ -38,6 +42,7 @@ impl Plugin for RaycastPlugin {
             .init_resource::<PendingVoxelQueries>()
             .init_resource::<VoxelQueryResults>()
             .init_resource::<CursorQueryMode>()
+            .init_resource::<CursorFilter>()
             .init_resource::<CursorHit>()
             .init_resource::<CursorBrush>()
             .init_resource::<BrushStroke>()

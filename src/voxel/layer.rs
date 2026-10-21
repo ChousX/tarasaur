@@ -113,6 +113,14 @@ pub trait SurfaceLayer: Send + Sync + 'static {
     /// `Shape::gpu_bytes`, without copying neighbours: an SDF-like field is
     /// one surface, itself.
     const SURFACES: Option<Surfaces<Self::Shape>> = None;
+
+    /// `SURFACES` one voxel at a time, for ray casts (`LayerCollider`):
+    /// the signed distance of surface `sub` from one stored value, in
+    /// voxels of `lod`. `None` (the default) casts against the field's own
+    /// values whatever `sub` is asked for. A layer with `SURFACES` should
+    /// give the matching point-wise form here, or only its first surface
+    /// can be hit.
+    const SURFACE_AT: Option<fn(f32, SubSurface, LOD) -> f32> = None;
 }
 
 /// A layer's optional material or mask field.

@@ -23,8 +23,13 @@ pub use crate::storage::persistence::{AutosaveIntervalSecs, SaveChunkMessage, Sa
 
 // Rendering, palettes and ray casts
 pub use crate::raycast::{
+    collider::{
+        HitTarget, Intersect, LayerCollider, RayCollider, RayColliderExt, RayHit, Union, cast,
+        cast_filtered,
+    },
     cursor::{
-        BrushStroke, BrushTool, CursorBrush, CursorHit, CursorQueryMode, FlattenPlane, Stroke,
+        BrushShape, BrushStroke, BrushTool, CursorBrush, CursorFilter, CursorHit,
+        CursorQueryMode, FlattenPlane, Stroke,
     },
     terrain_ray::TerrainRay,
 };

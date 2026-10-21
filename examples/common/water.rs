@@ -204,6 +204,17 @@ impl SurfaceLayer for WaterLayer {
 
     /// The water table, and the flood level `FLOOD_ABOVE` over it.
     const SURFACES: Option<Surfaces<WaterField>> = Some(water_surfaces);
+    /// The same, one value at a time, so rays can hit either surface.
+    const SURFACE_AT: Option<fn(f32, SubSurface, LOD) -> f32> = Some(water_surface_at);
+}
+
+/// Surface 0 is the table; any other is the flood level above it.
+fn water_surface_at(v: f32, sub: SubSurface, lod: LOD) -> f32 {
+    if sub == SubSurface(0) {
+        v
+    } else {
+        v - FLOOD_ABOVE / lod.voxel_size()
+    }
 }
 
 /// The water table's distances as they are, and shifted up by
