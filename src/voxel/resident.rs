@@ -28,7 +28,12 @@ impl ForceResident {
 
     /// Lease every chunk overlapping the sphere (world space).
     pub fn touch_sphere(&mut self, center: Vec3, radius: f32) {
-        for pos in crate::chunk::overlapping_chunks(center, Vec3::splat(radius)) {
+        self.touch_box(center, Vec3::splat(radius));
+    }
+
+    /// Lease every chunk overlapping the box (world space).
+    pub fn touch_box(&mut self, center: Vec3, half_extent: Vec3) {
+        for pos in crate::chunk::overlapping_chunks(center, half_extent) {
             self.touch(pos);
         }
     }

@@ -211,6 +211,32 @@ mod tests {
         assert!(f.visible_at(8, 8, 8));
     }
 
+    /// Hiding a box cuts the exact box: inside, the distance to the nearest
+    /// face; outside, minus the distance to the box, so the cap lands on
+    /// its faces.
+    #[test]
+    fn hide_box_is_a_subtraction() {
+        let mut f = VisibilityField::new(LOD::Low);
+        let center = Vec3::new(8.0, 8.0, 8.0);
+        let half = Vec3::new(3.0, 2.0, 4.0);
+        f.csg_box(center, half, 4.0, true, None, |_, _, _| None);
+        assert!(f.is_mixed());
+        assert!(!f.visible_at(8, 8, 8));
+        assert!((f.get(8, 8, 8) - 2.0).abs() < 1e-5); // nearest face is y, 2 away
+        assert!((f.get(10, 8, 8) - 1.0).abs() < 1e-5); // 1 from the +x face, inside
+        assert!((f.get(12, 8, 8) - -1.0).abs() < 1e-5); // 1 past the +x face
+        assert!((f.get(8, 11, 8) - -1.0).abs() < 1e-5); // 1 past the +y face
+        // Past a corner the distance is Euclidean, not per axis.
+        let corner = f.get(12, 11, 13);
+        assert!((corner - -(3.0f32).sqrt()).abs() < 1e-5, "{corner}");
+        assert!(f.visible_at(0, 0, 0));
+        assert_eq!(f.get(0, 0, 0), -SDF_BAND);
+
+        // Revealing it again is the union with the same box.
+        f.csg_box(center, half, 4.0, false, None, |_, _, _| None);
+        assert!(f.visible_at(8, 8, 8));
+    }
+
     /// A reinit of a uniform field lands at the band's depth, not at the
     /// distance to the chunk's faces.
     #[test]

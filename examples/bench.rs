@@ -99,7 +99,7 @@ use tarasaur::{
     },
     field::{
         Field, LOD, MaterialField, SDF, SDF_BAND, VisibilityField, VoxelField, VoxelMaterial,
-        editor::{SdfCsgSphere, VisibilityCsgSphere, WorldEditor},
+        editor::{SdfCsgSphere, VisibilityCsgBox, VisibilityCsgSphere, WorldEditor},
     },
     grid::flatten_cube,
     num::{f32_from_u32, usize_from},
@@ -2530,11 +2530,11 @@ fn vis_chunks() -> Vec<IVec3> {
     chunks
 }
 
-/// The box is a value edit (signs inside it, then the jump-flood reinit
-/// makes distances); the sphere is an exact CSG hide or reveal.
+/// The box is an exact CSG hide; the sphere is CSG-hidden and revealed in
+/// turn.
 fn drive_visibility(
     bench: Res<Bench>,
-    mut visibility: WorldEditor<VisibilityField, f32>,
+    mut boxes: MessageWriter<VisibilityCsgBox>,
     mut csg: MessageWriter<VisibilityCsgSphere>,
     chunks: Res<ChunkManager>,
     fields: Query<(&SDF, Option<&VisibilityField>)>,
@@ -2546,7 +2546,12 @@ fn drive_visibility(
     }
     let f = bench.frame_in_phase;
     if f == 0 {
-        visibility.fill_box(vis_box_center(), Vec3::splat(MATERIAL_BOX_HALF), SDF_BAND);
+        boxes.write(VisibilityCsgBox {
+            center: vis_box_center(),
+            half_size: Vec3::splat(MATERIAL_BOX_HALF),
+            hide: true,
+            max_step: None,
+        });
     }
     // Hidden on odd toggles, so it ends visible.
     if f < VIS_TOGGLE_UNTIL && f.is_multiple_of(VIS_TOGGLE_PERIOD) {

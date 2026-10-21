@@ -8,10 +8,10 @@ use bevy::shape::{Cuboid, Sphere};
 use crate::chunk::NewChunkSpawned;
 use crate::field::editor::{
     EditFieldMessage, MaterialPaint, MaterialPaintVoxels, SdfCsgSphere, SdfSculptSphere,
-    SdfSphereStamp, VisibilityCsgSphere,
+    SdfSphereStamp, VisibilityCsgBox, VisibilityCsgSphere,
 };
 use crate::field::systems::{
-    clear_dirty, process_csg_spheres, process_sdf_sculpts, process_sdf_sphere_stamps,
+    clear_dirty, process_csg_edits, process_sdf_sculpts, process_sdf_sphere_stamps,
     process_shape_edits, resolve_reinit_tasks, spawn_reinit_tasks,
 };
 use crate::field::{Field, LOD, SDF, TargetLOD, VisibilityField, VoxelField};
@@ -66,12 +66,14 @@ impl Plugin for FieldsPlugin {
 
         app.add_message::<SdfCsgSphere>()
             .add_message::<VisibilityCsgSphere>()
+            .add_message::<VisibilityCsgBox>()
             .add_message::<SdfSculptSphere>()
             .add_systems(
                 Update,
                 (
-                    process_csg_spheres::<SdfCsgSphere>,
-                    process_csg_spheres::<VisibilityCsgSphere>,
+                    process_csg_edits::<SdfCsgSphere>,
+                    process_csg_edits::<VisibilityCsgSphere>,
+                    process_csg_edits::<VisibilityCsgBox>,
                     process_sdf_sculpts,
                 )
                     .in_set(FieldSet::Edit),

@@ -54,9 +54,11 @@ move its surface.
 Both distance fields share the edit machinery through a `DistanceField`
 trait:
 
-- **CSG.** `process_csg_spheres::<M>` is generic over a `CsgMessage`:
+- **CSG.** `process_csg_edits::<M>` is generic over a `CsgMessage`:
   `SdfCsgSphere` edits the `SDF`, the new `VisibilityCsgSphere { hide, .. }`
-  the visibility. Hiding a sphere is `max(field, -sphere)`, the same
+  and `VisibilityCsgBox` the visibility. A message resolves to a `CsgOp`
+  whose `CsgShape` is a swept sphere or an axis-aligned box; the field op
+  only asks the shape for a signed distance. Hiding a sphere is `max(field, -sphere)`, the same
   subtraction as a dig; revealing it is the union, the same as a build.
   Swept capsules and `max_step` work unchanged. A reveal also marks the
   chunk for a reinit (`CsgMessage::reinit_after`): the union is exact only
@@ -142,10 +144,12 @@ materials are unaffected.
    read back as the plain SDF. With the feature, the GPU masks are checked
    as before.
 
+5. `VisibilityCsgBox`: the box CSG for fog-of-war cells, through a
+   `CsgShape` the sphere path was generalized over. The bench's box is
+   hidden this way (it was a value edit plus a reinit).
+
 ## Open
 
-- A box CSG (`VisibilityCsgBox`) for fog-of-war cells; today a box is a
-  value edit plus a reinit.
 - The cap carries the material of the voxels it cuts through. A layer may
   want a distinct look for it (a fog wall); the mesher would have to tag
   cap vertices, which it can tell from `visibility > sdf` at the cell.

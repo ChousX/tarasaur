@@ -22,7 +22,7 @@ use crate::{
     field::{
         DirtyField, MaterialField, MaxEditLod, VoxelMaterial,
         editor::{
-            CsgMessage, CsgSphere, MaterialPaint, MaterialPaintVoxels, SdfSculptOp,
+            CsgMessage, CsgOp, MaterialPaint, MaterialPaintVoxels, SdfSculptOp,
             SdfSculptSphere, SdfSphereStamp, WorldEditor,
         },
         ops::{FieldSphereOps, ShapeEditOps},
@@ -282,19 +282,17 @@ fn beyond_face<F: Field<f32>>(
 }
 
 /// Queues `ops` (each with its `reinit_after`) against every chunk they
-/// overlap (their sphere plus `reach_world`), leasing those chunks resident
+/// overlap (their shape plus `reach_world`), leasing those chunks resident
 /// meanwhile.
 fn queue_csg_edits(
-    queued: &mut Vec<DeferredEdit<(CsgSphere, bool)>>,
-    ops: impl Iterator<Item = (CsgSphere, bool)>,
+    queued: &mut Vec<DeferredEdit<(CsgOp, bool)>>,
+    ops: impl Iterator<Item = (CsgOp, bool)>,
     reach_world: f32,
     resident: &mut ForceResident,
 ) {
     for (op, reinit) in ops {
-        let sweep = op.sweep();
-        let (mid, half) = sweep.bounds(op.radius + reach_world);
-        let half_len = sweep.from.distance(sweep.to) * 0.5;
-        resident.touch_sphere(mid, op.radius + reach_world + half_len);
+        let (mid, half) = op.shape.bounds(reach_world);
+        resident.touch_box(mid, half);
         queued.extend(overlapping_chunks(mid, half).map(|chunk_pos| DeferredEdit {
             chunk_pos,
             edit: (op, reinit),
@@ -307,7 +305,7 @@ fn queue_csg_edits(
 struct CsgWork {
     entity: Entity,
     chunk_pos: IVec3,
-    op: CsgSphere,
+    op: CsgOp,
     /// See `CsgMessage::reinit_after`.
     reinit: bool,
 }
@@ -316,10 +314,10 @@ struct CsgWork {
 /// wave, so a chunk hit by several edits takes them in order. The rest
 /// wait in `deferred` (for `MAX_DEFER_FRAMES`, then they're dropped).
 fn csg_waves<F: DistanceField>(
-    queued: Vec<DeferredEdit<(CsgSphere, bool)>>,
+    queued: Vec<DeferredEdit<(CsgOp, bool)>>,
     chunk_manager: &ChunkManager,
     editable: &mut EditableChunks<F>,
-    deferred: &mut Vec<DeferredEdit<(CsgSphere, bool)>>,
+    deferred: &mut Vec<DeferredEdit<(CsgOp, bool)>>,
 ) -> Vec<Vec<CsgWork>> {
     let mut waves: Vec<Vec<CsgWork>> = Vec::new();
     let mut wave_of: HashMap<Entity, usize> = HashMap::new();
@@ -360,7 +358,7 @@ fn csg_waves<F: DistanceField>(
     waves
 }
 
-/// What `process_csg_spheres` writes besides the field.
+/// What `process_csg_edits` writes besides the field.
 #[derive(SystemParam)]
 pub struct CsgOutputs<'w, 's> {
     commands: Commands<'w, 's>,
@@ -368,15 +366,16 @@ pub struct CsgOutputs<'w, 's> {
     paint: MessageWriter<'w, MaterialPaintVoxels>,
 }
 
-/// Applies `M`'s CSG sphere edits to its distance field (`SdfCsgSphere` to
-/// the `SDF`, `VisibilityCsgSphere` to the `VisibilityField`): every chunk
-/// an edit overlaps, worked out in parallel from one state, then written.
-pub fn process_csg_spheres<M: CsgMessage>(
+/// Applies `M`'s CSG edits to its distance field (`SdfCsgSphere` to the
+/// `SDF`, `VisibilityCsgSphere` and `VisibilityCsgBox` to the
+/// `VisibilityField`): every chunk an edit overlaps, worked out in parallel
+/// from one state, then written.
+pub fn process_csg_edits<M: CsgMessage>(
     mut events: MessageReader<M>,
     mut editable: EditableChunks<M::Field>,
     chunk_manager: Res<ChunkManager>,
     max: Res<MaxEditLod>,
-    mut deferred: Local<Vec<DeferredEdit<(CsgSphere, bool)>>>,
+    mut deferred: Local<Vec<DeferredEdit<(CsgOp, bool)>>>,
     mut out: CsgOutputs,
 ) {
     let reach_world = SDF_CSG_REACH_VOXELS * max.0.voxel_size();
@@ -419,9 +418,8 @@ pub fn process_csg_spheres<M: CsgMessage>(
                         let size = sdf.size().x;
                         let origin = w.chunk_pos.as_vec3() * CHUNK_SIZE;
                         let voxel_size = CHUNK_SIZE / f32_from_u32(size);
-                        sdf.csg_sphere_delta(
-                            w.op.sweep().to_grid(origin, voxel_size),
-                            w.op.radius / voxel_size,
+                        sdf.csg_shape_delta(
+                            w.op.shape.to_grid(origin, voxel_size),
                             SDF_CSG_REACH_VOXELS,
                             w.op.subtract,
                             w.op.max_step.map(|s| s / voxel_size),

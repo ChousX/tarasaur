@@ -13,7 +13,7 @@ use crate::{
         surface::SurfaceCullPlugin,
         editor::SdfCsgSphere,
         systems::{
-            apply_material_paint_voxels, forward_material_paint, process_csg_spheres,
+            apply_material_paint_voxels, forward_material_paint, process_csg_edits,
             process_shape_edits,
         },
     },
@@ -220,7 +220,7 @@ impl<M: VoxelMaterial> Plugin for MaterialFieldPlugin<M> {
             (
                 forward_material_paint::<M>
                     .before(process_shape_edits::<MaterialField<M>, Sphere, M>),
-                apply_material_paint_voxels::<M>.after(process_csg_spheres::<SdfCsgSphere>),
+                apply_material_paint_voxels::<M>.after(process_csg_edits::<SdfCsgSphere>),
             )
                 .in_set(FieldSet::Edit),
         );

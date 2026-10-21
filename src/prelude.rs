@@ -15,7 +15,7 @@ pub use crate::field::{
     VisibilityField, VoxelField, VoxelMaterial,
     editor::{
         EditMode, MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, SdfSphereStamp,
-        VisibilityCsgSphere, WorldEditor,
+        VisibilityCsgBox, VisibilityCsgSphere, WorldEditor,
     },
     ops::{AccumulateExt, BlendExt, PlaneMode, Sweep},
 };

@@ -34,8 +34,8 @@ hardware such as a Steam Deck.
     `visibility-mask` feature keeps the older per-pixel discard instead)
   - `MaterialField<M>`: per-voxel ids from your own material enum
 - **Editing.** World-space sphere and box brushes (`WorldEditor`), exact
-  CSG spheres or swept capsules (`SdfCsgSphere`; `VisibilityCsgSphere` to
-  hide or reveal), smooth, flatten, fill and scrape sculpts
+  CSG spheres or swept capsules (`SdfCsgSphere`; `VisibilityCsgSphere` and
+  `VisibilityCsgBox` to hide or reveal), smooth, flatten, fill and scrape sculpts
   (`SdfSculptSphere`), and material painting by palette id
   (`MaterialPaint`). Edits that span chunks apply to every chunk they
   touch.

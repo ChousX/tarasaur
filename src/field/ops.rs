@@ -148,6 +148,94 @@ impl From<Vec3> for Sweep {
     }
 }
 
+/// The shape a CSG edit adds or takes out (grid or world space).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CsgShape {
+    /// The capsule of `radius` around `sweep` (a sphere when it doesn't
+    /// move).
+    Capsule { sweep: Sweep, radius: f32 },
+    /// An axis-aligned box.
+    Box { center: Vec3, half_size: Vec3 },
+}
+
+impl CsgShape {
+    #[must_use]
+    pub fn sphere(at: impl Into<Sweep>, radius: f32) -> Self {
+        Self::Capsule {
+            sweep: at.into(),
+            radius,
+        }
+    }
+
+    #[must_use]
+    pub const fn cuboid(center: Vec3, half_size: Vec3) -> Self {
+        Self::Box { center, half_size }
+    }
+
+    /// Signed distance from `p` to the shape's surface, negative inside.
+    #[inline]
+    #[must_use]
+    pub fn signed_distance(&self, p: Vec3) -> f32 {
+        match *self {
+            Self::Capsule { sweep, radius } => sweep.distance(p) - radius,
+            Self::Box { center, half_size } => {
+                let q = (p - center).abs() - half_size;
+                q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+            }
+        }
+    }
+
+    /// How far inside the shape its centre line is: the depth at which a
+    /// speed-limited edit moves at its full step (see `brush_falloff`).
+    #[must_use]
+    fn depth(&self) -> f32 {
+        match *self {
+            Self::Capsule { radius, .. } => radius,
+            Self::Box { half_size, .. } => half_size.min_element(),
+        }
+    }
+
+    /// The centre of the box around the shape grown by `margin`, and its
+    /// half extent.
+    #[must_use]
+    pub fn bounds(&self, margin: f32) -> (Vec3, Vec3) {
+        match *self {
+            Self::Capsule { sweep, radius } => sweep.bounds(radius + margin),
+            Self::Box { center, half_size } => (center, half_size + margin),
+        }
+    }
+
+    /// The same shape in grid space: `(p - origin) / voxel_size`.
+    #[must_use]
+    pub fn to_grid(self, origin: Vec3, voxel_size: f32) -> Self {
+        match self {
+            Self::Capsule { sweep, radius } => Self::Capsule {
+                sweep: sweep.to_grid(origin, voxel_size),
+                radius: radius / voxel_size,
+            },
+            Self::Box { center, half_size } => Self::Box {
+                center: (center - origin) / voxel_size,
+                half_size: half_size / voxel_size,
+            },
+        }
+    }
+
+    /// The voxels within `margin` of the shape (grid space), one voxel of
+    /// margin included, clamped to a grid of `size`.
+    fn range(&self, margin: f32, size: UVec3) -> Option<(UVec3, UVec3)> {
+        match *self {
+            Self::Capsule { sweep, radius } => sweep.range(radius + margin, size),
+            Self::Box { center, half_size } => {
+                let max_bound = size.as_vec3() - Vec3::ONE;
+                let pad = half_size + margin + 1.0;
+                let min = (center - pad).max(Vec3::ZERO).as_ivec3();
+                let max = (center + pad).min(max_bound).as_ivec3();
+                grid_range(min, max)
+            }
+        }
+    }
+}
+
 /// Which side of its plane a flatten works on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlaneMode {
@@ -162,7 +250,7 @@ pub enum PlaneMode {
 }
 
 /// A CSG edit worked out but not yet written (see
-/// `FieldSphereOps::csg_sphere_delta`).
+/// `FieldSphereOps::csg_shape_delta`).
 #[derive(Default)]
 pub struct CsgDelta {
     /// Each changed voxel and its new signed distance.
@@ -202,7 +290,7 @@ fn parallel_slabs<R: Send + 'static>(
 }
 
 /// The slowest a speed-limited CSG edit moves (as a fraction of its step),
-/// at its rim, so the rim still reaches the sphere.
+/// at its rim, so the rim still reaches the shape.
 const MIN_STEP_WEIGHT: f32 = 0.15;
 
 /// Brush weight: 1 at the center, easing smoothly to 0 at `radius`.
@@ -348,17 +436,57 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         T: SignedDistance,
         Self: Sync,
     {
-        let delta = self.csg_sphere_delta(at, radius, reach, subtract, max_step, beyond);
+        self.csg_shape(CsgShape::sphere(at, radius), reach, subtract, max_step, beyond)
+    }
+
+    /// `csg_sphere` for an axis-aligned box of `half_size` at `center`
+    /// (grid space). With `max_step`, the step is full at the box's
+    /// centre plane and eases toward its faces.
+    fn csg_box(
+        &mut self,
+        center: Vec3,
+        half_size: Vec3,
+        reach: f32,
+        subtract: bool,
+        max_step: Option<f32>,
+        beyond: impl Fn(UVec3, usize, bool) -> Option<f32> + Sync,
+    ) -> Vec<UVec3>
+    where
+        T: SignedDistance,
+        Self: Sync,
+    {
+        self.csg_shape(
+            CsgShape::cuboid(center, half_size),
+            reach,
+            subtract,
+            max_step,
+            beyond,
+        )
+    }
+
+    /// `csg_sphere` for any `CsgShape`.
+    fn csg_shape(
+        &mut self,
+        shape: CsgShape,
+        reach: f32,
+        subtract: bool,
+        max_step: Option<f32>,
+        beyond: impl Fn(UVec3, usize, bool) -> Option<f32> + Sync,
+    ) -> Vec<UVec3>
+    where
+        T: SignedDistance,
+        Self: Sync,
+    {
+        let delta = self.csg_shape_delta(shape, reach, subtract, max_step, beyond);
         self.apply_csg_delta(delta)
     }
 
-    /// `csg_sphere`'s new values, without writing them: only reads `self`,
+    /// `csg_shape`'s new values, without writing them: only reads `self`,
     /// so several chunks' edits can be worked out at once (and read each
     /// other's borders through `beyond`) before any is written.
-    fn csg_sphere_delta(
+    fn csg_shape_delta(
         &self,
-        at: impl Into<Sweep>,
-        radius: f32,
+        shape: CsgShape,
         reach: f32,
         subtract: bool,
         max_step: Option<f32>,
@@ -368,12 +496,13 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         T: SignedDistance,
         Self: Sync,
     {
-        let at = at.into();
-        let outer = radius + reach;
         let size = self.size();
-        let Some((min, max)) = at.range(outer, size) else {
+        let Some((min, max)) = shape.range(reach, size) else {
             return CsgDelta::default();
         };
+        // Falloff by depth into the shape: 1 at `depth` inside, 0 at its
+        // surface, like a sphere's by distance from its centre.
+        let depth = shape.depth();
         let read = |v: UVec3| self.get(v.x, v.y, v.z).distance();
         // The two neighbours of `v` along `axis`, from `beyond` past a face.
         let neighbours = |v: UVec3, axis: usize| {
@@ -415,12 +544,11 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             for z in zs {
                 for y in min.y..=max.y {
                     for x in min.x..=max.x {
-                        let dist = at.distance(UVec3::new(x, y, z).as_vec3());
-                        if dist > outer {
+                        let v = UVec3::new(x, y, z);
+                        let s = shape.signed_distance(v.as_vec3());
+                        if s > reach {
                             continue;
                         }
-                        let s = dist - radius;
-                        let v = UVec3::new(x, y, z);
                         let c = read(v);
                         let target = if subtract { c.max(-s) } else { c.min(s) };
                         let new = max_step.map_or(target, |step| {
@@ -440,7 +568,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
                                     .min(1.0)
                             };
                             let step =
-                                step * brush_falloff(dist, radius).max(MIN_STEP_WEIGHT) * grad;
+                                step * brush_falloff(s + depth, depth).max(MIN_STEP_WEIGHT) * grad;
                             // Toward the target, never past it.
                             c + (target - c).clamp(-step, step)
                         });
@@ -463,7 +591,7 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         delta
     }
 
-    /// Writes a `csg_sphere_delta`. Returns the voxels it turns from outside
+    /// Writes a `csg_shape_delta`. Returns the voxels it turns from outside
     /// to inside.
     fn apply_csg_delta(&mut self, delta: CsgDelta) -> Vec<UVec3>
     where
