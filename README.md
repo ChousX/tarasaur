@@ -98,12 +98,14 @@ fn setup(mut commands: Commands) {
 
 The built-in cursor brush is on by default: hold left mouse to apply
 `CursorBrush::tool` (`BrushTool::Dig`, `Build`, `Smooth`, `Flatten`,
-`Paint`, or the one-sided flattens `Fill` and `Scrape`), and hold Ctrl as
-well to swap dig and build (or fill and scrape). Each frame's edit sweeps
-a capsule from the last one, so fast strokes leave no gaps; the stroke in
-progress is in `BrushStroke`. Set its `radius`, `strength`, `material` (a
-palette id, used by Paint and by Build) and `flatten`
-(`FlattenPlane::Level` or `Slope`) at runtime; the app binds the keys. F8 cycles the ray backend (Auto / CPU / GPU). Turn the brush off
+`Paint`, the one-sided flattens `Fill` and `Scrape`, or `Hide` and
+`Reveal`), and hold Ctrl as well to swap dig and build (fill and scrape,
+hide and reveal). Each frame's edit sweeps a capsule from the last one, so
+fast strokes leave no gaps; the stroke in progress is in `BrushStroke`. Set
+its `radius`, `strength`, `material` (a palette id, used by Paint and by
+Build), `flatten` (`FlattenPlane::Level` or `Slope`) and `shape`
+(`BrushShape::Sphere`, or `Cube` for hide and reveal) at runtime; the app
+binds the keys. F8 cycles the ray backend (Auto / CPU / GPU). Turn the brush off
 with `CursorBrush { enabled: false, ..default() }` and edit from
 `CursorHit` yourself.
 
@@ -259,7 +261,7 @@ cargo run --release --example sandbox
 
 | Example | What it shows |
 |---|---|
-| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-9 pick dig, build, smooth, flatten, paint, fill, scrape, hide or reveal, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening. F12 saves a screenshot, F10 starts and stops a recording (`tools/make-gif.sh` turns it into a GIF), H hides the HUD |
+| `sandbox` | Streamed, textured terrain. WASD, Space and Shift to fly, hold right mouse to look. Left mouse applies the brush; 1-9 pick dig, build, smooth, flatten, paint, fill, scrape, hide or reveal, Q/E the material, scroll the radius, Ctrl + scroll the strength, R toggles level or slope flattening, B a sphere or cube for hide and reveal. F12 saves a screenshot, F10 starts and stops a recording (`tools/make-gif.sh` turns it into a GIF), H hides the HUD |
 | `lod_streaming` | The smallest streaming setup |
 | `edit_sphere` | Hand-spawned chunks and a resizable SDF sphere |
 | `normal_check` | Headless comparison of normal-estimation methods |

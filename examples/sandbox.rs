@@ -3,8 +3,9 @@
 //! look, left mouse to apply the brush. 1-9 pick the tool (dig, build,
 //! smooth, flatten, paint, fill, scrape, hide, reveal), Q/E the material,
 //! scroll the radius and Ctrl + scroll the strength; Ctrl + left mouse
-//! swaps dig and build (fill and scrape, hide and reveal), and R toggles
-//! the flatten, fill and scrape plane between level and along the slope.
+//! swaps dig and build (fill and scrape, hide and reveal), R toggles the
+//! flatten, fill and scrape plane between level and along the slope, and B
+//! toggles hide and reveal between a sphere and a cube.
 //!
 //! Capture: F12 saves a screenshot, F10 starts and stops recording frames
 //! (turn them into a GIF with `tools/make-gif.sh`), H hides the HUD. Both
@@ -119,8 +120,8 @@ const TOOL_KEYS: [KeyCode; 9] = [
 ];
 
 /// Number keys pick the tool, Q/E cycle the material, R toggles level
-/// flattening, scroll resizes the brush and Ctrl + scroll changes its
-/// strength.
+/// flattening, B the hide/reveal shape, scroll resizes the brush and Ctrl +
+/// scroll changes its strength.
 fn brush_controls(
     keys: Res<ButtonInput<KeyCode>>,
     mut wheel: MessageReader<MouseWheel>,
@@ -145,6 +146,9 @@ fn brush_controls(
 
     if keys.just_pressed(KeyCode::KeyR) {
         brush.flatten = brush.flatten.toggled();
+    }
+    if keys.just_pressed(KeyCode::KeyB) {
+        brush.shape = brush.shape.toggled();
     }
 
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
@@ -196,9 +200,9 @@ fn update_hud(brush: Res<CursorBrush>, mut hud: Query<&mut Text, With<Hud>>) {
     for mut text in &mut hud {
         text.0 = format!(
             "{tools}\nmaterial {material:?} (Q/E)   radius {:.1} (scroll)   strength {:.1} (ctrl+scroll)   \
-             plane {:?} (R)\n\
+             plane {:?} (R)   hide/reveal shape {:?} (B)\n\
              LMB apply, ctrl+LMB swaps dig/build, fill/scrape and hide/reveal, RMB look",
-            brush.radius, brush.strength, brush.flatten
+            brush.radius, brush.strength, brush.flatten, brush.shape
         );
     }
 }

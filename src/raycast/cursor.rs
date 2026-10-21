@@ -2,8 +2,8 @@
 //! drives, and the default brush (`CursorBrush`).
 //!
 //! The brush digs, builds, smooths, flattens, paints, fills, scrapes, hides
-//! and reveals, with the stroke it's drawing in `BrushStroke`. F8 cycles the
-//! query backend.
+//! and reveals (with a sphere, or a cube for the last two), with the stroke
+//! it's drawing in `BrushStroke`. F8 cycles the query backend.
 
 use bevy::{
     ecs::{message::MessageWriter, system::SystemParam},
@@ -14,7 +14,10 @@ use bevy::{
 use crate::{
     chunk::{CursorFocusChunk, FOCUS_RADIUS, chebyshev, world_pos_to_chunk_pos},
     field::{
-        editor::{MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, VisibilityCsgSphere},
+        editor::{
+            MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, VisibilityCsgBox,
+            VisibilityCsgSphere,
+        },
         ops::PlaneMode,
     },
     raycast::{
@@ -198,6 +201,26 @@ impl FlattenPlane {
     }
 }
 
+/// What `BrushTool::Hide` and `Reveal` edit: the brush sphere, or the
+/// axis-aligned cube of the same half extent (fog-of-war cells, rooms).
+/// The other tools are always spheres.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BrushShape {
+    #[default]
+    Sphere,
+    Cube,
+}
+
+impl BrushShape {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Sphere => Self::Cube,
+            Self::Cube => Self::Sphere,
+        }
+    }
+}
+
 /// The built-in mouse brush (`cursor_brush`).
 ///
 /// Hold left mouse to apply `tool` at the `CursorHit`; hold Ctrl as well to
@@ -221,7 +244,9 @@ pub struct CursorBrush {
     pub paint_on_build: bool,
     /// The plane Flatten, Fill and Scrape pull toward.
     pub flatten: FlattenPlane,
-    /// Draw the brush sphere at the cursor.
+    /// Sphere or cube for Hide and Reveal.
+    pub shape: BrushShape,
+    /// Draw the brush sphere (or cube) at the cursor.
     pub show_gizmo: bool,
 }
 
@@ -235,6 +260,7 @@ impl Default for CursorBrush {
             material: 0,
             paint_on_build: true,
             flatten: FlattenPlane::default(),
+            shape: BrushShape::default(),
             show_gizmo: true,
         }
     }
@@ -252,6 +278,12 @@ impl CursorBrush {
         }
     }
 
+    /// Whether `tool` edits the cube rather than the sphere.
+    #[must_use]
+    pub fn uses_cube(&self, tool: BrushTool) -> bool {
+        self.shape == BrushShape::Cube && matches!(tool, BrushTool::Hide | BrushTool::Reveal)
+    }
+
     /// The unit normal of the plane a stroke starting at `hit` would use.
     fn flatten_normal(&self, hit: &CursorSurfaceHit) -> Vec3 {
         match self.flatten {
@@ -260,8 +292,9 @@ impl CursorBrush {
         }
     }
 
-    /// The sphere `tool` edits for `hit`: (center, radius) in world space.
-    /// Build sits half a radius out of the surface so it adds material.
+    /// The sphere `tool` edits for `hit`: (center, radius) in world space;
+    /// for a cube (`uses_cube`) the radius is its half extent. Build sits
+    /// half a radius out of the surface so it adds material.
     fn sphere(&self, tool: BrushTool, hit: &CursorSurfaceHit, terrain: &TerrainRay) -> (Vec3, f32) {
         let vs = terrain.voxel_size_at(hit.pos).unwrap_or(0.3);
         let radius = self.radius.max(vs * 1.5);
@@ -358,6 +391,7 @@ pub struct BrushWriters<'w> {
     sculpt: MessageWriter<'w, SdfSculptSphere>,
     paint: MessageWriter<'w, MaterialPaint>,
     visibility: MessageWriter<'w, VisibilityCsgSphere>,
+    visibility_box: MessageWriter<'w, VisibilityCsgBox>,
 }
 
 /// A stroke that jumps further than this many brush radii in one frame (the
@@ -401,7 +435,8 @@ impl Stroke {
 /// Dig, Build, Smooth, Flatten, Fill and Scrape are gradual, scaled by the
 /// frame time, and sweep from the last frame's center so a fast stroke
 /// leaves no gaps. Dig, Build, Paint, Hide and Reveal stop at the brush
-/// sphere, so holding them in place doesn't pile up.
+/// sphere, so holding them in place doesn't pile up. A cube (`BrushShape`)
+/// is placed per frame and doesn't sweep.
 pub fn cursor_brush(
     brush: Res<CursorBrush>,
     input: BrushInput,
@@ -482,20 +517,30 @@ pub fn cursor_brush(
             });
         }
         BrushTool::Hide | BrushTool::Reveal => {
-            out.visibility.write(VisibilityCsgSphere {
-                center,
-                radius,
-                sweep_from,
-                hide: tool == BrushTool::Hide,
-                max_step: None,
-            });
+            let hide = tool == BrushTool::Hide;
+            if brush.uses_cube(tool) {
+                out.visibility_box.write(VisibilityCsgBox {
+                    center,
+                    half_size: Vec3::splat(radius),
+                    hide,
+                    max_step: None,
+                });
+            } else {
+                out.visibility.write(VisibilityCsgSphere {
+                    center,
+                    radius,
+                    sweep_from,
+                    hide,
+                    max_step: None,
+                });
+            }
         }
     }
 }
 
-/// Outlines the sphere `cursor_brush` would edit, colored by tool, and for
-/// Flatten, Fill and Scrape the plane under it. Does nothing without
-/// `GizmoPlugin`.
+/// Outlines the sphere (or cube) `cursor_brush` would edit, colored by
+/// tool, and for Flatten, Fill and Scrape the plane under it. Does nothing
+/// without `GizmoPlugin`.
 pub fn draw_cursor_brush(
     brush: Res<CursorBrush>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -513,7 +558,12 @@ pub fn draw_cursor_brush(
     let tool = brush.active_tool(&keys);
     let (center, radius) = brush.sphere(tool, &h, &terrain);
     let color = tool.color();
-    gizmos.sphere(Isometry3d::from_translation(center), radius, color);
+    if brush.uses_cube(tool) {
+        let cube = Transform::from_translation(center).with_scale(Vec3::splat(radius * 2.0));
+        gizmos.cube(cube, color);
+    } else {
+        gizmos.sphere(Isometry3d::from_translation(center), radius, color);
+    }
     if tool.plane_mode().is_some() {
         // The stroke's plane, or the one a stroke started here would use,
         // drawn where it cuts under the brush.

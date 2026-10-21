@@ -146,7 +146,9 @@ materials are unaffected.
 
 5. `VisibilityCsgBox`: the box CSG for fog-of-war cells, through a
    `CsgShape` the sphere path was generalized over. The bench's box is
-   hidden this way (it was a value edit plus a reinit).
+   hidden this way (it was a value edit plus a reinit). The brush's
+   `BrushShape` (B in the sandbox) makes Hide and Reveal place a cube of
+   the brush radius instead of the sphere.
 
 ## Open
 
