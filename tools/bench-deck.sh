@@ -4,8 +4,9 @@
 #   tools/bench-deck.sh [label] [-- extra bench args]
 #
 # e.g. `tools/bench-deck.sh`, `tools/bench-deck.sh lod-a -- --msaa 1`.
-# Works from Desktop Mode or over ssh (`ssh deck@steamdeck`): with no
-# display in the environment it draws on the Deck's own screen (:0).
+# Works from Desktop Mode or over ssh (`ssh deck@steamdeck`). The bench runs
+# headless; only `--renderdoc` opens a window, on the Deck's own screen (:0)
+# when there is no display in the environment.
 #
 # Builds and runs inside a distrobox (preinstalled on SteamOS 3.5+), since
 # SteamOS has no compiler or dev headers and its root is read-only. The first
@@ -35,8 +36,8 @@ if ! command -v distrobox >/dev/null; then
     exit 1
 fi
 
-# Over ssh there is no display; use the one on the Deck's screen. distrobox
-# passes these through to the container.
+# Over ssh there is no display; `--renderdoc`'s window uses the one on the
+# Deck's screen. distrobox passes these through to the container.
 if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
     export DISPLAY=:0
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"

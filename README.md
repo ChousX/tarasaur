@@ -292,7 +292,11 @@ cargo test -j 2      # full parallelism can run out of memory
 
 The bench runs repeatable phases (load, shots, hold, spin, fly, edit, box,
 query, reslot, visibility, dig) and writes its results to `bench_results/`
-after every phase. `shots` saves four views to `bench_results/shots/`;
+after every phase. It runs headless, as ornithochory's grove does: no
+window, a fixed 1280x800 render target (a window's size depended on the
+display's scale: 2240x1400 on a 1.75x laptop), and at most two frames in
+flight on the GPU, as a window's swapchain allows. Only `--renderdoc`, which
+captures on present, opens a window. `shots` saves four views to `bench_results/shots/`;
 `--diff` compares two of them. The last
 five also check correctness: box brushes stay inside the box, GPU ray queries
 return one result per ray and agree with the CPU ray, chunks that lose and

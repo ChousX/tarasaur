@@ -48,9 +48,17 @@
 //! which the `query` phase then checks. More arenas cost frame time (~7-11%
 //! in hold/spin/fly), so compare only runs made with the same setting.
 //!
+//! Runs headless, as ornithochory's grove: no window, the camera renders into
+//! a fixed 1280x800 image (Steam Deck's native resolution) that screenshots
+//! copy out of. With no swapchain to hold it back the CPU would queue frames
+//! without bound, so it waits as a swapchain would: at most two frames in
+//! flight on the GPU.
+//! RenderDoc captures on present, so `--renderdoc` keeps a window.
+//!
 //! Camera motion is per frame, not per second, so every run does the same
-//! work whatever its frame rate. Vsync is off. The world is generated into a
-//! scratch directory, so your saves are never read or written.
+//! work whatever its frame rate. Nothing waits for vsync. The world is
+//! generated into a scratch directory, so your saves are never read or
+//! written.
 //!
 //! GPU times need timestamp-query support (Vulkan/DX12). They arrive a few
 //! frames late, so a value is attributed to the frame in which it arrived.
@@ -59,18 +67,20 @@
 mod common;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bevy::{
+    app::ScheduleRunnerPlugin,
     asset::RenderAssetUsages,
+    camera::{ImageRenderTarget, RenderTarget},
     diagnostic::{DiagnosticPath, DiagnosticsStore, FrameCount},
     image::{CompressedImageFormats, ImageSampler, ImageType},
     prelude::*,
@@ -78,13 +88,14 @@ use bevy::{
         Render, RenderApp, RenderSystems,
         diagnostic::RenderDiagnosticsPlugin,
         render_resource::{
-            BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode, TextureDimension,
-            TextureFormat,
+            BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode, PollType,
+            TextureDimension, TextureFormat, TextureUsages,
         },
         renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
         view::screenshot::{Screenshot, save_to_disk},
     },
-    window::{PresentMode, WindowResolution},
+    window::{ExitCondition, PresentMode, WindowResolution},
+    winit::WinitPlugin,
 };
 use common::{
     TerrainMaterial, register_terrain, render_plugin, setup_terrain_palette, terrain_height,
@@ -377,6 +388,46 @@ struct Output {
 #[derive(Component)]
 struct BenchCamera;
 
+/// Render resolution: Steam Deck's native one.
+const RESOLUTION: UVec2 = UVec2::new(1280, 800);
+
+/// No window (all but `--renderdoc`): the camera renders into [`ShotTarget`].
+#[derive(Resource)]
+struct Headless;
+
+/// The image the camera renders into when headless.
+#[derive(Resource)]
+struct ShotTarget(Handle<Image>);
+
+/// Frames the GPU may run behind the CPU when headless: a window's
+/// (`Window::desired_maximum_frame_latency`, 2 by default).
+const FRAMES_IN_FLIGHT: usize = 2;
+
+/// A wait for each frame still in flight, oldest first.
+#[derive(Resource, Default)]
+struct InFlight(VecDeque<PollType>);
+
+/// Blocks the render thread until the GPU is at most [`FRAMES_IN_FLIGHT`]
+/// frames behind, as acquiring a swapchain image would.
+fn throttle_gpu(
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    mut in_flight: ResMut<InFlight>,
+) {
+    // The queue runs in order: an empty submission completes after the frame.
+    in_flight.0.push_back(PollType::Wait {
+        submission_index: Some(queue.submit([])),
+        timeout: None,
+    });
+    while in_flight.0.len() > FRAMES_IN_FLIGHT {
+        if let Some(wait) = in_flight.0.pop_front()
+            && let Err(e) = device.poll(wait)
+        {
+            error!("[bench] waiting for the GPU: {e}");
+        }
+    }
+}
+
 /// Exits with an error if setup fails or any check fails.
 fn main() -> AppExit {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -427,18 +478,8 @@ fn main() -> AppExit {
     let _ = std::fs::remove_dir_all(&world_dir);
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(render_plugin()).set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "tarasaur bench".into(),
-            // Steam Deck's native resolution.
-            resolution: WindowResolution::new(1280, 800),
-            present_mode: PresentMode::AutoNoVsync,
-            resizable: false,
-            ..default()
-        }),
-        ..default()
-    }))
-    .add_plugins((
+    add_default_plugins(&mut app, args.iter().any(|a| a == "--renderdoc"));
+    app.add_plugins((
         TarasaurPlugin {
             save_dir: world_dir,
             // Disk writes would only add noise; nothing here needs to persist.
@@ -510,6 +551,42 @@ fn main() -> AppExit {
     .run()
 }
 
+/// Bevy's plugins, headless unless `renderdoc` (RenderDoc captures on present).
+fn add_default_plugins(app: &mut App, renderdoc: bool) {
+    if renderdoc {
+        app.add_plugins(DefaultPlugins.set(render_plugin()).set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "tarasaur bench".into(),
+                resolution: WindowResolution::new(RESOLUTION.x, RESOLUTION.y),
+                present_mode: PresentMode::AutoNoVsync,
+                resizable: false,
+                ..default()
+            }),
+            ..default()
+        }));
+    } else {
+        app.add_plugins((
+            DefaultPlugins
+                .set(render_plugin())
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<WinitPlugin>(),
+            // With a window plugin, DefaultPlugins leaves the runner to winit.
+            // Uncapped: `throttle_gpu` paces the frames.
+            ScheduleRunnerPlugin::run_loop(Duration::ZERO),
+        ))
+        .insert_resource(Headless);
+        if let Some(render) = app.get_sub_app_mut(RenderApp) {
+            render
+                .init_resource::<InFlight>()
+                .add_systems(Render, throttle_gpu.in_set(RenderSystems::Cleanup));
+        }
+    }
+}
+
 /// Whether the run uses `BENCH_ARENAS` (`--small-arenas`).
 #[derive(Resource, Clone, Copy)]
 struct SmallArenas(bool);
@@ -562,18 +639,43 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
         );
 }
 
-fn spawn_camera(mut commands: Commands, msaa: Res<BenchMsaa>) {
-    commands.spawn((
-        BenchCamera,
-        Camera3d::default(),
-        msaa.0,
-        Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y),
-        // Same bands as the sandbox, so this measures what it runs.
-        ChunkLoader {
-            lod_bands: vec![(LOD::High, 4), (LOD::Medium, 3), (LOD::Low, 8)],
-            hysteresis: 1,
-        },
-    ));
+fn spawn_camera(
+    mut commands: Commands,
+    msaa: Res<BenchMsaa>,
+    headless: Option<Res<Headless>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let camera = commands
+        .spawn((
+            BenchCamera,
+            Camera3d::default(),
+            msaa.0,
+            Transform::from_translation(START).looking_at(LOOK_AT, Vec3::Y),
+            // Same bands as the sandbox, so this measures what it runs.
+            ChunkLoader {
+                lod_bands: vec![(LOD::High, 4), (LOD::Medium, 3), (LOD::Low, 8)],
+                hysteresis: 1,
+            },
+        ))
+        .id();
+    if headless.is_some() {
+        let mut image = Image::new_target_texture(
+            RESOLUTION.x,
+            RESOLUTION.y,
+            TextureFormat::Rgba8UnormSrgb,
+            None,
+        );
+        // Screenshots copy out of it.
+        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+        let target = images.add(image);
+        commands
+            .entity(camera)
+            .insert(RenderTarget::Image(ImageRenderTarget {
+                handle: target.clone(),
+                scale_factor: 1.0,
+            }));
+        commands.insert_resource(ShotTarget(target));
+    }
     commands.spawn((
         DirectionalLight {
             illuminance: 10000.0,
@@ -589,7 +691,7 @@ fn fly_end() -> Vec3 {
 
 /// `shots`: saves each view to `<out>/shots/<label>-view<N>.png`, to diff
 /// against another run's with `--diff`.
-fn take_shots(bench: Res<Bench>, mut commands: Commands) {
+fn take_shots(bench: Res<Bench>, target: Option<Res<ShotTarget>>, mut commands: Commands) {
     if bench.phase != Phase::Shots
         || (bench.frame_in_phase.saturating_add(1)).rem_euclid(SHOT_FRAMES_PER_VIEW) != 0
     {
@@ -602,9 +704,10 @@ fn take_shots(bench: Res<Bench>, mut commands: Commands) {
         return;
     }
     let path = dir.join(format!("{}-view{view}.png", bench.out.label));
-    commands
-        .spawn(Screenshot::primary_window())
-        .observe(save_to_disk(path));
+    let shot = target.map_or_else(Screenshot::primary_window, |t| {
+        Screenshot::image(t.0.clone())
+    });
+    commands.spawn(shot).observe(save_to_disk(path));
 }
 
 /// Positions the camera from the phase and frame alone.
