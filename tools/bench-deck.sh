@@ -13,8 +13,8 @@
 # nothing is built there: the binary is built here and shipped with the glibc
 # and C++ runtime it was linked against (SteamOS's is older), taking Vulkan,
 # the GPU driver and Wayland from SteamOS. tools/deck/bench.sh says how it
-# runs, and renders inside a headless gamescope so no display session is
-# needed and nothing paces the frames.
+# runs: inside a nested gamescope at a fixed 1280x800, which is how a game
+# runs there, with nothing pacing the frames.
 #
 # The bench loads no files at all (its shaders are embedded and its palette is
 # generated), so the Deck gets no checkout: the commit only has to reach the
@@ -22,7 +22,15 @@
 # means something.
 #
 # Results land in bench_results/ as deck-<label>-<stamp>.{frames,summary}.csv,
-# alongside toth's, for `bench --compare` and tools/bench-ab/.
+# alongside toth's, for `bench --compare` and tools/bench-ab/. The package
+# carries tools/bench-ab as ab/, so a run there can have the sampler and the
+# verdicts alongside it:
+#
+#   ssh <deck> 'BENCH_AB_DIR=$HOME/r/ab BENCH_RESULTS=$HOME/r/results \
+#     BENCH_PIDFILE_OWNER=cmd tarasaur-bench/ab/run.sh tarasaur-bench/bench <label>'
+#
+# BENCH_PIDFILE_OWNER=cmd matters: the launcher wraps the bench in gamescope,
+# which forks, so the launcher records the measured pid rather than run.sh.
 #
 #   DECK     ssh target of the Deck       (steamdeck)
 #   REMOTE   its package directory        (tarasaur-bench)
@@ -61,6 +69,12 @@ package() {
 	done
 	cp tools/deck/bench.sh "$PKG/bench"
 	chmod +x "$PKG/bench"
+	# The A/B harness travels with the package: install rsyncs --delete, so
+	# anything merely copied alongside gets wiped by the next install. It is
+	# pure bash and awk, and the sampler has to run on the machine under test.
+	mkdir -p "$PKG/ab"
+	cp tools/bench-ab/*.sh tools/bench-ab/*.awk "$PKG/ab/"
+	chmod +x "$PKG/ab"/*.sh
 	audit
 	du -sh "$PKG" >&2
 }
