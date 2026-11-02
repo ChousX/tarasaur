@@ -3441,7 +3441,7 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
     let stem = format!("{}-{}", bench.out.label, bench.out.stamp);
     let commit = &bench.out.commit;
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} quick={} dig_radius={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} quick={} dig_radius={} compute_threads={}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
@@ -3452,6 +3452,11 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         bench.out.small_arenas,
         bench.out.quick,
         bench.out.dig_radius,
+        // What the compute pool actually got, not what was asked for. A flag
+        // A/B whose flag silently did nothing measures a variant against
+        // itself and reads as a clean null result, so the run states its own
+        // pool size rather than leaving it to be trusted.
+        bevy::tasks::ComputeTaskPool::get().thread_num(),
     );
 
     let mut frames = header.clone();
