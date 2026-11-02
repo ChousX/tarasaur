@@ -420,18 +420,41 @@ fn main() -> AppExit {
     let world_dir = manifest.join("target").join("bench-world");
     let _ = std::fs::remove_dir_all(&world_dir);
 
+    // Bevy's default gives io and async_compute 25% of the cores each (capped
+    // at 4) and compute whatever is left: 8 of 16 cores on this machine. The
+    // CSG and padding scopes are the critical path while editing and only
+    // reach ~5.7 busy cores, while io and async_compute sit idle mid-edit, so
+    // give compute a floor of all but two cores instead. This oversubscribes
+    // on purpose: idle pool threads block rather than spin.
+    let compute_floor = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .saturating_sub(2)
+        .max(1);
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(render_plugin()).set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "tarasaur bench".into(),
-            // Steam Deck's native resolution.
-            resolution: WindowResolution::new(1280, 800),
-            present_mode: PresentMode::AutoNoVsync,
-            resizable: false,
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(render_plugin())
+            .set(TaskPoolPlugin {
+                task_pool_options: TaskPoolOptions {
+                    compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+                        min_threads: compute_floor,
+                        ..TaskPoolOptions::default().compute
+                    },
+                    ..default()
+                },
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "tarasaur bench".into(),
+                    // Steam Deck's native resolution.
+                    resolution: WindowResolution::new(1280, 800),
+                    present_mode: PresentMode::AutoNoVsync,
+                    resizable: false,
+                    ..default()
+                }),
+                ..default()
+            }),
+    )
     .add_plugins((
         TarasaurPlugin {
             save_dir: world_dir,
