@@ -11,9 +11,16 @@
 # ssh that starts it. Tailscale's ssh server reaps the whole session when the
 # connection goes, `setsid` and `nohup` included -- a detached run died three
 # seconds in, taking its own exit status with it -- and a run long enough to
-# matter is exactly the one a dropped connection kills. We poll for the unit
-# to finish instead, slowly: the poll is an ssh login on the machine under
-# test, and it lands in the `other` CPU column of whatever phase is running.
+# matter is exactly the one a dropped connection kills.
+#
+# The run then says when it is finished, rather than being asked: its last act
+# is to open a TCP connection back to this host over the tailnet, and we block
+# on one `nc -l` until it arrives. Polling instead was both unreliable and
+# self-defeating -- every check is an ssh login on the machine under test, and
+# it lands in the `other` CPU column of whichever phase is running, which is
+# the column the disturbance verdict reads. POLL remains as the fallback for
+# when the rendezvous cannot be set up (no `tailscale ip`, no `nc`, no
+# `socat` on the Deck).
 #
 # e.g. `tools/bench-deck.sh`, `tools/bench-deck.sh arenas -- --small-arenas`.
 #
@@ -44,7 +51,8 @@
 #   REMOTE   its package directory        (tarasaur-bench)
 #   RUNDIR   its scratch/results parent   (tarasaur-run)
 #   LABEL    result label                 (deck-<short sha>)
-#   POLL     seconds between completion checks (30)
+#   POLL     seconds between completion checks, when falling back (30)
+#   NOTIFY_PORT  the port the Deck reports completion on (45987)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DECK=${DECK:-steamdeck}
@@ -125,13 +133,31 @@ run_detached() {
 	local home
 	home=$(ssh "$DECK" 'echo $HOME')
 	local log="$home/$RUNDIR/$unit.log"
+	# Does the Deck have a way to call back, and do we have a way to listen?
+	local port=${NOTIFY_PORT:-45987} ip='' send=''
+	if command -v nc >/dev/null; then
+		ip=$(tailscale ip -4 2>/dev/null | head -1)
+		[ -n "$ip" ] && send=$(ssh "$DECK" 'command -v socat || command -v nc' |
+			head -1)
+	fi
+	# `; :` so a failed callback can't change the unit's own exit status, and
+	# the log is flushed before it fires -- it is what we read on waking.
+	local tail=''
+	[ -n "$send" ] && tail="; echo \"$unit done rc=\$?\" | \
+		$send - TCP:$ip:$port 2>/dev/null; :"
 	ssh "$DECK" "mkdir -p $home/$RUNDIR && systemd-run --user --unit=$unit \
 		--collect --service-type=exec \
-		bash -lc $(printf '%q' "{ $1 ; } > $log 2>&1")" >&2
-	echo "+ $unit started on $DECK; polling every ${POLL:-30}s" >&2
-	while ssh "$DECK" "systemctl --user is-active $unit >/dev/null 2>&1"; do
-		sleep "${POLL:-30}"
-	done
+		bash -lc $(printf '%q' "{ $1 ; } > $log 2>&1$tail")" >&2
+	if [ -n "$tail" ]; then
+		echo "+ $unit started on $DECK; waiting for it to report on $ip:$port" >&2
+		# One blocking listen, no traffic to the Deck at all until it answers.
+		nc -l "$ip" "$port" >&2
+	else
+		echo "+ $unit started on $DECK; no callback available, polling every ${POLL:-30}s" >&2
+		while ssh "$DECK" "systemctl --user is-active $unit >/dev/null 2>&1"; do
+			sleep "${POLL:-30}"
+		done
+	fi
 	ssh "$DECK" "cat $log; rm -f $log"
 }
 
