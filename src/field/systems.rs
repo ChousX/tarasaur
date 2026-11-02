@@ -382,11 +382,24 @@ pub fn process_sdf_csg_spheres(
         let (mid, half) = sweep.bounds(op.radius + reach_world);
         let half_len = sweep.from.distance(sweep.to) * 0.5;
         resident.touch_sphere(mid, op.radius + reach_world + half_len);
-        queued.extend(overlapping_chunks(mid, half).map(|chunk_pos| DeferredEdit {
-            chunk_pos,
-            edit: *op,
-            age: 0,
-        }));
+        // `overlapping_chunks` enumerates the capsule's bounding box, and at
+        // the sandbox's brush sizes about two in five of those chunks are
+        // corners the capsule itself cannot reach. Each one still cost a
+        // task, a six-neighbour gather, a `CsgDelta` and a sweep of every
+        // row before finding nothing in reach.
+        let reach = op.radius + reach_world;
+        queued.extend(
+            overlapping_chunks(mid, half)
+                .filter(|chunk_pos| {
+                    let low = chunk_pos.as_vec3() * CHUNK_SIZE;
+                    sweep.box_gap(low, low + Vec3::splat(CHUNK_SIZE)) <= reach
+                })
+                .map(|chunk_pos| DeferredEdit {
+                    chunk_pos,
+                    edit: *op,
+                    age: 0,
+                }),
+        );
     }
 
     // The editable ones go into waves, each chunk at most once per wave, so

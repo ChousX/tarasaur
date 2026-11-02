@@ -126,6 +126,18 @@ impl Sweep {
         p.distance(ab.mul_add(Vec3::splat(t), self.from))
     }
 
+    /// A lower bound on the distance from the segment to the box
+    /// `[min, max]`: the gap between the box and the segment's own bounding
+    /// box, per axis. Never more than the true distance -- the segment lies
+    /// inside its box -- so rejecting an edit on it is always safe, and for
+    /// a sweep short against the box it is as good as exact.
+    #[must_use]
+    pub fn box_gap(&self, min: Vec3, max: Vec3) -> f32 {
+        let lo = self.from.min(self.to);
+        let hi = self.from.max(self.to);
+        (min - hi).max(lo - max).max(Vec3::ZERO).length()
+    }
+
     /// The segment's midpoint, and the half extent of the box around its
     /// capsule of `radius`.
     #[must_use]
@@ -924,6 +936,67 @@ mod tests {
 
     /// And it should be tight for a sphere, or the bound buys nothing: the
     /// span's width is the chord, within one step of it.
+    /// `Sweep::box_gap` decides whether a chunk sees an edit at all, so it
+    /// must never read further than the truth: a chunk it puts out of reach
+    /// is a chunk the brush silently fails to edit. Checks it against the
+    /// real distance, sampled over the segment and the box, for sweeps that
+    /// miss the box, graze it and run through it.
+    #[test]
+    fn a_box_is_never_further_than_box_gap_says() {
+        let (low, high) = (Vec3::splat(10.0), Vec3::splat(20.0));
+        let cases = [
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),
+            (Vec3::new(15.0, 15.0, 15.0), Vec3::new(15.0, 15.0, 15.0)),
+            (Vec3::new(5.0, 15.0, 15.0), Vec3::new(25.0, 15.0, 15.0)),
+            (Vec3::new(9.0, 9.0, 9.0), Vec3::new(9.5, 21.0, 30.0)),
+            (Vec3::new(-5.0, 30.0, 12.0), Vec3::new(40.0, 30.0, 12.0)),
+            (Vec3::new(30.0, 30.0, 30.0), Vec3::new(30.0, 30.0, 30.0)),
+        ];
+        for (from, to) in cases {
+            let sweep = Sweep { from, to };
+            let gap = sweep.box_gap(low, high);
+            // The real distance, by sampling both the segment and the box.
+            let mut truth = f32::INFINITY;
+            for i in 0..=40 {
+                let p = from.lerp(to, f32_from_i32(i) / 40.0);
+                for ix in 0..=10 {
+                    for iy in 0..=10 {
+                        for iz in 0..=10 {
+                            let t = Vec3::new(
+                                f32_from_i32(ix) / 10.0,
+                                f32_from_i32(iy) / 10.0,
+                                f32_from_i32(iz) / 10.0,
+                            );
+                            let q = low + (high - low) * t;
+                            truth = truth.min(p.distance(q));
+                        }
+                    }
+                }
+            }
+            assert!(
+                gap <= truth + 1e-3,
+                "box_gap {gap} reads further than the real {truth} for {from:?}..{to:?}"
+            );
+        }
+    }
+
+    /// For a brush that barely moves -- a held stroke, which is what the
+    /// bench's dig and the cursor send -- the bound is the real distance, so
+    /// nothing in reach is rejected and nothing out of it is kept.
+    #[test]
+    fn box_gap_is_exact_for_a_still_brush() {
+        let (low, high) = (Vec3::splat(10.0), Vec3::splat(20.0));
+        for ix in 0..24 {
+            for iy in 0..24 {
+                let p = Vec3::new(f32_from_i32(ix) * 1.5, f32_from_i32(iy) * 1.5, 15.0);
+                // Point to axis-aligned box: the per-axis gap, exactly.
+                let want = (low - p).max(p - high).max(Vec3::ZERO).length();
+                let got = Sweep::point(p).box_gap(low, high);
+                assert!((got - want).abs() < 1e-4, "{got} vs {want} at {p:?}");
+            }
+        }
+    }
+
     #[test]
     fn span_is_tight_for_a_sphere() {
         let sweep = Sweep::point(Vec3::new(5.0, 5.0, 5.0));
