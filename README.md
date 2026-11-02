@@ -275,6 +275,11 @@ cargo run --release --example bench -- --compare bench_results/A.summary.csv ben
 cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 ```
 
+`--out DIR` and `--world-dir DIR` move the results and the scratch world,
+and `--commit <sha>` fills in the result header's `commit=`. All three
+default under the checkout the binary was built from, so a run on another
+machine needs them (`tools/bench-deck.sh` passes all three).
+
 `tools/bench-ab/ab.sh <name> <bench-A> <bench-B> [pairs] [-- bench args]`
 runs two bench binaries in turn (`--quick` unless given other args) with a
 system sampler alongside: CPU (whole system, the bench, everything else), GPU
@@ -284,10 +289,31 @@ screenshot diffs go to `target/bench-ab/exp/<name>.txt`. Copy each variant's
 binary out of `target/` before building the next; `tools/bench-ab/run.sh` is
 a single run.
 
+A run is rejected, and rerun, when it isn't a measurement: other load
+disturbed a measured phase, the GPU thermally clamped, or a compositor capped
+the frame rate at the display refresh. That last one is worth knowing about —
+`AutoNoVsync` is not always honoured, and a cap reads as "exactly 60 fps"
+rather than as a failure. Being *slower* than the refresh is a measurement,
+not a rejection. On an integrated GPU the sampler also records the SoC power
+rail against its cap, the GPU temperature and the CPU clock; at a shared 15 W
+budget the GPU clock dropping during a CPU-bound phase is correct behaviour,
+so power is reported and never used to reject.
+
 On a Steam Deck, run `tools/bench-deck.sh [label] [-- bench args]` from a
-checkout on the Deck. It builds in a distrobox (created on first run, with
-Rust and Bevy's deps), works over ssh too (it draws on the Deck's screen),
-and labels results `deck-<label>` (default: the commit hash).
+checkout **here**, not on the Deck. SteamOS has no compiler and its root is
+read-only, so the bench is built here and shipped with the loader and C
+runtime it was linked against, taking Vulkan, the driver and Wayland from
+SteamOS; everything else it needs is checked to be there at package time. The
+bench loads no files, so the Deck needs no checkout. Results come back to
+`bench_results/` labelled `deck-<label>` (default: the commit hash).
+
+`tools/deck/bench.sh` is the launcher installed on the Deck. It runs the
+bench inside a nested gamescope, which is how a game runs there: a real
+swapchain, present and composite path, with the render resolution fixed at
+1280x800 whatever the host does with gamescope's window. Set `GAMESCOPE` to
+change the wrapper — `--backend headless` to prove a cap is the host
+compositor's, `--backend drm` to put it on the Deck's own panel at its real
+refresh rate.
 
 CPU profiling uses [Tracy](https://github.com/wolfpld/tracy). The dev shell
 pins Tracy 0.14.1, the protocol version Bevy 0.20's client speaks
