@@ -29,7 +29,7 @@
 out=$1
 pidfile=$2
 ncpu=$(nproc 2>/dev/null || echo 1)
-INTERVAL=${INTERVAL:-$([[ $ncpu -le 8 ]] && echo 1.0 || echo 0.5)}
+INTERVAL=${INTERVAL:-$([[ $ncpu -le 8 ]] && echo 0.25 || echo 0.5)}
 GPU_DEVFREQ=${GPU_DEVFREQ:-$(ls -d /sys/class/devfreq/*gpu* 2>/dev/null | head -1)}
 
 # An integrated GPU reports clock, power and temperature through amdgpu's

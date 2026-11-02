@@ -21,8 +21,8 @@
 #                    does -- otherwise we would time the wrapper.
 #   DISTURB_CPU_PCT  other-process CPU that spoils a phase (15)
 #   DISTURB_CPU_PCT_DIG
-#                    the same for dig, which has the lowest floor and
-#                    carries the most weight (5)
+#                    the same for dig, which has the tightest floor and
+#                    carries the most weight (10)
 #   DISTURB_GPU_PCT  other-process GPU that spoils a phase (5)
 #   DISTURB_MIN_SAMPLES
 #                    samples a phase needs before it can be graded at all (3)
@@ -83,7 +83,7 @@ pre=$(awk '/^# invariants/ {
 [[ -n $pre ]] && echo "preconditions: $pre" >>"$base.sys.summary"
 
 verdict_notes=$(awk \
-  -v dcpu="${DISTURB_CPU_PCT:-15}" -v ddig="${DISTURB_CPU_PCT_DIG:-5}" \
+  -v dcpu="${DISTURB_CPU_PCT:-15}" -v ddig="${DISTURB_CPU_PCT_DIG:-10}" \
   -v dgpu="${DISTURB_GPU_PCT:-5}" -v minn="${DISTURB_MIN_SAMPLES:-3}" \
   -v tmax="${THROTTLE_DEGC:-92}" '
   # Every measured phase, not just the steady ones: a dig disturbed by
@@ -96,11 +96,19 @@ verdict_notes=$(awk \
     # rejected for a one-sample `spin`. Say the phase went unjudged instead
     # of throwing the run away over it.
     if ($2 + 0 < minn) { thin = thin " " $1 "(n=" $2 ")"; next }
-    # dig gets a tighter bound: it saturates the CPU, so background work is
-    # starved there -- five of six runs measured 3.4-3.6% other -- well under
-    # the 8-11% the lighter phases idle at, and every conclusion rests on it.
-    # The sixth measured 6.3% and came out 5% slow, and the flat 15% graded
-    # it clean. 5% leaves room over the floor and still catches that run.
+    # dig gets a tighter bound, because its floor is the steadiest and
+    # every conclusion rests on it. Measured over six Deck runs at this
+    # interval, other-process CPU per phase was: dig 7.6-8.0, box 7.1-7.4,
+    # query 7.0-8.0, fly 7.5-8.0, edit 8.0-8.3, sculpt 7.4-8.9, reslot
+    # 7.6-8.7, visibility 7.7-8.8, hold 9.7-10.2, spin 9.2-11.3. So 15 clears
+    # every floor and dig can afford 10: two points over its worst, and low
+    # enough to catch the run that once measured 2.8 points above its floor,
+    # came out 5% slow, and graded clean.
+    #
+    # These are floors, not thresholds, and they move with the sampling
+    # interval and with how the run is launched -- a transient unit reads
+    # ~2 points higher than plain ssh. Re-measure before trusting them, which
+    # is the mistake that produced the previous value here.
     lim = ($1 == "dig" ? ddig : dcpu)
     if ($5 > lim || $9 > dgpu) bad = bad " " $1 "(cpu " $5 " gpu " $9 ")"
   }
