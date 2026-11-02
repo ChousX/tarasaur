@@ -64,7 +64,7 @@
 #   RETRIES      attempts at a disturbed run       (3)
 #   A_ARGS       extra bench flags for variant A only
 #   B_ARGS       extra bench flags for variant B only
-#   KEEP_BUILDS  don't delete the per-variant target dirs afterwards
+#   AB_TARGET_DIR  build the variants here instead of the checkout's target/
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo=$PWD
@@ -119,10 +119,20 @@ resolve() {
 		git worktree add --detach -f "$wt" "$sha" >&2
 		# direnv runs in the main checkout, whose .envrc is the allowed one;
 		# the worktree supplies only the manifest.
-		CARGO_TARGET_DIR=$work/target-$slot \
+		#
+		# The checkout's own target/ by default, not a private one per variant.
+		# A private target dir means a cold build of the whole dependency tree
+		# -- minutes of Bevy -- for each variant, where sharing the warm one
+		# recompiles just this crate: 8 seconds for a variant near HEAD, which
+		# is what an A/B of two adjacent commits always is. The binary is
+		# copied straight out, so the variants cannot clobber each other; the
+		# only cost is that the working tree recompiles once afterwards.
+		# AB_TARGET_DIR overrides it when a variant is far enough from HEAD
+		# that sharing would thrash more than it saves.
+		CARGO_TARGET_DIR=${AB_TARGET_DIR:-$repo/target} \
 			direnv exec "$repo" cargo build --release --example bench \
 			--manifest-path "$wt/Cargo.toml" >&2
-		cp "$work/target-$slot/release/examples/bench" "$out"
+		cp "${AB_TARGET_DIR:-$repo/target}/release/examples/bench" "$out"
 		git worktree remove --force "$wt"
 		echo "$slot $spec $(git rev-parse --short "$sha")" >>"$work/refs.txt"
 	fi
@@ -327,5 +337,4 @@ sums() {
 	# have to run there. ab.sh keeps them because its binaries are local.
 } | tee -a "$log"
 
-[ -n "${KEEP_BUILDS:-}" ] || rm -rf "$work"/target-A "$work"/target-B
 echo "log: $log" >&2
