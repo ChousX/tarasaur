@@ -1,84 +1,193 @@
 #!/usr/bin/env bash
-# Run the bench on a Steam Deck, from a checkout on the Deck itself.
+# Runs the bench (examples/bench.rs) on a Steam Deck and brings the results
+# back. Run it from this checkout on an x86_64 host; the Deck itself needs
+# nothing but ssh, rsync and its own Vulkan driver.
 #
-#   tools/bench-deck.sh [label] [-- extra bench args]
+#   tools/bench-deck.sh [label] [-- bench args...]   # build, install, run, fetch
+#   tools/bench-deck.sh install                      # build and install only
+#   tools/bench-deck.sh package                      # build and lay out only
 #
-# e.g. `tools/bench-deck.sh`, `tools/bench-deck.sh lod-a -- --msaa 1`.
-# Works from Desktop Mode or over ssh (`ssh deck@steamdeck`). The bench runs
-# headless; only `--renderdoc` opens a window, on the Deck's own screen (:0)
-# when there is no display in the environment.
+# The run happens in a transient systemd user unit on the Deck, not under the
+# ssh that starts it. Tailscale's ssh server reaps the whole session when the
+# connection goes, `setsid` and `nohup` included -- a detached run died three
+# seconds in, taking its own exit status with it -- and a run long enough to
+# matter is exactly the one a dropped connection kills.
 #
-# Builds and runs inside a distrobox (preinstalled on SteamOS 3.5+), since
-# SteamOS has no compiler or dev headers and its root is read-only. The first
-# run creates an Ubuntu container with Rust, Bevy's build deps and the Deck's
-# Vulkan driver, which takes a few minutes. Results land in bench_results/ as
-# deck-<label>-<timestamp>.{frames,summary}.csv.
+# The run then says when it is finished, rather than being asked: its last act
+# is to open a TCP connection back to this host over the tailnet, and we block
+# on one `nc -l` until it arrives. Polling instead was both unreliable and
+# self-defeating -- every check is an ssh login on the machine under test, and
+# it lands in the `other` CPU column of whichever phase is running, which is
+# the column the disturbance verdict reads. POLL remains as the fallback for
+# when the rendezvous cannot be set up (no `tailscale ip`, no `nc`, no
+# `socat` on the Deck).
 #
-# Env: JOBS (cargo build jobs, default 4: a full-parallel Bevy build can run
-# the Deck out of memory), BOX (container name, default tarasaur),
-# DISPLAY (default :0 when nothing is set).
+# e.g. `tools/bench-deck.sh`, `tools/bench-deck.sh arenas -- --small-arenas`.
+#
+# SteamOS has no compiler, its root is read-only and its /home runs full, so
+# nothing is built there: the binary is built here and shipped with the glibc
+# and C++ runtime it was linked against (SteamOS's is older), taking Vulkan,
+# the GPU driver and Wayland from SteamOS. tools/deck/bench.sh says how it
+# runs: inside a nested gamescope at a fixed 1280x800, which is how a game
+# runs there, with nothing pacing the frames.
+#
+# The bench loads no files at all (its shaders are embedded and its palette is
+# generated), so the Deck gets no checkout: the commit only has to reach the
+# result header, which `--commit` does. The tree must be clean so that header
+# means something.
+#
+# Results land in bench_results/ as deck-<label>-<stamp>.{frames,summary}.csv,
+# alongside toth's, for `bench --compare` and tools/bench-ab/. The package
+# carries tools/bench-ab as ab/, so a run there can have the sampler and the
+# verdicts alongside it:
+#
+#   ssh <deck> 'BENCH_AB_DIR=$HOME/r/ab BENCH_RESULTS=$HOME/r/results \
+#     BENCH_PIDFILE_OWNER=cmd tarasaur-bench/ab/run.sh tarasaur-bench/bench <label>'
+#
+# BENCH_PIDFILE_OWNER=cmd matters: the launcher wraps the bench in gamescope,
+# which forks, so the launcher records the measured pid rather than run.sh.
+#
+#   DECK     ssh target of the Deck       (steamdeck)
+#   REMOTE   its package directory        (tarasaur-bench)
+#   RUNDIR   its scratch/results parent   (tarasaur-run)
+#   LABEL    result label                 (deck-<short sha>)
+#   POLL     seconds between completion checks, when falling back (30)
+#   NOTIFY_PORT  the port the Deck reports completion on (45987)
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
+DECK=${DECK:-steamdeck}
+REMOTE=${REMOTE:-tarasaur-bench}
+RUNDIR=${RUNDIR:-tarasaur-run}
+PKG=target/deck/tarasaur-bench
 
-box="${BOX:-tarasaur}"
-label="$(git rev-parse --short HEAD 2>/dev/null || echo run)"
-if [[ $# -gt 0 && "$1" != "--" ]]; then
-    label="$1"
-    shift
-fi
-if [[ "${1:-}" == "--" ]]; then
-    shift
-fi
-
-if ! command -v distrobox >/dev/null; then
-    echo "error: distrobox not found (it ships with SteamOS 3.5+; update SteamOS)" >&2
-    exit 1
+# cargo comes from the devenv shell; outside it, borrow one.
+if ! command -v cargo >/dev/null; then
+	command -v direnv >/dev/null || { echo "no cargo and no direnv: enter the devenv shell" >&2; exit 1; }
+	exec direnv exec . "$0" "$@"
 fi
 
-# Over ssh there is no display; `--renderdoc`'s window uses the one on the
-# Deck's screen. distrobox passes these through to the container.
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
-    export DISPLAY=:0
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-fi
-
-box_exists() {
-    distrobox list --no-color 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2); print $2}' | grep -qx "$box"
+# Builds the bench and lays out $PKG: the binary, the loader and C/C++ runtime
+# it was linked against, and the launcher.
+package() {
+	[ "$(uname -m)" = x86_64 ] || { echo "package: needs an x86_64 host" >&2; exit 1; }
+	cargo build --release --example bench
+	local bin=target/release/examples/bench
+	lib() { ldd "$bin" | awk -v l="$1" '$1 == l { print $3 }'; }
+	rm -rf "$PKG"
+	mkdir -p "$PKG/bin" "$PKG/lib"
+	cp "$bin" "$PKG/bin/bench"
+	# Every glibc .so from the one the bench links, so the bundled loader has
+	# the matching set rather than a mix with SteamOS's.
+	cp -L "$(dirname "$(lib libc.so.6)")"/*.so* "$PKG/lib/"
+	# The compiler runtime, when the bench links it (it has no C++ today).
+	local l
+	for l in libstdc++.so.6 libgcc_s.so.1; do
+		[ -n "$(lib "$l")" ] && cp -L "$(lib "$l")" "$PKG/lib/"
+	done
+	cp tools/deck/bench.sh "$PKG/bench"
+	chmod +x "$PKG/bench"
+	# The A/B harness travels with the package: install rsyncs --delete, so
+	# anything merely copied alongside gets wiped by the next install. It is
+	# pure bash and awk, and the sampler has to run on the machine under test.
+	mkdir -p "$PKG/ab"
+	cp tools/bench-ab/*.sh tools/bench-ab/*.awk "$PKG/ab/"
+	chmod +x "$PKG/ab"/*.sh
+	audit
+	du -sh "$PKG" >&2
 }
 
-# A container whose first-run setup failed can't be entered; start over.
-if box_exists && ! distrobox enter "$box" -- true >/dev/null 2>&1; then
-    echo "+ distrobox '$box' is broken (setup failed earlier); recreating it" >&2
-    distrobox rm --force "$box"
-fi
+# Everything the bench links that we aren't bundling has to already be on the
+# Deck, where it comes from /usr/lib. Checking here turns "built fine, won't
+# start" into a build-time error naming the library.
+audit() {
+	local missing=() soname
+	while read -r soname; do
+		[ -e "$PKG/lib/$soname" ] && continue
+		missing+=("$soname")
+	# linux-vdso is mapped by the kernel and has no file anywhere.
+	done < <(ldd "$PKG/bin/bench" |
+		awk '$1 ~ /\.so/ && $1 !~ /^\// && $1 !~ /^linux-vdso/ {print $1}')
+	[ ${#missing[@]} -eq 0 ] && return 0
+	echo "+ checking ${#missing[@]} system libraries on $DECK: ${missing[*]}" >&2
+	local absent
+	absent=$(ssh "$DECK" "for s in ${missing[*]}; do
+		[ -e /usr/lib/\$s ] || echo \$s; done")
+	[ -z "$absent" ] && return 0
+	echo "error: $DECK has no $absent (and we aren't bundling it)" >&2
+	exit 1
+}
 
-if ! box_exists; then
-    echo "+ creating distrobox '$box' (first run only)" >&2
-    # Ubuntu: distrobox's best-tested image (an Arch one failed to set up
-    # with SteamOS's distrobox).
-    # Bevy's build and runtime deps, plus the Deck's Vulkan driver (mesa).
-    distrobox create --yes --name "$box" \
-        --image docker.io/library/ubuntu:24.04 \
-        --additional-packages "build-essential curl git pkg-config libasound2-dev
-            libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev
-            libxrandr-dev libxi-dev libvulkan1 mesa-vulkan-drivers"
-    if ! distrobox enter "$box" -- true; then
-        echo "error: setting up distrobox '$box' failed; see: podman logs $box" >&2
-        exit 1
-    fi
-fi
+install_pkg() {
+	rsync -a --delete "$PKG/" "$DECK:$REMOTE/"
+}
 
-# The container shares $HOME, so rustup installs into ~/.cargo and ~/.rustup.
-distrobox enter "$box" -- sh -c '[ -x "$HOME/.cargo/bin/cargo" ] ||
-    curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs |
-    sh -s -- -y --profile minimal --no-modify-path'
+# Runs a command on the Deck in a transient systemd user unit and waits for
+# it, so the run outlives the ssh that started it (see the header). Its output
+# goes to a log on the Deck and is printed once it finishes, rather than
+# streamed, because holding the connection open is the thing we're avoiding.
+run_detached() {
+	local unit=tarasaur-bench-$$
+	# An absolute path, resolved here: the command is quoted with %q on its way
+	# to `bash -lc`, so a `$HOME` in it would arrive as four literal characters
+	# and the unit would write its log relative to wherever systemd put it.
+	local home
+	home=$(ssh "$DECK" 'echo $HOME')
+	local log="$home/$RUNDIR/$unit.log"
+	# Does the Deck have a way to call back, and do we have a way to listen?
+	local port=${NOTIFY_PORT:-45987} ip='' send=''
+	if command -v nc >/dev/null; then
+		ip=$(tailscale ip -4 2>/dev/null | head -1)
+		[ -n "$ip" ] && send=$(ssh "$DECK" 'command -v socat || command -v nc' |
+			head -1)
+	fi
+	# `; :` so a failed callback can't change the unit's own exit status, and
+	# the log is flushed before it fires -- it is what we read on waking.
+	local tail=''
+	[ -n "$send" ] && tail="; echo \"$unit done rc=\$?\" | \
+		$send - TCP:$ip:$port 2>/dev/null; :"
+	ssh "$DECK" "mkdir -p $home/$RUNDIR && systemd-run --user --unit=$unit \
+		--collect --service-type=exec \
+		bash -lc $(printf '%q' "{ $1 ; } > $log 2>&1$tail")" >&2
+	if [ -n "$tail" ]; then
+		echo "+ $unit started on $DECK; waiting for it to report on $ip:$port" >&2
+		# One blocking listen, no traffic to the Deck at all until it answers.
+		nc -l "$ip" "$port" >&2
+	else
+		echo "+ $unit started on $DECK; no callback available, polling every ${POLL:-30}s" >&2
+		while ssh "$DECK" "systemctl --user is-active $unit >/dev/null 2>&1"; do
+			sleep "${POLL:-30}"
+		done
+	fi
+	ssh "$DECK" "cat $log; rm -f $log"
+}
 
-# Note the power state: a Deck on battery or with a TDP cap benches slower.
-if [[ -r /sys/class/power_supply/ACAD/online ]]; then
-    [[ "$(cat /sys/class/power_supply/ACAD/online)" == 1 ]] || echo "warning: on battery" >&2
-fi
-
-cmd=(cargo run --release -j "${JOBS:-4}" --example bench -- --label "deck-$label" "$@")
-echo "+ ${cmd[*]}  (in distrobox '$box')" >&2
-distrobox enter "$box" -- sh -c 'PATH="$HOME/.cargo/bin:$PATH" exec "$@"' sh "${cmd[@]}"
+case ${1:-} in
+	package)
+		package
+		;;
+	install)
+		package
+		install_pkg
+		;;
+	*)
+		label=${LABEL:-deck-$(git rev-parse --short HEAD)}
+		if [[ $# -gt 0 && "$1" != "--" ]]; then
+			label=$1
+			shift
+		fi
+		[[ "${1:-}" == "--" ]] && shift
+		[ -z "$(git status --porcelain --untracked-files=no)" ] ||
+			{ echo "commit first: the result header records this commit" >&2; exit 1; }
+		package
+		install_pkg
+		# The scratch world goes on the Deck's own disk, not the build host's
+		# path baked into the binary.
+		run_detached "$REMOTE/bench --label $(printf '%q' "$label") \
+			--commit $(git rev-parse --short HEAD) \
+			--out \$HOME/$RUNDIR/results --world-dir \$HOME/$RUNDIR/world \
+			$(printf '%q ' "$@")"
+		mkdir -p bench_results
+		rsync -a "$DECK:$RUNDIR/results/" bench_results/
+		echo "results: bench_results/$label-*.summary.csv"
+		;;
+esac
