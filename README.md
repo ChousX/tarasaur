@@ -210,6 +210,20 @@ the main-world ones can be changed at runtime. Two more are plain resources:
 `CursorQueryMode` (cursor ray backend, `Auto` uses the CPU) and
 `ShowChunkBounds` (insert it to draw chunk bounds, colored by LOD).
 
+MSAA is the camera's, not this plugin's, but it is the largest single setting
+for terrain here and worth stating: **on a Steam Deck, prefer `Msaa::Off`.**
+Measured on a Deck at 1280x800 against 4x, three runs a variant: raster time
+falls 16-37% in every phase, and frame time falls 25% holding still, 24%
+spinning, 18% on a visibility sweep, 13% on reslot and 8% on box edits.
+
+It is not a fix for editing. `dig` improves 0.6%, inside the noise, even
+though its raster time falls 19% -- on a part where the CPU and GPU share one
+15 W rail, taking work off the GPU lowers its clock (267 to 219 MHz during
+`dig`) rather than banking the power, and the slower clock costs back on the
+GPU meshing what the cheaper raster saved (mesh time +17%). Expect MSAA to buy
+frame time in the phases that are raster-bound and nothing at all in the ones
+that are CPU-bound.
+
 The arenas size themselves from the device's
 `max_storage_buffer_binding_size` and `max_buffer_size`, capped by
 `ArenaConfig::max_buffer_bytes` (256 MiB by default; each arena takes about
