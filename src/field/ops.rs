@@ -991,8 +991,71 @@ mod tests {
     use crate::{
         field::Field,
         field::{LOD, SDF, SDF_BAND, VisibilityField},
-        num::{f32_from_i32, f32_from_u32, usize_from},
+        num::{f32_from_i32, f32_from_u32, u32_from_f32, usize_from},
     };
+
+    /// What the bound is actually for: how much of `range`'s box it stops
+    /// visiting, counted rather than timed.
+    ///
+    /// Deterministic and machine independent, which is the point --
+    /// `deck-improvements.md`'s method notes insist on counting the work
+    /// instead of trusting a proxy, and the -9.0% on dig came from removing
+    /// roughly half the visits at the sandbox's brush sizes. If the span
+    /// maths regresses, or a future variant quietly falls back to the whole
+    /// row, this fails here instead of only showing up as a slow Deck run.
+    ///
+    /// The box is worth stating separately: it keeps 29% even though its
+    /// shape *is* a box, because `range` pads by `margin + 1` on every axis
+    /// and the span only reaches `margin` past a face -- so the padding's
+    /// corners go unvisited.
+    #[test]
+    fn the_row_bound_removes_most_of_the_box() {
+        let size = UVec3::splat(64);
+        let margin = 2.0;
+        // (name, shape, the least % of visits it must remove)
+        let cases = [
+            ("sphere r10 centred", CsgShape::sphere(Vec3::splat(32.0), 10.0), 55.0),
+            (
+                "sphere r10 over a border",
+                CsgShape::sphere(Vec3::new(64.0, 32.0, 32.0), 10.0),
+                55.0,
+            ),
+            ("sphere r4", CsgShape::sphere(Vec3::splat(32.0), 4.0), 60.0),
+            (
+                "cube h8",
+                CsgShape::cuboid(Vec3::splat(32.0), Vec3::splat(8.0)),
+                20.0,
+            ),
+        ];
+        for (name, shape, least) in cases {
+            let Some((min, max)) = shape.range(margin, size) else {
+                panic!("{name}: no range at all");
+            };
+            let mut full: u64 = 0;
+            let mut bounded: u64 = 0;
+            for z in min.z..=max.z {
+                for y in min.y..=max.y {
+                    full += u64::from(max.x - min.x + 1);
+                    let Some((lo, hi)) = shape.x_span(margin, f32_from_u32(y), f32_from_u32(z))
+                    else {
+                        continue;
+                    };
+                    let first = min.x.max(u32_from_f32(lo.ceil()));
+                    let last = max.x.min(u32_from_f32(hi.floor()));
+                    if first <= last {
+                        bounded += u64::from(last - first) + 1;
+                    }
+                }
+            }
+            assert!(bounded < full, "{name}: the bound visits {bounded} of {full}");
+            let removed = 100.0 - 100.0 * f64::from(u32::try_from(bounded).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(full).unwrap_or(u32::MAX));
+            assert!(
+                removed >= least,
+                "{name}: bound removes {removed:.1}% of {full} visits, expected at least {least}%"
+            );
+        }
+    }
 
     /// The row bound must never exclude a voxel the shape can reach.
     ///
