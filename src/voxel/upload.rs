@@ -178,40 +178,56 @@ fn newest_pending<T: Send + Sync + 'static>(
 /// Active cells in a padded SDF volume, using exactly pass1's test: a cell
 /// is active when some but not all of its 8 corners are `<= 0`. Sizes the
 /// chunk's vertex range before the GPU meshes it.
+///
+/// This used to materialise a `Vec<u8>` of one byte per padded voxel (66^3 =
+/// 287 KB), and then a `Vec<Vec<&[u8]>>` of 66x66 row slices, per chunk per
+/// frame, before counting anything: ~4.3 MB and ~1000 allocations a frame at
+/// ~15 chunks. All of it to avoid re-deriving a sign test that is two
+/// instructions, which roughly doubled the pass's memory traffic -- and on the
+/// Deck that bus is shared with the GPU, which is doing 25 ms of work per dig
+/// frame. Zipping the byte view against its own tail keeps the rolling
+/// column-sum and drops both allocations -- `as_chunks` and `chunks_exact`
+/// are views, so nothing is materialised to walk the corners.
 fn count_active_cells(padded: &[u8], texture_size: u32) -> u32 {
     let size = usize_from(texture_size);
-    // snorm16, as uploaded (see quantize_sdf): same sign test as pass1.
-    let inside: Vec<u8> = padded
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&b| u8::from(i16::from_le_bytes(b) <= 0))
-        .collect();
     let Some(slab) = size.checked_mul(size) else {
         return 0;
     };
-    if size < 2 || Some(inside.len()) != slab.checked_mul(size) {
+    let Some(voxels) = slab.checked_mul(size) else {
+        return 0;
+    };
+    // snorm16, as uploaded (see quantize_sdf): same sign test as pass1. A
+    // view, not a copy -- a trailing odd byte is ignored, as before.
+    let vox = padded.as_chunks::<2>().0;
+    if size < 2 || vox.len() != voxels {
         return 0;
     }
-    // [z][y] -> row of x
-    let slabs: Vec<Vec<&[u8]>> = inside
-        .chunks_exact(slab)
-        .map(|s| s.chunks_exact(size).collect())
-        .collect();
+    let inside = |b: &[u8; 2]| u8::from(i16::from_le_bytes(*b) <= 0);
+    // The neighbour in +z and in +y is the same sequence offset by one slab
+    // and one row, so zipping a slice against its own tail walks every cell's
+    // eight corners with no index arithmetic and nothing allocated.
+    let Some(next_slab) = vox.get(slab..) else {
+        return 0;
+    };
     let mut total: u32 = 0;
-    for pair in slabs.windows(2) {
-        let [lo, hi] = pair else { continue };
-        for (lo_rows, hi_rows) in lo.windows(2).zip(hi.windows(2)) {
-            let (&[y0z0, y1z0], &[y0z1, y1z1]) = (lo_rows, hi_rows) else {
-                continue;
-            };
-            // Each corner is 0 or 1, so these sums stay tiny.
-            let mut columns = y0z0
-                .iter()
-                .zip(y1z0)
-                .zip(y0z1)
-                .zip(y1z1)
-                .map(|(((a, b), c), d)| a.wrapping_add(*b).wrapping_add(*c).wrapping_add(*d));
+    for (lo, hi) in vox.chunks_exact(slab).zip(next_slab.chunks_exact(slab)) {
+        let (Some(lo_next), Some(hi_next)) = (lo.get(size..), hi.get(size..)) else {
+            continue;
+        };
+        for (((y0z0, y1z0), y0z1), y1z1) in lo
+            .chunks_exact(size)
+            .zip(lo_next.chunks_exact(size))
+            .zip(hi.chunks_exact(size))
+            .zip(hi_next.chunks_exact(size))
+        {
+            // Each corner is 0 or 1, so a column of four is at most 4 and a
+            // cell's eight corners at most 8: both fit in a u8.
+            let mut columns = y0z0.iter().zip(y1z0).zip(y0z1).zip(y1z1).map(|(((a, b), c), d)| {
+                inside(a)
+                    .wrapping_add(inside(b))
+                    .wrapping_add(inside(c))
+                    .wrapping_add(inside(d))
+            });
             let Some(mut prev) = columns.next() else {
                 continue;
             };
@@ -856,6 +872,106 @@ mod tests {
             v[flatten_cube(x, y, z, n)] = -1.0;
         }
         SDF::gpu_bytes(&v)
+    }
+
+    // The allocating implementation count_active_cells replaced, kept here
+    // as the thing to check the fused one against. A rewrite of a counter
+    // is only worth having if it counts the same, and `counts_cells_with_a
+    // _sign_change` alone covers three tiny volumes.
+    fn allocating_reference(padded: &[u8], texture_size: u32) -> u32 {
+        let size = usize_from(texture_size);
+        // snorm16, as uploaded (see quantize_sdf): same sign test as pass1.
+        let inside: Vec<u8> = padded
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| u8::from(i16::from_le_bytes(b) <= 0))
+            .collect();
+        let Some(slab) = size.checked_mul(size) else {
+            return 0;
+        };
+        if size < 2 || Some(inside.len()) != slab.checked_mul(size) {
+            return 0;
+        }
+        // [z][y] -> row of x
+        let slabs: Vec<Vec<&[u8]>> = inside
+            .chunks_exact(slab)
+            .map(|s| s.chunks_exact(size).collect())
+            .collect();
+        let mut total: u32 = 0;
+        for pair in slabs.windows(2) {
+            let [lo, hi] = pair else { continue };
+            for (lo_rows, hi_rows) in lo.windows(2).zip(hi.windows(2)) {
+                let (&[y0z0, y1z0], &[y0z1, y1z1]) = (lo_rows, hi_rows) else {
+                    continue;
+                };
+                // Each corner is 0 or 1, so these sums stay tiny.
+                let mut columns = y0z0
+                    .iter()
+                    .zip(y1z0)
+                    .zip(y0z1)
+                    .zip(y1z1)
+                    .map(|(((a, b), c), d)| a.wrapping_add(*b).wrapping_add(*c).wrapping_add(*d));
+                let Some(mut prev) = columns.next() else {
+                    continue;
+                };
+                for next in columns {
+                    let corners = prev.wrapping_add(next);
+                    total = total.wrapping_add(u32::from(corners > 0 && corners < 8));
+                    prev = next;
+                }
+            }
+        }
+        total
+    }
+
+    /// A deterministic volume with a mix of signs. xorshift rather than a
+    /// dependency, so it is the same bytes on every run and on every machine.
+    fn noisy_volume(n: u32, seed: u64, inside_pct: u64) -> Vec<u8> {
+        let mut st = seed | 1;
+        let mut next = move || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let mut v = vec![0.0f32; usize_from(n).pow(3)];
+        for s in &mut v {
+            *s = if next() % 100 < inside_pct { -1.0 } else { 1.0 };
+        }
+        SDF::gpu_bytes(&v)
+    }
+
+    /// The point of the rewrite is that it counts the same thing. Sizes either
+    /// side of a slab, and densities from empty through solid: an all-inside
+    /// volume has every cell at 8 corners and must count 0, same as an
+    /// all-outside one, and those are the two ends the rolling sum gets wrong
+    /// if the `> 0 && < 8` test is mishandled.
+    #[test]
+    fn fused_count_matches_the_allocating_one() {
+        for &n in &[2u32, 3, 4, 5, 8, 17, 34] {
+            for &pct in &[0u64, 3, 50, 97, 100] {
+                for seed in 1u64..=3 {
+                    let bytes = noisy_volume(n, seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), pct);
+                    assert_eq!(
+                        count_active_cells(&bytes, n),
+                        allocating_reference(&bytes, n),
+                        "n={n} inside_pct={pct} seed={seed}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// A volume whose length doesn't match the size it claims is refused by
+    /// both, rather than counted partway.
+    #[test]
+    fn a_volume_that_isnt_the_claimed_cube_counts_zero() {
+        let bytes = noisy_volume(8, 7, 50);
+        for claimed in [1u32, 7, 9] {
+            assert_eq!(count_active_cells(&bytes, claimed), 0, "claimed={claimed}");
+            assert_eq!(allocating_reference(&bytes, claimed), 0, "claimed={claimed}");
+        }
     }
 
     #[test]
