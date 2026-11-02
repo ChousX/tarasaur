@@ -54,10 +54,36 @@ package() {
 	# Every glibc .so from the one the bench links, so the bundled loader has
 	# the matching set rather than a mix with SteamOS's.
 	cp -L "$(dirname "$(lib libc.so.6)")"/*.so* "$PKG/lib/"
-	cp -L "$(lib libstdc++.so.6)" "$(lib libgcc_s.so.1)" "$PKG/lib/"
+	# The compiler runtime, when the bench links it (it has no C++ today).
+	local l
+	for l in libstdc++.so.6 libgcc_s.so.1; do
+		[ -n "$(lib "$l")" ] && cp -L "$(lib "$l")" "$PKG/lib/"
+	done
 	cp tools/deck/bench.sh "$PKG/bench"
 	chmod +x "$PKG/bench"
+	audit
 	du -sh "$PKG" >&2
+}
+
+# Everything the bench links that we aren't bundling has to already be on the
+# Deck, where it comes from /usr/lib. Checking here turns "built fine, won't
+# start" into a build-time error naming the library.
+audit() {
+	local missing=() soname
+	while read -r soname; do
+		[ -e "$PKG/lib/$soname" ] && continue
+		missing+=("$soname")
+	# linux-vdso is mapped by the kernel and has no file anywhere.
+	done < <(ldd "$PKG/bin/bench" |
+		awk '$1 ~ /\.so/ && $1 !~ /^\// && $1 !~ /^linux-vdso/ {print $1}')
+	[ ${#missing[@]} -eq 0 ] && return 0
+	echo "+ checking ${#missing[@]} system libraries on $DECK: ${missing[*]}" >&2
+	local absent
+	absent=$(ssh "$DECK" "for s in ${missing[*]}; do
+		[ -e /usr/lib/\$s ] || echo \$s; done")
+	[ -z "$absent" ] && return 0
+	echo "error: $DECK has no $absent (and we aren't bundling it)" >&2
+	exit 1
 }
 
 install_pkg() {

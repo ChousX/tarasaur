@@ -43,8 +43,14 @@ if [[ ${BENCH_PIDFILE_OWNER:-} == cmd ]]; then
 else
   launch=(bash -c 'echo $$ >"$0"; exec "$@"' "$pidfile" "$bin" --label "$label" --out "$results" "$@")
 fi
-( systemd-inhibit --what=idle:sleep --who=tarasaur-bench --why="benchmark run" \
-    "${launch[@]}" 2>&1
+# Taking the sleep lock as well needs interactive polkit auth on SteamOS,
+# which an ssh session can't give; idle alone is granted and is what matters.
+inhibit=(systemd-inhibit --what=idle --who=tarasaur-bench --why="benchmark run")
+"${inhibit[@]}" true 2>/dev/null || {
+  echo "note: no idle lock available; the screen may blank mid-run" >&2
+  inhibit=()
+}
+( "${inhibit[@]}" "${launch[@]}" 2>&1
   echo "EXIT $?" ) |
   while IFS= read -r line; do
     printf '%s %s\n' "$(date +%s%3N)" "$(sed 's/\x1b\[[0-9;]*m//g' <<<"$line")"

@@ -44,15 +44,25 @@ fi
 
 # Keep the Deck awake while it measures: logind's idle lock, and in Desktop
 # mode Plasma's power management too (an ssh session holds neither on its own).
+#
+# `--what=idle` only: taking the sleep lock as well needs interactive polkit
+# auth here, which an ssh session can't give, and the whole run would die
+# before it started.
 if [ -z "${TARASAUR_AWAKE:-}" ]; then
 	export TARASAUR_AWAKE=1
+	inhibit="systemd-inhibit --what=idle --who=tarasaur --why=bench"
+	$inhibit true 2>/dev/null || {
+		echo "note: can't take an idle lock; the Deck may blank mid-run" >&2
+		inhibit=""
+	}
 	bus=/run/user/$(id -u)/bus
 	if [ -S "$bus" ] && command -v kde-inhibit >/dev/null && pgrep -x plasmashell >/dev/null; then
-		exec systemd-inhibit --what=idle:sleep --who=tarasaur --why=bench \
-			env DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
+		# shellcheck disable=SC2086
+		exec $inhibit env DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
 			kde-inhibit --power --screenSaver "$0" "$@"
 	fi
-	exec systemd-inhibit --what=idle:sleep --who=tarasaur --why=bench "$0" "$@"
+	# shellcheck disable=SC2086
+	exec $inhibit "$0" "$@"
 fi
 
 # gamescope needs these to reach the session's wayland socket, which an ssh
