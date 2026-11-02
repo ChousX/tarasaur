@@ -1,7 +1,9 @@
-//! The terrain point under the mouse (`CursorHit`), the chunk focus it
-//! drives, and the default brush (`CursorBrush`: dig, build, smooth,
-//! flatten, paint, fill, scrape) with the stroke it's drawing
-//! (`BrushStroke`). F8 cycles the query backend.
+//! The terrain point under the mouse (`CursorHit`) and the chunk focus it
+//! drives.
+//!
+//! Also the default brush (`CursorBrush`: dig, build, smooth, flatten,
+//! paint, fill, scrape) with the stroke it's drawing (`BrushStroke`). F8
+//! cycles the query backend.
 
 use bevy::{
     ecs::{message::MessageWriter, system::SystemParam},
@@ -494,7 +496,7 @@ pub fn draw_cursor_brush(
         // drawn where it cuts under the brush.
         let (point, normal) = stroke
             .0
-            .map_or((h.pos, brush.flatten_normal(&h)), |s| s.plane);
+            .map_or_else(|| (h.pos, brush.flatten_normal(&h)), |s| s.plane);
         let on_plane = center - normal * (center - point).dot(normal);
         let rotation = Quat::from_rotation_arc(Vec3::Z, normal);
         gizmos.circle(Isometry3d::new(on_plane, rotation), radius, color);

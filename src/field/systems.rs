@@ -293,6 +293,52 @@ struct CsgWork {
     op: SdfCsgSphere,
 }
 
+/// Every chunk of a wave's delta, worked out in parallel from the same state.
+///
+/// Each task reads its own chunk and its six face neighbours out of `fields`,
+/// so the borders see the state before any of this wave is written.
+fn csg_wave_deltas(
+    wave: &[CsgWork],
+    chunk_manager: &ChunkManager,
+    editable: &EditableChunks<SDF>,
+) -> Vec<CsgDelta> {
+    let mut fields: HashMap<IVec3, &SDF> = HashMap::new();
+    for w in wave {
+        for offset in [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y]
+            .into_iter()
+            .chain([IVec3::Z, IVec3::NEG_Z])
+        {
+            let pos = w.chunk_pos.saturating_add(offset);
+            if let Entry::Vacant(slot) = fields.entry(pos)
+                && let Some(sdf) = chunk_manager.get_chunk(&pos).and_then(|e| editable.get(e))
+            {
+                slot.insert(sdf);
+            }
+        }
+    }
+    let fields = &fields;
+    ComputeTaskPool::get().scope(|s| {
+        for w in wave {
+            s.spawn(async move {
+                let Some(sdf) = fields.get(&w.chunk_pos) else {
+                    return CsgDelta::default();
+                };
+                let size = sdf.size().x;
+                let origin = w.chunk_pos.as_vec3() * CHUNK_SIZE;
+                let voxel_size = CHUNK_SIZE / f32_from_u32(size);
+                sdf.csg_sphere_delta(
+                    w.op.sweep().to_grid(origin, voxel_size),
+                    w.op.radius / voxel_size,
+                    SDF_CSG_REACH_VOXELS,
+                    w.op.subtract,
+                    w.op.max_step.map(|s| s / voxel_size),
+                    |v, axis, positive| beyond_face(fields, w.chunk_pos, size, v, axis, positive),
+                )
+            });
+        }
+    })
+}
+
 /// The value one voxel past `sdf`'s face from `v` (on it), read from the
 /// face neighbour in `fields`: what a gradient on the chunk's border reads
 /// (see `FieldSphereOps::csg_sphere`). `None` if that neighbour isn't
@@ -386,46 +432,7 @@ pub fn process_sdf_csg_spheres(
         // its neighbours' borders directly, on every core; then all are
         // written. No DirtyField: CSG output is already a valid distance
         // field. `set` bumps version/inside_count, which drives re-extract.
-        let deltas: Vec<CsgDelta> = {
-            let mut fields: HashMap<IVec3, &SDF> = HashMap::new();
-            for w in &wave {
-                for offset in [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y]
-                    .into_iter()
-                    .chain([IVec3::Z, IVec3::NEG_Z])
-                {
-                    let pos = w.chunk_pos.saturating_add(offset);
-                    if let Entry::Vacant(slot) = fields.entry(pos)
-                        && let Some(sdf) =
-                            chunk_manager.get_chunk(&pos).and_then(|e| editable.get(e))
-                    {
-                        slot.insert(sdf);
-                    }
-                }
-            }
-            let fields = &fields;
-            ComputeTaskPool::get().scope(|s| {
-                for w in &wave {
-                    s.spawn(async move {
-                        let Some(sdf) = fields.get(&w.chunk_pos) else {
-                            return CsgDelta::default();
-                        };
-                        let size = sdf.size().x;
-                        let origin = w.chunk_pos.as_vec3() * CHUNK_SIZE;
-                        let voxel_size = CHUNK_SIZE / f32_from_u32(size);
-                        sdf.csg_sphere_delta(
-                            w.op.sweep().to_grid(origin, voxel_size),
-                            w.op.radius / voxel_size,
-                            SDF_CSG_REACH_VOXELS,
-                            w.op.subtract,
-                            w.op.max_step.map(|s| s / voxel_size),
-                            |v, axis, positive| {
-                                beyond_face(fields, w.chunk_pos, size, v, axis, positive)
-                            },
-                        )
-                    });
-                }
-            })
-        };
+        let deltas = csg_wave_deltas(&wave, &chunk_manager, &editable);
         for (w, delta) in wave.iter().zip(deltas) {
             let Some(mut sdf) = editable.get_mut(w.entity) else {
                 continue;
@@ -454,7 +461,10 @@ pub fn process_sdf_sculpts(
     let new = events.read().map(|&op| {
         let sweep = op.sweep();
         let (mid, half) = sweep.bounds(op.radius);
-        resident.touch_sphere(mid, op.radius + sweep.from.distance(sweep.to) * 0.5);
+        resident.touch_sphere(
+            mid,
+            f32::mul_add(sweep.from.distance(sweep.to), 0.5, op.radius),
+        );
         (mid, half, op)
     });
     apply_edits(

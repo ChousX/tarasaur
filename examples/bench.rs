@@ -11,6 +11,7 @@
 //! scratch world. Both default under the checkout the binary was built from,
 //! so a run on another machine (see `tools/bench-deck.sh`) needs them, along
 //! with `--commit <sha>` for the result header.
+
 //!
 //! ```text
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
@@ -380,30 +381,24 @@ struct Output {
 #[derive(Component)]
 struct BenchCamera;
 
-/// Exits with an error if setup fails or any check fails.
-fn main() -> AppExit {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(i) = args.iter().position(|a| a == "--compare") {
-        return compare_args(args.get(i.saturating_add(1)), args.get(i.saturating_add(2)));
-    }
-    let flag = |name: &str| {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i.saturating_add(1)))
-            .cloned()
-    };
-    if let Some(i) = args.iter().position(|a| a == "--diff") {
-        return diff_args(
-            args.get(i.saturating_add(1)),
-            args.get(i.saturating_add(2)),
-            args.get(i.saturating_add(3)),
-        );
-    }
+/// The value after `name` in `args`, if it's there.
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i.saturating_add(1)))
+        .cloned()
+}
+
+/// Where this run's results and scratch world go, and how it labels itself.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at build time, so off the build host it
+/// names a path that isn't there: the defaults fall back to the working
+/// directory, and `--out`, `--world-dir` and `--commit` say what to use
+/// instead (see `tools/bench-deck.sh`).
+fn bench_paths(args: &[String]) -> (Output, PathBuf) {
+    let flag = |name: &str| arg_value(args, name);
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let manifest = Path::new(manifest_dir);
-    // Baked at build time, so off the build host it names a path that isn't
-    // there; fall back to the working directory and let the flags below say
-    // where things really go.
     let base = if manifest.is_dir() {
         manifest.to_path_buf()
     } else {
@@ -415,8 +410,6 @@ fn main() -> AppExit {
         depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
         small_arenas: args.iter().any(|a| a == "--small-arenas"),
         quick: args.iter().any(|a| a == "--quick"),
-        // `--commit` for a run off the build host, where the checkout the
-        // binary was built from isn't there to ask.
         commit: flag("--commit").unwrap_or_else(|| {
             std::process::Command::new("git")
                 .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
@@ -434,52 +427,72 @@ fn main() -> AppExit {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
         ..out
     };
-    QUICK.store(out.quick, Ordering::Relaxed);
-
     // An empty scratch save directory, so every run generates the same
     // terrain from scratch and your saves are never read or written.
-    // `--world-dir` for a run off the build host, whose `CARGO_MANIFEST_DIR`
-    // is the build host's path and doesn't exist here.
     let world_dir =
         flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
-    let _ = std::fs::remove_dir_all(&world_dir);
+    (out, world_dir)
+}
 
-    // Bevy's default gives io and async_compute 25% of the cores each (capped
-    // at 4) and compute whatever is left: 8 of 16 cores on this machine. The
-    // CSG and padding scopes are the critical path while editing and only
-    // reach ~5.7 busy cores, while io and async_compute sit idle mid-edit, so
-    // give compute a floor of all but two cores instead. This oversubscribes
-    // on purpose: idle pool threads block rather than spin.
+/// `DefaultPlugins` as the bench needs them: the shared renderer settings, a
+/// window the size of a Steam Deck's screen with vsync off, and a wider
+/// compute pool.
+///
+/// Bevy's default gives io and `async_compute` 25% of the cores each (capped
+/// 4) and compute whatever is left: 8 of 16 on the machine this was measured
+/// on. The CSG and padding scopes are the critical path while editing and
+/// only reached ~5.7 busy cores, while io and `async_compute` sat idle
+/// mid-edit, so compute gets a floor of all but two cores instead. This
+/// oversubscribes on purpose: idle pool threads block rather than spin.
+fn default_plugins() -> impl PluginGroup {
     let compute_floor = std::thread::available_parallelism()
         .map_or(1, std::num::NonZero::get)
         .saturating_sub(2)
         .max(1);
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(render_plugin())
-            .set(TaskPoolPlugin {
-                task_pool_options: TaskPoolOptions {
-                    compute: bevy::app::TaskPoolThreadAssignmentPolicy {
-                        min_threads: compute_floor,
-                        ..TaskPoolOptions::default().compute
-                    },
-                    ..default()
+    DefaultPlugins
+        .set(render_plugin())
+        .set(TaskPoolPlugin {
+            task_pool_options: TaskPoolOptions {
+                compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+                    min_threads: compute_floor,
+                    ..TaskPoolOptions::default().compute
                 },
-            })
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "tarasaur bench".into(),
-                    // Steam Deck's native resolution.
-                    resolution: WindowResolution::new(1280, 800),
-                    present_mode: PresentMode::AutoNoVsync,
-                    resizable: false,
-                    ..default()
-                }),
+                ..default()
+            },
+        })
+        .set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "tarasaur bench".into(),
+                // Steam Deck's native resolution.
+                resolution: WindowResolution::new(1280, 800),
+                present_mode: PresentMode::AutoNoVsync,
+                resizable: false,
                 ..default()
             }),
-    )
-    .add_plugins((
+            ..default()
+        })
+}
+
+/// Exits with an error if setup fails or any check fails.
+fn main() -> AppExit {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--compare") {
+        return compare_args(args.get(i.saturating_add(1)), args.get(i.saturating_add(2)));
+    }
+    let flag = |name: &str| arg_value(&args, name);
+    if let Some(i) = args.iter().position(|a| a == "--diff") {
+        return diff_args(
+            args.get(i.saturating_add(1)),
+            args.get(i.saturating_add(2)),
+            args.get(i.saturating_add(3)),
+        );
+    }
+    let (out, world_dir) = bench_paths(&args);
+    QUICK.store(out.quick, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&world_dir);
+
+    let mut app = App::new();
+    app.add_plugins(default_plugins()).add_plugins((
         TarasaurPlugin {
             save_dir: world_dir,
             // Disk writes would only add noise; nothing here needs to persist.
