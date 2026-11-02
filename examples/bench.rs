@@ -3150,10 +3150,11 @@ fn summarize(phase: Phase, rows: &[&FrameRow], load_timed_out: bool) -> Vec<(Str
 
 /// Writes the frames and summary so far; `print`s the tables too at the end.
 fn write_results(bench: &Bench, adapter: &str, print: bool) {
-    let base = bench
-        .out
-        .dir
-        .join(format!("{}-{}", bench.out.label, bench.out.stamp));
+    // Built by name, not `with_extension`: that replaces everything after the
+    // last dot, so a label with a dot in it (`--dig-radius 7.5`) lost both its
+    // tail and the stamp, silently overwriting the previous run and leaving
+    // `ab.sh`'s `<label>-*` glob with nothing to match.
+    let stem = format!("{}-{}", bench.out.label, bench.out.stamp);
     let commit = &bench.out.commit;
     let header = format!(
         "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} quick={} dig_radius={}\n",
@@ -3225,8 +3226,8 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         );
     }
 
-    let frames_path = base.with_extension("frames.csv");
-    let summary_path = base.with_extension("summary.csv");
+    let frames_path = bench.out.dir.join(format!("{stem}.frames.csv"));
+    let summary_path = bench.out.dir.join(format!("{stem}.summary.csv"));
     let written = std::fs::create_dir_all(&bench.out.dir)
         .and_then(|()| std::fs::write(&frames_path, frames))
         .and_then(|()| std::fs::write(&summary_path, summary));
