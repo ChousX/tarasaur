@@ -290,7 +290,17 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         };
         for z in min.z..=max.z {
             for y in min.y..=max.y {
-                for x in min.x..=max.x {
+                // Only the part of the row the brush reaches; `range` is a
+                // box, so near its edge most of the row is out of reach. Same
+                // bound `csg_sphere_delta` uses -- never narrower than the
+                // truth, and the `dist <= radius` test below still decides.
+                let Some((from_x, to_x)) = at.x_span(radius, f32_from_u32(y), f32_from_u32(z))
+                else {
+                    continue;
+                };
+                let first = min.x.max(u32_from_f32(from_x.ceil()));
+                let last = max.x.min(u32_from_f32(to_x.floor()));
+                for x in first..=last {
                     let pos = UVec3::new(x, y, z).as_vec3();
                     let dist = at.distance(pos);
                     if dist <= radius {
@@ -820,7 +830,7 @@ impl SignedDistance for f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sweep, UVec3, Vec3};
+    use super::{Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sphere, Sweep, UVec3, Vec3};
     use crate::{
         field::Field,
         field::{LOD, SDF, VisibilityField},
@@ -863,6 +873,43 @@ mod tests {
                             lo <= x && x <= hi,
                             "{from:?}->{to:?} r{radius}: ({x}, {y}, {z}) is in reach but the span is {lo}..={hi}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The row bounds feed a loop that writes voxels, so an off-by-one in the
+    /// ceil/floor would quietly stop a brush reaching its edge. Fills spheres
+    /// of several radii and checks the voxels touched are exactly the voxels
+    /// within the radius, counted the long way.
+    #[test]
+    fn a_filled_sphere_touches_exactly_the_voxels_in_range() {
+        for &radius in &[0.4_f32, 1.0, 1.5, 2.0, 3.0, 8.0] {
+            for center in [
+                Vec3::splat(1.5),
+                Vec3::splat(2.0),
+                Vec3::new(0.0, 1.0, 3.0),
+                Vec3::new(3.0, 3.0, 3.0),
+            ] {
+                // Starts at 1.0 everywhere; the fill writes -1.0.
+                let mut sdf = sdf_from(|_, _, _| 1.0);
+                sdf.fill_sphere(center, Sphere { radius }, -1.0);
+                let n = sdf.size().x;
+                for z in 0..n {
+                    for y in 0..n {
+                        for x in 0..n {
+                            let p = Vec3::new(f32_from_u32(x), f32_from_u32(y), f32_from_u32(z));
+                            let want_filled = center.distance(p) <= radius;
+                            let filled = sdf.get(x, y, z) < 0.0;
+                            assert_eq!(
+                                filled,
+                                want_filled,
+                                "r{radius} at {center:?}: voxel ({x}, {y}, {z}) \
+                                 distance {} filled={filled} wanted={want_filled}",
+                                center.distance(p)
+                            );
+                        }
                     }
                 }
             }
