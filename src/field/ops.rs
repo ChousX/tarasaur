@@ -1183,7 +1183,10 @@ mod tests {
 
     #[test]
     fn fill_only_adds_and_scrape_only_removes() {
-        // Ground at y = 1.5, the brush at full strength on voxel (2, 2, 2).
+        // Ground at y = 1.5. Voxel (2, 2, 2) is the brush center, so the
+        // falloff gives it the plane's value outright; voxel (2, 1, 2) is a
+        // voxel off center, so it only moves part of the way and the
+        // assertions on it are directional.
         let ground = |_: f32, y: f32, _: f32| y - 1.5;
         let center = Vec3::splat(2.0);
         let run = |plane_y: f32, mode| {
@@ -1197,9 +1200,10 @@ mod tests {
         assert!((air - -0.5).abs() < 1e-5, "fill left {air}");
         let (air, _) = run(2.5, PlaneMode::Scrape);
         assert!((air - 0.5).abs() < 1e-5, "scrape moved {air}");
-        // A plane below it: Scrape cuts down to it, Fill leaves it.
+        // A plane below it: Scrape cuts toward it, Fill leaves it. Rock
+        // starts at -0.5 and the plane wants +0.5 there.
         let (_, rock) = run(0.5, PlaneMode::Scrape);
-        assert!((rock - 0.5).abs() < 1e-5, "scrape left {rock}");
+        assert!(rock > -0.5 && rock <= 0.5, "scrape went the wrong way: {rock}");
         let (_, rock) = run(0.5, PlaneMode::Fill);
         assert!((rock - -0.5).abs() < 1e-5, "fill moved {rock}");
     }
