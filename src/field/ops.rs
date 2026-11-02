@@ -3,7 +3,7 @@
 //! every `Field`.
 
 use super::{Field, IVec3, UVec3, Vec3};
-use crate::num::u8_from_f32;
+use crate::num::{f32_from_u32, u32_from_f32, u8_from_f32};
 use bevy::tasks::{ComputeTaskPool, TaskPool};
 
 use bevy::shape::{Cuboid, Sphere};
@@ -140,6 +140,40 @@ impl Sweep {
         let max = (self.from.max(self.to) + pad).min(max_bound).as_ivec3();
         grid_range(min, max)
     }
+
+    /// The x span, inclusive, where this capsule of `radius` can reach the
+    /// line through `(_, y, z)`; `None` when it can't reach that line at all.
+    ///
+    /// [`range`](Self::range) is a box, so for a row near the capsule's edge
+    /// most of it is out of reach and would be visited and rejected one voxel
+    /// at a time. This bounds the row instead.
+    ///
+    /// Never narrower than the truth, and exact for a plain sphere. A point
+    /// inside the capsule has a closest point `c` on the segment, and `c.y`
+    /// lies within the segment's own y range, so `|y - c.y|` is at least the
+    /// gap from `y` to that range (and the same for z). What is left of
+    /// `radius` then bounds `|x - c.x|`, and `c.x` lies between the segment's
+    /// x bounds. Callers still test every voxel they visit, so a loose span
+    /// only costs a few wasted tests -- but a narrow one would silently drop
+    /// voxels, which is what `span_never_drops_a_voxel_in_reach` guards.
+    #[must_use]
+    pub fn x_span(&self, radius: f32, y: f32, z: f32) -> Option<(f32, f32)> {
+        let lo = self.from.min(self.to);
+        let hi = self.from.max(self.to);
+        // How far outside the segment's own extent this row sits, per axis.
+        let gap = |v: f32, lo: f32, hi: f32| (lo - v).max(v - hi).max(0.0);
+        let dy = gap(y, lo.y, hi.y);
+        let dz = gap(z, lo.z, hi.z);
+        // A negative radius would make `left` negative and drop the row; the
+        // span may be wider than the truth but must never be narrower.
+        let radius = radius.max(0.0);
+        let left = radius.mul_add(radius, -dy.mul_add(dy, dz * dz));
+        if left < 0.0 {
+            return None;
+        }
+        let reach = left.sqrt();
+        Some((lo.x - reach, hi.x + reach))
+    }
 }
 
 impl From<Vec3> for Sweep {
@@ -217,6 +251,48 @@ impl CsgShape {
                 center: (center - origin) / voxel_size,
                 half_size: half_size / voxel_size,
             },
+        }
+    }
+
+    /// The x span, inclusive, where this shape grown by `margin` can reach
+    /// the line through `(_, y, z)`; `None` when it can't reach it at all.
+    ///
+    /// The row bound belongs to the shape rather than to one of its variants:
+    /// the CSG scan rejects a voxel when `signed_distance > margin`, so the
+    /// span wanted is where `signed_distance <= margin`, and every variant
+    /// can answer that for itself. A new variant has to supply one -- and the
+    /// safe answer for a shape with no analytic bound is the whole row, which
+    /// is what the scan did before this existed.
+    ///
+    /// Both variants here are exact, and both reduce to the same formula:
+    /// take the per-axis gap from the row to the shape's own y and z extent,
+    /// spend `margin` squared on those gaps, and what is left bounds the
+    /// distance along x from the shape's x extent. For the capsule that
+    /// extent is its segment; for the box, its faces.
+    ///
+    /// Never narrower than the truth. `span_never_drops_a_voxel_in_reach`
+    /// guards both variants against that.
+    #[must_use]
+    pub fn x_span(&self, margin: f32, y: f32, z: f32) -> Option<(f32, f32)> {
+        match *self {
+            Self::Capsule { sweep, radius } => sweep.x_span(radius + margin, y, z),
+            Self::Box { center, half_size } => {
+                // Outside the box the distance is the length of the per-axis
+                // overshoot, so `dx^2 + dy^2 + dz^2 <= margin^2` bounds x
+                // exactly; inside, the distance is <= 0 <= margin and the
+                // whole span between the faces is included either way.
+                let gap = |v: f32, c: f32, h: f32| ((c - h) - v).max(v - (c + h)).max(0.0);
+                let dy = gap(y, center.y, half_size.y);
+                let dz = gap(z, center.z, half_size.z);
+                let margin = margin.max(0.0);
+                let left = margin.mul_add(margin, -dy.mul_add(dy, dz * dz));
+                if left < 0.0 {
+                    return None;
+                }
+                let reach = left.sqrt();
+                let half = half_size.x.max(0.0);
+                Some((center.x - half - reach, center.x + half + reach))
+            }
         }
     }
 
@@ -332,7 +408,13 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         };
         for z in min.z..=max.z {
             for y in min.y..=max.y {
-                for x in min.x..=max.x {
+                let Some((from_x, to_x)) = at.x_span(radius, f32_from_u32(y), f32_from_u32(z))
+                else {
+                    continue;
+                };
+                let first = min.x.max(u32_from_f32(from_x.ceil()));
+                let last = max.x.min(u32_from_f32(to_x.floor()));
+                for x in first..=last {
                     let pos = UVec3::new(x, y, z).as_vec3();
                     let dist = at.distance(pos);
                     if dist <= radius {
@@ -543,7 +625,20 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             let mut out = Vec::new();
             for z in zs {
                 for y in min.y..=max.y {
-                    for x in min.x..=max.x {
+                    // Only the part of the row the shape can reach. The rest
+                    // of `range`'s box was visited and rejected a voxel at a
+                    // time, which at the brush sizes the sandbox uses is about
+                    // half of every edit (bench_results/deck-improvements.md).
+                    let Some((from_x, to_x)) =
+                        shape.x_span(reach, f32_from_u32(y), f32_from_u32(z))
+                    else {
+                        continue;
+                    };
+                    // Saturating both ways, so a span off either end of the
+                    // grid gives an empty range rather than a wrapped one.
+                    let first = min.x.max(u32_from_f32(from_x.ceil()));
+                    let last = max.x.min(u32_from_f32(to_x.floor()));
+                    for x in first..=last {
                         let v = UVec3::new(x, y, z);
                         let s = shape.signed_distance(v.as_vec3());
                         if s > reach {
@@ -890,12 +985,68 @@ impl SignedDistance for f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sweep, UVec3, Vec3};
+    use super::{
+        CsgShape, Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sweep, UVec3, Vec3,
+    };
     use crate::{
         field::Field,
         field::{LOD, SDF, SDF_BAND, VisibilityField},
-        num::{f32_from_u32, usize_from},
+        num::{f32_from_i32, f32_from_u32, usize_from},
     };
+
+    /// The row bound must never exclude a voxel the shape can reach.
+    ///
+    /// The scan still tests every voxel it visits, so a span wider than the
+    /// truth costs a few wasted distance tests; a span narrower than the truth
+    /// silently drops geometry, and nothing downstream would notice. So this
+    /// checks the bound against the shape's own `signed_distance` over a dense
+    /// grid, for **both** variants and at several margins -- including margin
+    /// 0, where the span is tightest and an off-by-epsilon would show.
+    #[test]
+    fn span_never_drops_a_voxel_in_reach() {
+        let sweep = |from, to| Sweep { from, to };
+        let shapes = [
+            // Capsules: a sphere, a tiny sphere, axis-aligned sweeps, and two
+            // diagonals (the case where the per-axis gap bound is loosest).
+            CsgShape::sphere(Vec3::new(3.0, 3.0, 3.0), 2.5),
+            CsgShape::sphere(Vec3::ZERO, 1.0),
+            CsgShape::sphere(sweep(Vec3::new(1.0, 2.0, 3.0), Vec3::new(7.0, 2.0, 3.0)), 2.0),
+            CsgShape::sphere(sweep(Vec3::new(1.0, 1.0, 1.0), Vec3::new(1.0, 6.0, 1.0)), 1.5),
+            CsgShape::sphere(sweep(Vec3::new(2.0, 5.0, 1.0), Vec3::new(6.0, 1.0, 7.0)), 3.0),
+            CsgShape::sphere(sweep(Vec3::new(-4.0, 2.0, 2.0), Vec3::new(9.0, 3.5, -1.0)), 2.25),
+            // Boxes: a cube, a slab thin in z, and one thin in x (where the
+            // span is almost entirely the margin's doing).
+            CsgShape::cuboid(Vec3::new(4.0, 4.0, 4.0), Vec3::splat(2.0)),
+            CsgShape::cuboid(Vec3::ZERO, Vec3::new(3.0, 1.0, 0.5)),
+            CsgShape::cuboid(Vec3::new(-2.0, 3.0, 1.0), Vec3::new(0.25, 4.0, 2.5)),
+        ];
+        let step = 0.25;
+        for shape in shapes {
+            for margin in [0.0_f32, 2.0] {
+                for iy in -40..60 {
+                    for iz in -40..60 {
+                        let (y, z) = (f32_from_i32(iy) * step, f32_from_i32(iz) * step);
+                        let span = shape.x_span(margin, y, z);
+                        for ix in -60..80 {
+                            let x = f32_from_i32(ix) * step;
+                            if shape.signed_distance(Vec3::new(x, y, z)) > margin {
+                                continue;
+                            }
+                            let Some((lo, hi)) = span else {
+                                panic!(
+                                    "{shape:?} margin {margin}: no span for a row holding ({x}, {y}, {z})"
+                                );
+                            };
+                            assert!(
+                                lo <= x && x <= hi,
+                                "{shape:?} margin {margin}: ({x}, {y}, {z}) is in reach but the span is {lo}..={hi}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// An SDF holding `f(x, y, z)` at every voxel.
     fn sdf_from(f: impl Fn(f32, f32, f32) -> f32) -> SDF {
