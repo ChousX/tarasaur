@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes] [--quick]
+//!   [--compute-floor bevy|N]
 //! ```
 //!
 //! `--out DIR` puts the results somewhere else, and `--world-dir DIR` the
@@ -522,19 +523,25 @@ fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
 /// only reached ~5.7 busy cores, while io and `async_compute` sat idle
 /// mid-edit, so compute gets a floor of all but two cores instead. This
 /// oversubscribes on purpose: idle pool threads block rather than spin.
-fn default_plugins() -> impl PluginGroup {
-    let compute_floor = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
-        .saturating_sub(2)
-        .max(1);
+///
+/// `ComputeFloor::Bevy` leaves Bevy's own split alone. That matters because **the widening
+/// lives only in this bench**: a real application using the library gets
+/// Bevy's default whatever happens here, so "is the floor worth it" has to be
+/// answerable without rebuilding, and on a 4-physical-core machine the answer
+/// may well be no (`bench_results/deck-improvements.md`, option 6).
+fn default_plugins(compute_floor: ComputeFloor) -> impl PluginGroup {
+    let compute = compute_floor.min_threads().map_or_else(
+        || TaskPoolOptions::default().compute,
+        |min_threads| bevy::app::TaskPoolThreadAssignmentPolicy {
+            min_threads,
+            ..TaskPoolOptions::default().compute
+        },
+    );
     DefaultPlugins
         .set(render_plugin())
         .set(TaskPoolPlugin {
             task_pool_options: TaskPoolOptions {
-                compute: bevy::app::TaskPoolThreadAssignmentPolicy {
-                    min_threads: compute_floor,
-                    ..TaskPoolOptions::default().compute
-                },
+                compute,
                 ..default()
             },
         })
@@ -571,8 +578,11 @@ fn main() -> AppExit {
     QUICK.store(out.quick, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&world_dir);
 
+    let Some(compute_floor) = parse_compute_floor(flag("--compute-floor").as_deref()) else {
+        return AppExit::error();
+    };
     let mut app = App::new();
-    app.add_plugins(default_plugins()).add_plugins((
+    app.add_plugins(default_plugins(compute_floor)).add_plugins((
         TarasaurPlugin {
             save_dir: world_dir,
             // Disk writes would only add noise; nothing here needs to persist.
@@ -3733,6 +3743,53 @@ fn trigger_frame_capture(bench: Res<Bench>, capture: Res<FrameCapture>) {
 /// The camera's MSAA, from `--msaa` (default: Bevy's default, 4x).
 #[derive(Resource)]
 struct BenchMsaa(Msaa);
+
+/// All but two cores, at least one: the floor `default_plugins` describes.
+fn widened_compute_floor() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .saturating_sub(2)
+        .max(1)
+}
+
+/// What `--compute-floor` asked for.
+#[derive(Clone, Copy)]
+enum ComputeFloor {
+    /// Leave Bevy's own split alone. This is what a real application using
+    /// the library gets, since the widening lives only in this bench.
+    Bevy,
+    /// Guarantee the compute pool this many threads.
+    Threads(usize),
+}
+
+impl ComputeFloor {
+    /// The `min_threads` to set, or `None` to set nothing.
+    const fn min_threads(self) -> Option<usize> {
+        match self {
+            Self::Bevy => None,
+            Self::Threads(n) => Some(n),
+        }
+    }
+}
+
+/// `--compute-floor`: the compute pool's guaranteed thread count.
+///
+/// Absent, the bench widens the pool as it always has. `bevy` leaves Bevy's
+/// own split alone. A number sets the floor directly. `None` means the value
+/// was bad and the run should not start.
+fn parse_compute_floor(arg: Option<&str>) -> Option<ComputeFloor> {
+    match arg {
+        None => Some(ComputeFloor::Threads(widened_compute_floor())),
+        Some("bevy" | "default") => Some(ComputeFloor::Bevy),
+        Some(other) => match other.parse::<usize>() {
+            Ok(n) if n >= 1 => Some(ComputeFloor::Threads(n)),
+            _ => {
+                eprintln!("bench: --compute-floor takes `bevy` or a count >= 1, not {other}");
+                None
+            }
+        },
+    }
+}
 
 /// `--msaa`: 1, 2, 4 or 8 samples; Bevy's default (4x) when absent.
 fn parse_msaa(arg: Option<&str>) -> Option<Msaa> {
