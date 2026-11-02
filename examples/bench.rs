@@ -32,6 +32,12 @@
 //! - `spin`:  turn in place: view-dependent cost (culling).
 //! - `fly`:   fly a fixed distance per frame: streaming cost while moving.
 //! - `edit`:  sculpt one spot every frame: edit -> re-mesh cost.
+//! - `sculpt`: the gradual sphere brushes the cursor's Smooth, Flatten,
+//!   Fill and Scrape tools send. A ring of small craters is poked in first
+//!   (30 frames of CSG), then a smooth stroke rounds them off and a flatten
+//!   stroke levels the spot. Checks each stroke moved the field the way its
+//!   tool is defined to -- roughness down for the smooth, distance to the
+//!   plane down for the flatten.
 //! - `box`:   box brushes: an SDF box sculpted every frame, plus one material
 //!   box off the voxel grid. Checks that only voxels inside it changed.
 //! - `query`: GPU ray queries every frame. Checks each result batch holds
@@ -50,7 +56,7 @@
 //!
 //! `--quick` (about a third of the run time) halves `hold`, `spin` (turning
 //! twice as fast) and `fly` (stopping halfway; the later phases happen there)
-//! and skips `box`, `query`, `reslot` and `dig`. Compare only runs made with the same setting.
+//! and skips `sculpt`, `box`, `query`, `reslot` and `dig`. Compare only runs made with the same setting.
 //! Results are written after every phase, so a run cut short keeps what it
 //! measured.
 //!
@@ -112,10 +118,11 @@ use tarasaur::{
     },
     field::{
         Field, LOD, MaterialField, SDF, SDF_BAND, VisibilityField, VoxelField, VoxelMaterial,
-        editor::{SdfCsgSphere, WorldEditor},
+        editor::{SdfCsgSphere, SdfSculptOp, SdfSculptSphere, WorldEditor},
+        ops::PlaneMode,
     },
     grid::flatten_cube,
-    num::{f32_from_u32, usize_from},
+    num::{f32_from_u32, f32_from_usize, u32_from_f32, usize_from},
     raycast::{
         cursor::{CursorBrush, CursorHit, resolve_cursor_hit, update_cursor_focus},
         gpu::{HitResult, PendingVoxelQueries, RayQuery, VoxelQueryResults},
@@ -147,8 +154,8 @@ const SHOT_VIEWS: u32 = 4;
 
 /// `--quick`: `hold`, `spin` and `fly` run half as many frames (`spin`
 /// turning twice as far per frame, `fly` stopping halfway, with everything
-/// after it placed from where it stops), and `box`, `query`, `reslot` and
-/// `dig` are skipped.
+/// after it placed from where it stops), and `sculpt`, `box`, `query`,
+/// `reslot` and `dig` are skipped.
 static QUICK: AtomicBool = AtomicBool::new(false);
 
 fn quick() -> bool {
@@ -162,6 +169,43 @@ fn speed() -> u32 {
 }
 const EDIT_RADIUS: f32 = 3.0;
 const EDIT_DELTA: f32 = 0.15; // SDF change per frame; flips dig/build every 30 frames
+const SCULPT_FRAMES: u32 = 300;
+/// `sculpt` smooths until here and flattens after: both callers of
+/// `apply_sphere_at`, and both ops the cursor brush sends for its four
+/// gradual tools (Fill and Scrape are `Flatten` with another `PlaneMode`).
+const SCULPT_SMOOTH_FRAMES: u32 = 150;
+/// Frames of small CSG pokes before the smooth stroke, one a frame around a
+/// ring. A smooth brush is for rounding off the creases an edit leaves, and
+/// generated terrain has none: its field is linear to within 0.003 voxels,
+/// so smoothing it moves nothing and the check would read float noise. The
+/// pokes are ~4 voxels across, so they cost little of the phase's time.
+const SCULPT_ROUGHEN_FRAMES: u32 = 30;
+/// A poke's radius, and the ring they sit on -- inside `SCULPT_MEASURE_RADIUS`
+/// with room to spare, so every crease lands in the measured voxels.
+const SCULPT_POKE_RADIUS: f32 = 0.7;
+const SCULPT_POKE_ORBIT: f32 = 1.0;
+/// The sandbox's default brush: 4 units, ~26 High voxels -- wider than the
+/// narrow band, narrower than a chunk.
+const SCULPT_RADIUS: f32 = 4.0;
+/// The fraction of the way voxels move per frame: the cursor brush's default
+/// strength (3/s) at a fixed 60 fps, so every run sculpts the same, as
+/// `DIG_STEP` does.
+const SCULPT_AMOUNT: f32 = 3.0 / 60.0;
+/// How far the brush circles its target, and the frames a turn takes. A
+/// stroke sweeps a capsule from the last frame's center, so a brush held
+/// perfectly still would never exercise one.
+const SCULPT_ORBIT: f32 = 1.0;
+const SCULPT_ORBIT_FRAMES: u32 = 60;
+/// The metrics cover this far from the target: inside `SCULPT_RADIUS` minus
+/// `SCULPT_ORBIT`, so every frame's brush covers all of it, and clear of the
+/// rim where the falloff dies and leaves creases of its own.
+const SCULPT_MEASURE_RADIUS: f32 = 2.0;
+/// ...and no further than this from the plane, in voxels. `flatten` aims
+/// voxels at the plane, and only within the narrow band can the field hold
+/// what it aims at.
+const SCULPT_PLANE_SLAB: f32 = SDF_BAND * 0.5;
+/// How far each metric has to fall for its check to pass.
+const SCULPT_MARGIN: f32 = 0.1;
 const BOX_FRAMES: u32 = 300;
 const BOX_HALF: f32 = 2.0; // the sculpted SDF box
 /// The material box: 6.4 High voxels, so its faces sit between voxels.
@@ -222,6 +266,7 @@ enum Phase {
     Spin,
     Fly,
     Edit,
+    Sculpt,
     BoxEdit,
     Query,
     Reslot,
@@ -239,6 +284,7 @@ impl Phase {
             Self::Spin => "spin",
             Self::Fly => "fly",
             Self::Edit => "edit",
+            Self::Sculpt => "sculpt",
             Self::BoxEdit => "box",
             Self::Query => "query",
             Self::Reslot => "reslot",
@@ -257,7 +303,8 @@ impl Phase {
             Self::Fly => Self::Edit,
             Self::Edit if quick() => Self::Visibility,
             Self::Visibility if quick() => Self::Done,
-            Self::Edit => Self::BoxEdit,
+            Self::Edit => Self::Sculpt,
+            Self::Sculpt => Self::BoxEdit,
             Self::BoxEdit => Self::Query,
             Self::Query => Self::Reslot,
             Self::Reslot => Self::Visibility,
@@ -275,6 +322,7 @@ impl Phase {
             Self::Spin => SPIN_FRAMES.checked_div(speed()),
             Self::Fly => FLY_FRAMES.checked_div(speed()),
             Self::Edit => Some(EDIT_FRAMES),
+            Self::Sculpt => Some(SCULPT_FRAMES),
             Self::BoxEdit => Some(BOX_FRAMES),
             Self::Query => Some(QUERY_FRAMES),
             Self::Reslot => Some(RESLOT_FRAMES),
@@ -293,13 +341,14 @@ impl Phase {
     }
 }
 
-const PHASES: [Phase; 11] = [
+const PHASES: [Phase; 12] = [
     Phase::Load,
     Phase::Shots,
     Phase::Hold,
     Phase::Spin,
     Phase::Fly,
     Phase::Edit,
+    Phase::Sculpt,
     Phase::BoxEdit,
     Phase::Query,
     Phase::Reslot,
@@ -366,6 +415,12 @@ struct Bench {
     /// Every GPU pass Bevy timed, averaged over the end of each phase.
     gpu_passes: Vec<(Phase, String, f64)>,
     checks: Checks,
+    /// `sculpt`: the metrics before the smooth stroke, and before the
+    /// flatten one (so, after the smooth one). Each is captured on the
+    /// first frame of its stroke that finds the spot at High: a phase's
+    /// first edits can wait for `MaxEditLod`.
+    sculpt_start: Option<SculptMetrics>,
+    sculpt_mid: Option<SculptMetrics>,
     out: Output,
 }
 
@@ -569,6 +624,8 @@ fn main() -> AppExit {
         out,
         gpu_passes: Vec::new(),
         checks: Checks::default(),
+        sculpt_start: None,
+        sculpt_mid: None,
     })
     .add_systems(Startup, (spawn_camera, setup_terrain_palette))
     .add_systems(
@@ -590,8 +647,8 @@ fn main() -> AppExit {
 #[derive(Resource, Clone, Copy)]
 struct SmallArenas(bool);
 
-/// The `box`, `query` and `reslot` phases: their drivers, checks, and the
-/// render-world readbacks.
+/// The phases with checks: their drivers, the checks themselves, and the
+/// render-world readbacks the checks read.
 fn add_checked_phases(app: &mut App, small_arenas: bool) {
     let probe = SlotProbe::default();
     let mesh_probe = MeshProbe::default();
@@ -618,6 +675,7 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
         .add_systems(
             Update,
             (
+                drive_sculpt,
                 drive_box_edits,
                 drive_queries,
                 drive_reslots,
@@ -625,6 +683,7 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
                 drive_dig,
                 drive_mesh_probe,
                 watch_queries,
+                check_sculpt,
                 check_material_box,
                 check_queries,
                 check_reslots,
@@ -706,6 +765,7 @@ fn drive_camera(bench: Res<Bench>, mut cams: Query<&mut Transform, With<BenchCam
                     .looking_at(pos + Vec3::new(1.0, -0.4, 0.0), Vec3::Y)
             }
             Phase::Edit
+            | Phase::Sculpt
             | Phase::BoxEdit
             | Phase::Query
             | Phase::Reslot
@@ -792,6 +852,220 @@ impl Checks {
 /// The point on the terrain surface at (x, z).
 fn surface(x: f32, z: f32) -> Vec3 {
     Vec3::new(x, terrain_height(x, z), z)
+}
+
+// ---------------------------------------------------------------------------
+// sculpt: the gradual sphere brushes
+// ---------------------------------------------------------------------------
+
+/// Where `sculpt` works: a chunk of its own, clear of every other phase's.
+/// `dig`'s check scans whole chunks around its crater for weak gradients,
+/// which is exactly what a smoothed surface has, so sharing a chunk with it
+/// would fail that check rather than this one. The spot is off to the side
+/// of the camera's view, as `box`'s is, so the phase measures the edit path
+/// and not the raster of its result.
+fn sculpt_target() -> Vec3 {
+    surface(fly_end().x - 10.0, START.z + 25.0)
+}
+
+/// A point on a ring of `radius` around the target, `frame` of `period` of
+/// the way round, on the surface.
+fn sculpt_ring(frame: u32, period: u32, radius: f32) -> Vec3 {
+    let turn = std::f32::consts::TAU * f32_from_u32(frame) / f32_from_u32(period);
+    let at = sculpt_target() + Vec3::new(turn.cos(), 0.0, turn.sin()) * radius;
+    surface(at.x, at.z)
+}
+
+/// The brush's center on `frame` of a stroke: a slow circle around the
+/// target, so each message sweeps a capsule from the last center the way a
+/// held stroke does, without the brush leaving its chunk.
+fn sculpt_center(frame: u32) -> Vec3 {
+    sculpt_ring(frame, SCULPT_ORBIT_FRAMES, SCULPT_ORBIT)
+}
+
+/// What the `sculpt` checks watch.
+#[derive(Clone, Copy)]
+struct SculptMetrics {
+    /// Mean |discrete Laplacian| of the field, in voxel units.
+    /// `smooth_sphere` moves every voxel toward its neighbours' mean, so a
+    /// held smooth has to bring this down.
+    roughness: f32,
+    /// Mean distance from the field to the plane `flatten_sphere` pulls
+    /// toward. `PlaneMode::Flatten` aims at the plane exactly, so a held
+    /// flatten has to bring this down.
+    offset: f32,
+    voxels: usize,
+}
+
+/// Both metrics in one pass, over the voxels within `SCULPT_MEASURE_RADIUS`
+/// of the target and `SCULPT_PLANE_SLAB` of its plane. Position alone picks
+/// that set, so a before and an after cover the same voxels.
+///
+/// `None` until the spot is at High, which is also when the first edit of a
+/// stroke stops being deferred.
+fn sculpt_metrics(chunks: &ChunkManager, sdfs: &Query<&SDF>) -> Option<SculptMetrics> {
+    let target = sculpt_target();
+    let (mut rough, mut offset, mut voxels) = (0.0f32, 0.0f32, 0usize);
+    for pos in overlapping_chunks(target, Vec3::splat(SCULPT_MEASURE_RADIUS)) {
+        let Some(sdf) = chunks.get_chunk(&pos).and_then(|e| sdfs.get(e).ok()) else {
+            continue;
+        };
+        if sdf.lod != LOD::High {
+            continue;
+        }
+        let size = sdf.size();
+        let voxel = CHUNK_SIZE / f32_from_u32(size.x);
+        // The target and the reach in this chunk's grid, as an edit has them.
+        let at = (target - pos.as_vec3() * CHUNK_SIZE) / voxel;
+        let reach = SCULPT_MEASURE_RADIUS / voxel;
+        let grid = |v: f32| u32_from_f32(v.max(0.0));
+        // Interior voxels only: the Laplacian wants all six neighbours.
+        let min =
+            UVec3::new(grid(at.x - reach), grid(at.y - reach), grid(at.z - reach)).max(UVec3::ONE);
+        let max = UVec3::new(grid(at.x + reach), grid(at.y + reach), grid(at.z + reach))
+            .min(size.saturating_sub(UVec3::splat(2)));
+        if min.cmpgt(max).any() {
+            continue;
+        }
+        for z in min.z..=max.z {
+            for y in min.y..=max.y {
+                // Where the plane sits for this row, in voxels, the way
+                // `flatten_sphere` works it out: normal +Y through the target.
+                let plane = f32_from_u32(y) - at.y;
+                if plane.abs() > SCULPT_PLANE_SLAB {
+                    continue;
+                }
+                for x in min.x..=max.x {
+                    let p = Vec3::new(f32_from_u32(x), f32_from_u32(y), f32_from_u32(z));
+                    if p.distance(at) > reach {
+                        continue;
+                    }
+                    let c = sdf.get(x, y, z);
+                    let sum = sdf.get(x.saturating_add(1), y, z)
+                        + sdf.get(x.saturating_sub(1), y, z)
+                        + sdf.get(x, y.saturating_add(1), z)
+                        + sdf.get(x, y.saturating_sub(1), z)
+                        + sdf.get(x, y, z.saturating_add(1))
+                        + sdf.get(x, y, z.saturating_sub(1));
+                    rough += c.mul_add(6.0, -sum).abs();
+                    offset += (c - plane).abs();
+                    voxels = voxels.saturating_add(1);
+                }
+            }
+        }
+    }
+    (voxels > 0).then(|| SculptMetrics {
+        roughness: rough / f32_from_usize(voxels),
+        offset: offset / f32_from_usize(voxels),
+        voxels,
+    })
+}
+
+/// Sends one gradual brush a frame, smoothing for the first half of the
+/// phase and flattening for the second, and takes each stroke's starting
+/// metrics on its way past.
+fn drive_sculpt(
+    mut bench: ResMut<Bench>,
+    chunks: Res<ChunkManager>,
+    sdfs: Query<&SDF>,
+    mut sculpt: MessageWriter<SdfSculptSphere>,
+    mut csg: MessageWriter<SdfCsgSphere>,
+) {
+    if bench.phase != Phase::Sculpt {
+        return;
+    }
+    let frame = bench.frame_in_phase;
+    if frame < SCULPT_ROUGHEN_FRAMES {
+        // Scallop a ring of craters into the surface. Each poke creases
+        // where it meets the last and where it meets the ground, which is
+        // what a smooth brush is for and what the terrain has none of.
+        csg.write(SdfCsgSphere {
+            center: sculpt_ring(frame, SCULPT_ROUGHEN_FRAMES, SCULPT_POKE_ORBIT),
+            radius: SCULPT_POKE_RADIUS,
+            sweep_from: None,
+            subtract: true,
+            max_step: None,
+            paint: None,
+        });
+        return;
+    }
+    let smoothing = frame < SCULPT_SMOOTH_FRAMES;
+    // Each tool starts a stroke of its own, as switching tools does, so it
+    // sweeps from its own first center rather than the last tool's.
+    let in_stroke = frame.saturating_sub(if smoothing {
+        SCULPT_ROUGHEN_FRAMES
+    } else {
+        SCULPT_SMOOTH_FRAMES
+    });
+    let mark = if smoothing {
+        &mut bench.sculpt_start
+    } else {
+        &mut bench.sculpt_mid
+    };
+    if mark.is_none() {
+        *mark = sculpt_metrics(&chunks, &sdfs);
+    }
+    sculpt.write(SdfSculptSphere {
+        center: sculpt_center(in_stroke),
+        radius: SCULPT_RADIUS,
+        sweep_from: in_stroke.checked_sub(1).map(sculpt_center),
+        amount: SCULPT_AMOUNT,
+        op: if smoothing {
+            SdfSculptOp::Smooth
+        } else {
+            SdfSculptOp::Flatten {
+                point: sculpt_target(),
+                normal: Vec3::Y,
+                mode: PlaneMode::Flatten,
+            }
+        },
+    });
+}
+
+/// Whether `metric` fell by `SCULPT_MARGIN` between two marks, and what to
+/// say about it.
+fn sculpt_fell(
+    metric: &str,
+    before: Option<SculptMetrics>,
+    after: Option<SculptMetrics>,
+    pick: fn(SculptMetrics) -> f32,
+) -> (bool, String) {
+    let (Some(before), Some(after)) = (before, after) else {
+        return (
+            false,
+            format!("{metric}: the sculpt spot never reached High, so nothing was measured"),
+        );
+    };
+    let (was, now) = (pick(before), pick(after));
+    let fell = if was > 0.0 { 1.0 - now / was } else { 0.0 };
+    (
+        fell >= SCULPT_MARGIN,
+        format!(
+            "{metric} {was:.4} -> {now:.4} over {} voxels ({:.1}% down, {:.0}% wanted)",
+            after.voxels,
+            fell * 100.0,
+            SCULPT_MARGIN * 100.0
+        ),
+    )
+}
+
+/// Each stroke moved the field the way its tool is defined to. This is the
+/// only coverage `apply_sphere_at` has in the bench: the other phases all
+/// write `SdfCsgSphere`, which goes the other way through `csg_sphere_delta`.
+fn check_sculpt(mut bench: ResMut<Bench>, chunks: Res<ChunkManager>, sdfs: Query<&SDF>) {
+    if !Phase::Sculpt.last_frame(&bench) {
+        return;
+    }
+    let end = sculpt_metrics(&chunks, &sdfs);
+    let (start, mid) = (bench.sculpt_start, bench.sculpt_mid);
+    let (pass, detail) = sculpt_fell("roughness", start, mid, |m| m.roughness);
+    bench
+        .checks
+        .record(Phase::Sculpt, "sculpt_smooths", pass, detail);
+    let (pass, detail) = sculpt_fell("plane offset", mid, end, |m| m.offset);
+    bench
+        .checks
+        .record(Phase::Sculpt, "sculpt_flattens", pass, detail);
 }
 
 // ---------------------------------------------------------------------------

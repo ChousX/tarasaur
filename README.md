@@ -248,11 +248,13 @@ cargo test -j 2      # full parallelism can run out of memory
 
 ## Benchmarking and profiling
 
-The bench runs repeatable phases (load, shots, hold, spin, fly, edit, box,
-query, reslot, visibility, dig) and writes its results to `bench_results/`
-after every phase. `shots` saves four views to `bench_results/shots/`;
-`--diff` compares two of them. The last
-five also check correctness: box brushes stay inside the box, GPU ray queries
+The bench runs repeatable phases (load, shots, hold, spin, fly, edit, sculpt,
+box, query, reslot, visibility, dig) and writes its results to
+`bench_results/` after every phase. `shots` saves four views to
+`bench_results/shots/`; `--diff` compares two of them. The last
+six also check correctness: a smooth brush rounds off creases a CSG edit left
+and a flatten brush pulls the field onto its plane, box brushes stay inside
+the box, GPU ray queries
 return one result per ray and agree with the CPU ray, chunks that lose and
 regain their arena slot get their materials back (read back from the GPU),
 visibility masks on the GPU match the edited and removed `VisibilityField`s,
