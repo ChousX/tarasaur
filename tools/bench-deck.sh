@@ -7,6 +7,14 @@
 #   tools/bench-deck.sh install                      # build and install only
 #   tools/bench-deck.sh package                      # build and lay out only
 #
+# The run happens in a transient systemd user unit on the Deck, not under the
+# ssh that starts it. Tailscale's ssh server reaps the whole session when the
+# connection goes, `setsid` and `nohup` included -- a detached run died three
+# seconds in, taking its own exit status with it -- and a run long enough to
+# matter is exactly the one a dropped connection kills. We poll for the unit
+# to finish instead, slowly: the poll is an ssh login on the machine under
+# test, and it lands in the `other` CPU column of whatever phase is running.
+#
 # e.g. `tools/bench-deck.sh`, `tools/bench-deck.sh arenas -- --small-arenas`.
 #
 # SteamOS has no compiler, its root is read-only and its /home runs full, so
@@ -36,6 +44,7 @@
 #   REMOTE   its package directory        (tarasaur-bench)
 #   RUNDIR   its scratch/results parent   (tarasaur-run)
 #   LABEL    result label                 (deck-<short sha>)
+#   POLL     seconds between completion checks (30)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DECK=${DECK:-steamdeck}
@@ -104,6 +113,28 @@ install_pkg() {
 	rsync -a --delete "$PKG/" "$DECK:$REMOTE/"
 }
 
+# Runs a command on the Deck in a transient systemd user unit and waits for
+# it, so the run outlives the ssh that started it (see the header). Its output
+# goes to a log on the Deck and is printed once it finishes, rather than
+# streamed, because holding the connection open is the thing we're avoiding.
+run_detached() {
+	local unit=tarasaur-bench-$$
+	# An absolute path, resolved here: the command is quoted with %q on its way
+	# to `bash -lc`, so a `$HOME` in it would arrive as four literal characters
+	# and the unit would write its log relative to wherever systemd put it.
+	local home
+	home=$(ssh "$DECK" 'echo $HOME')
+	local log="$home/$RUNDIR/$unit.log"
+	ssh "$DECK" "mkdir -p $home/$RUNDIR && systemd-run --user --unit=$unit \
+		--collect --service-type=exec \
+		bash -lc $(printf '%q' "{ $1 ; } > $log 2>&1")" >&2
+	echo "+ $unit started on $DECK; polling every ${POLL:-30}s" >&2
+	while ssh "$DECK" "systemctl --user is-active $unit >/dev/null 2>&1"; do
+		sleep "${POLL:-30}"
+	done
+	ssh "$DECK" "cat $log; rm -f $log"
+}
+
 case ${1:-} in
 	package)
 		package
@@ -125,7 +156,7 @@ case ${1:-} in
 		install_pkg
 		# The scratch world goes on the Deck's own disk, not the build host's
 		# path baked into the binary.
-		ssh "$DECK" "$REMOTE/bench --label $(printf '%q' "$label") \
+		run_detached "$REMOTE/bench --label $(printf '%q' "$label") \
 			--commit $(git rev-parse --short HEAD) \
 			--out \$HOME/$RUNDIR/results --world-dir \$HOME/$RUNDIR/world \
 			$(printf '%q ' "$@")"
