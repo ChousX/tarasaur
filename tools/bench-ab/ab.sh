@@ -43,33 +43,7 @@ cd "$repo"
 sums() { for i in $(seq 1 "$pairs"); do ls -t bench_results/"$name-$1$i"-*.summary.csv 2>/dev/null | head -1; done; }
 {
   echo; echo "== $name: A=$(basename "$A") B=$(basename "$B") pairs=$pairs args=${args[*]}"
-  awk -F, -v pairs="$pairs" '
-    FNR == 1 { f++; grp = (f <= pairs) ? "A" : "B" }
-    $1 ~ /^(load|hold|spin|fly|edit|box|query|reslot|visibility|dig)$/ && $2 ~ /^(seconds|frame_ms_mean|frame_ms_p95|frame_ms_p99|gpu_raster_ms_mean|gpu_mesh_ms_total)$/ {
-      if ($1 == "load" && $2 != "seconds") next
-      if ($1 != "load" && $2 == "seconds") next
-      k = $1 " " $2; if (!(k in seen)) { seen[k] = 1; keys[++nk] = k }
-      n[k, grp]++; s[k, grp] += $3
-      if (!((k, grp) in mn) || $3 < mn[k, grp]) mn[k, grp] = $3
-      if (!((k, grp) in mx) || $3 > mx[k, grp]) mx[k, grp] = $3
-    }
-    $2 ~ /^check:/ && $3 == 0 { fail[$1 "/" $2 " (" grp ")"] = 1 }
-    END {
-      printf "%-30s %9s %7s %9s %7s %8s\n", "metric", "A mean", "A sprd", "B mean", "B sprd", "B vs A"
-      for (j = 1; j <= nk; j++) {
-        k = keys[j]
-        if (!n[k, "A"] || !n[k, "B"]) continue
-        a = s[k, "A"] / n[k, "A"]; b = s[k, "B"] / n[k, "B"]
-        sa = (a != 0) ? 100 * (mx[k, "A"] - mn[k, "A"]) / a : 0
-        sb = (b != 0) ? 100 * (mx[k, "B"] - mn[k, "B"]) / b : 0
-        d = (a != 0) ? 100 * (b - a) / a : 0
-        flag = ""
-        if (d < -1 && -d > 2 * (sa > sb ? sa : sb)) flag = " better"
-        if (d > 1 && d > 2 * (sa > sb ? sa : sb)) flag = " WORSE"
-        printf "%-30s %9.3f %6.1f%% %9.3f %6.1f%% %+7.1f%%%s\n", k, a, sa, b, sb, d, flag
-      }
-      for (x in fail) print "FAILED CHECK " x
-    }' $(sums A) $(sums B)
+  awk -F, -v pairs="$pairs" -f "$here/table.awk" $(sums A) $(sums B)
   echo "-- system (mean over runs: other cpu% / bench gpu% / other gpu% / GPU MHz / RAM GiB)"
   for g in A B; do
     for i in $(seq 1 "$pairs"); do cat "$work/runs/$name-$g$i.sys.summary"; done |
