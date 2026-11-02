@@ -3,7 +3,7 @@
 //! every `Field`.
 
 use super::{Field, IVec3, UVec3, Vec3};
-use crate::num::u8_from_f32;
+use crate::num::{f32_from_u32, u8_from_f32, u32_from_f32};
 use bevy::tasks::{ComputeTaskPool, TaskPool};
 
 use bevy::shape::{Cuboid, Sphere};
@@ -154,6 +154,37 @@ impl Sweep {
         let min = (self.from.min(self.to) - pad).max(Vec3::ZERO).as_ivec3();
         let max = (self.from.max(self.to) + pad).min(max_bound).as_ivec3();
         grid_range(min, max)
+    }
+
+    /// The x span, inclusive, where this capsule of `radius` can reach the
+    /// line through `(_, y, z)`; `None` when it can't reach that line at all.
+    ///
+    /// [`range`](Self::range) is a box, so for a row near the capsule's edge
+    /// most of it is out of reach and used to be visited and rejected one
+    /// voxel at a time. This bounds the row instead.
+    ///
+    /// Never narrower than the truth, and exact for a plain sphere. A point
+    /// inside the capsule has a closest point `c` on the segment, and `c.y`
+    /// lies within the segment's own y range, so `|y - c.y|` is at least the
+    /// gap from `y` to that range (and the same for z). What is left of
+    /// `radius` then bounds `|x - c.x|`, and `c.x` lies between the segment's
+    /// x bounds. Callers still test every voxel they visit, so a loose span
+    /// only costs a few wasted tests -- but a narrow one would silently drop
+    /// voxels, which is what `span_never_drops_a_voxel_in_reach` guards.
+    #[must_use]
+    pub fn x_span(&self, radius: f32, y: f32, z: f32) -> Option<(f32, f32)> {
+        let lo = self.from.min(self.to);
+        let hi = self.from.max(self.to);
+        // How far outside the segment's own extent this row sits, per axis.
+        let gap = |v: f32, lo: f32, hi: f32| (lo - v).max(v - hi).max(0.0);
+        let dy = gap(y, lo.y, hi.y);
+        let dz = gap(z, lo.z, hi.z);
+        let left = radius.mul_add(radius, -dy.mul_add(dy, dz * dz));
+        if left < 0.0 {
+            return None;
+        }
+        let reach = left.sqrt();
+        Some((lo.x - reach, hi.x + reach))
     }
 }
 
@@ -429,7 +460,19 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
             let mut out = Vec::new();
             for z in zs {
                 for y in min.y..=max.y {
-                    for x in min.x..=max.x {
+                    // Only the part of the row the brush can reach. The rest
+                    // of `range`'s box was visited and rejected a voxel at a
+                    // time, which at the brush sizes the sandbox uses is about
+                    // half of every edit (bench_results/deck-improvements.md).
+                    let Some((from_x, to_x)) = at.x_span(outer, f32_from_u32(y), f32_from_u32(z))
+                    else {
+                        continue;
+                    };
+                    // Saturating both ways, so a span off either end of the
+                    // grid gives an empty range rather than a wrapped one.
+                    let first = min.x.max(u32_from_f32(from_x.ceil()));
+                    let last = max.x.min(u32_from_f32(to_x.floor()));
+                    for x in first..=last {
                         let dist = at.distance(UVec3::new(x, y, z).as_vec3());
                         if dist > outer {
                             continue;
@@ -781,8 +824,75 @@ mod tests {
     use crate::{
         field::Field,
         field::{LOD, SDF, VisibilityField},
-        num::{f32_from_u32, usize_from},
+        num::{f32_from_i32, f32_from_u32, usize_from},
     };
+
+    /// `Sweep::x_span` must never be narrower than the truth: it bounds the
+    /// loop that applies an edit, so a voxel it leaves out is a voxel the
+    /// brush silently fails to carve. Sweeps a grid of rows past spheres and
+    /// real capsules and checks every point actually in reach is spanned.
+    #[test]
+    fn span_never_drops_a_voxel_in_reach() {
+        let cases = [
+            // (from, to, radius)
+            (Vec3::new(3.0, 3.0, 3.0), Vec3::new(3.0, 3.0, 3.0), 2.5), // sphere
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 1.0), // tiny sphere
+            (Vec3::new(1.0, 2.0, 3.0), Vec3::new(7.0, 2.0, 3.0), 2.0), // along x
+            (Vec3::new(1.0, 1.0, 1.0), Vec3::new(1.0, 6.0, 1.0), 1.5), // along y
+            (Vec3::new(2.0, 5.0, 1.0), Vec3::new(6.0, 1.0, 7.0), 3.0), // diagonal
+            (Vec3::new(-4.0, 2.0, 2.0), Vec3::new(9.0, 3.5, -1.0), 2.25),
+        ];
+        let step = 0.25;
+        for (from, to, radius) in cases {
+            let sweep = Sweep { from, to };
+            for iy in -40..60 {
+                for iz in -40..60 {
+                    let (y, z) = (f32_from_i32(iy) * step, f32_from_i32(iz) * step);
+                    let span = sweep.x_span(radius, y, z);
+                    for ix in -60..80 {
+                        let x = f32_from_i32(ix) * step;
+                        if sweep.distance(Vec3::new(x, y, z)) > radius {
+                            continue;
+                        }
+                        let Some((lo, hi)) = span else {
+                            panic!(
+                                "{from:?}->{to:?} r{radius}: no span for a row holding ({x}, {y}, {z})"
+                            );
+                        };
+                        assert!(
+                            lo <= x && x <= hi,
+                            "{from:?}->{to:?} r{radius}: ({x}, {y}, {z}) is in reach but the span is {lo}..={hi}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And it should be tight for a sphere, or the bound buys nothing: the
+    /// span's width is the chord, within one step of it.
+    #[test]
+    fn span_is_tight_for_a_sphere() {
+        let sweep = Sweep::point(Vec3::new(5.0, 5.0, 5.0));
+        let radius = 4.0;
+        for iy in 0..40 {
+            for iz in 0..40 {
+                let (y, z) = (f32_from_i32(iy) * 0.25, f32_from_i32(iz) * 0.25);
+                let Some((lo, hi)) = sweep.x_span(radius, y, z) else {
+                    continue;
+                };
+                let (dy, dz) = (y - 5.0, z - 5.0);
+                let chord = radius.mul_add(radius, -dy.mul_add(dy, dz * dz));
+                assert!(chord >= 0.0, "a span was returned for an out-of-reach row");
+                let want = chord.sqrt() * 2.0;
+                assert!(
+                    (hi - lo - want).abs() < 1e-4,
+                    "span width {} vs chord {want} at ({y}, {z})",
+                    hi - lo
+                );
+            }
+        }
+    }
 
     /// An SDF holding `f(x, y, z)` at every voxel.
     fn sdf_from(f: impl Fn(f32, f32, f32) -> f32) -> SDF {
