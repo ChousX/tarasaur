@@ -307,6 +307,19 @@ SteamOS; everything else it needs is checked to be there at package time. The
 bench loads no files, so the Deck needs no checkout. Results come back to
 `bench_results/` labelled `deck-<label>` (default: the commit hash).
 
+The package also carries `tools/bench-ab` as `ab/`, so a Deck run can have
+the sampler and the verdicts alongside it — the sampler has to run on the
+machine being measured:
+
+```sh
+ssh steamdeck 'BENCH_AB_DIR=$HOME/r/ab BENCH_RESULTS=$HOME/r/results \
+  BENCH_PIDFILE_OWNER=cmd tarasaur-bench/ab/run.sh tarasaur-bench/bench <label>'
+```
+
+`BENCH_PIDFILE_OWNER=cmd` is needed there: the launcher wraps the bench in
+gamescope, which forks, so the launcher records the pid to measure rather than
+`run.sh` timing the wrapper.
+
 `tools/deck/bench.sh` is the launcher installed on the Deck. It runs the
 bench inside a nested gamescope, which is how a game runs there: a real
 swapchain, present and composite path, with the render resolution fixed at
