@@ -65,6 +65,7 @@
 #   A_ARGS       extra bench flags for variant A only
 #   B_ARGS       extra bench flags for variant B only
 #   AB_TARGET_DIR  build the variants here instead of the checkout's target/
+#   REUSE_NAME     proceed even though bench_results already holds this name
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo=$PWD
@@ -79,6 +80,21 @@ name=$1; Aspec=$2; Bspec=$3; pairs=${4:-3}
 shift $(( $# >= 4 ? 4 : 3 ))
 [ "${1:-}" = "--" ] && shift
 args=("$@")
+
+# bench_results/ accumulates every run ever made, on every machine, and the
+# table picks each run's summary by a `<name>-A1-*` glob. A name reused from an
+# older experiment matches those too -- `pool` already names a six-run set
+# measured on toth's GTX 1070 -- and only `ls -t` picking the newest saves it.
+# That is luck, not a guarantee: rsync preserves the Deck's mtimes, so a clock
+# skew between the two machines is enough to lose the coin toss and quietly
+# build a table from another machine's numbers. Refuse the collision instead.
+if ls "$repo/bench_results/$name-A1-"*.summary.csv >/dev/null 2>&1; then
+	echo "error: bench_results already has $name-A1-* from an earlier" \
+		"experiment. Pick an unused name, or set REUSE_NAME=1 if you really" \
+		"mean to mix the two." >&2
+	[ -n "${REUSE_NAME:-}" ] || exit 2
+	echo "note: REUSE_NAME set; continuing into an existing result set" >&2
+fi
 
 work=$repo/target/deck-ab/$name
 mkdir -p "$work/runs"
