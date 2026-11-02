@@ -490,7 +490,13 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
                         let s = dist - radius;
                         let v = UVec3::new(x, y, z);
                         let c = read(v);
+                        // Only what the field can hold: past the band a dig
+                        // asks for a value `set` would clamp straight back to
+                        // the one already there, and the write, the `set` and
+                        // (once the step stops blocking it) the whole chunk
+                        // are work for nothing.
                         let target = if subtract { c.max(-s) } else { c.min(s) };
+                        let target = self.storable(T::from_signed_distance(target)).distance();
                         let new = max_step.map_or(target, |step| {
                             let rising = target >= c;
                             // Behind the surface (air in a dig, rock in a

@@ -56,6 +56,13 @@ pub trait Field<T: Copy + Default>: Component {
     fn get(&self, x: u32, y: u32, z: u32) -> T;
     /// Sets the value at the given grid coordinates.
     fn set(&mut self, x: u32, y: u32, z: u32, value: T);
+    /// What [`Field::set`] would store for `value`. A field whose range is
+    /// narrower than `T` clamps here, so an edit can tell a write that
+    /// would change the field from one that would not: asking for a value
+    /// the field cannot hold is asking for nothing. Identity by default.
+    fn storable(&self, value: T) -> T {
+        value
+    }
 }
 
 /// Which GPU buffer a field's padded volume feeds. At most one field per
