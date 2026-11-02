@@ -80,7 +80,10 @@ pre=$(awk '/^# invariants/ {
 verdict=$(awk \
   -v dcpu="${DISTURB_CPU_PCT:-15}" -v dgpu="${DISTURB_GPU_PCT:-5}" \
   -v tmax="${THROTTLE_DEGC:-92}" '
-  $1 ~ /^(hold|spin|fly|edit|visibility)$/ {
+  # Every measured phase, not just the steady ones: a dig disturbed by
+  # another process used to grade clean, and dig is the phase we care most
+  # about. load and shots are startup and noisy by nature.
+  $1 ~ /^(hold|spin|fly|edit|box|query|reslot|visibility|dig)$/ {
     if ($5 > dcpu || $9 > dgpu) bad = bad " " $1 "(cpu " $5 " gpu " $9 ")"
   }
   # Thermal clamping only. At 15 W this hardware is *meant* to be power
@@ -116,6 +119,8 @@ if [[ -n $summary ]]; then
     $2 == "frame_ms_p50" { p50[$1] = $3 + 0 }
     $2 == "frame_ms_p95" { p95[$1] = $3 + 0 }
     $1 == "load" && $2 == "timed_out" && $3 + 0 != 0 { to = 1 }
+    /^# / { quick = ($0 ~ /quick=true/) }
+    $2 == "frames" { ran[$1] = 1 }
     END {
       for (ph in p50) {
         if (p50[ph] >= r - 0.3 && p50[ph] <= r + 0.5 && p95[ph] < r + 1.3)
@@ -123,6 +128,11 @@ if [[ -n $summary ]]; then
       }
       if (bad != "") printf "CAPPED:%s", bad
       if (to) printf " LOAD_TIMEOUT"
+      # Results are written after every phase, so a run that died partway
+      # leaves a summary that reads like a valid shorter one -- and the bench
+      # can exit 0 doing it. The last phase has to be there.
+      last = quick ? "visibility" : "dig"
+      if (!(last in ran)) printf " TRUNCATED:no-%s", last
     }' "$summary")
   [[ -n $capped ]] && verdict="$verdict $capped"
 else
