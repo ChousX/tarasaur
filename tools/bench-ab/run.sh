@@ -20,7 +20,12 @@
 #                    in something that forks, as the Deck launcher's gamescope
 #                    does -- otherwise we would time the wrapper.
 #   DISTURB_CPU_PCT  other-process CPU that spoils a phase (15)
+#   DISTURB_CPU_PCT_DIG
+#                    the same for dig, which has the lowest floor and
+#                    carries the most weight (5)
 #   DISTURB_GPU_PCT  other-process GPU that spoils a phase (5)
+#   DISTURB_MIN_SAMPLES
+#                    samples a phase needs before it can be graded at all (3)
 #   THROTTLE_DEGC    GPU temperature that spoils a phase (92)
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -77,14 +82,27 @@ pre=$(awk '/^# invariants/ {
   }' "$base.sys.log")
 [[ -n $pre ]] && echo "preconditions: $pre" >>"$base.sys.summary"
 
-verdict=$(awk \
-  -v dcpu="${DISTURB_CPU_PCT:-15}" -v dgpu="${DISTURB_GPU_PCT:-5}" \
+verdict_notes=$(awk \
+  -v dcpu="${DISTURB_CPU_PCT:-15}" -v ddig="${DISTURB_CPU_PCT_DIG:-5}" \
+  -v dgpu="${DISTURB_GPU_PCT:-5}" -v minn="${DISTURB_MIN_SAMPLES:-3}" \
   -v tmax="${THROTTLE_DEGC:-92}" '
   # Every measured phase, not just the steady ones: a dig disturbed by
   # another process used to grade clean, and dig is the phase we care most
   # about. load and shots are startup and noisy by nature.
   $1 ~ /^(hold|spin|fly|edit|box|query|reslot|visibility|dig)$/ {
-    if ($5 > dcpu || $9 > dgpu) bad = bad " " $1 "(cpu " $5 " gpu " $9 ")"
+    # A phase the sampler caught once or twice is not evidence either way.
+    # SteamOS idles at 8-11% of this CPU, so a lone sample sits near any
+    # useful threshold about as often as not: nine of nine runs were once
+    # rejected for a one-sample `spin`. Say the phase went unjudged instead
+    # of throwing the run away over it.
+    if ($2 + 0 < minn) { thin = thin " " $1 "(n=" $2 ")"; next }
+    # dig gets a tighter bound: it saturates the CPU, so background work is
+    # starved there -- five of six runs measured 3.4-3.6% other -- well under
+    # the 8-11% the lighter phases idle at, and every conclusion rests on it.
+    # The sixth measured 6.3% and came out 5% slow, and the flat 15% graded
+    # it clean. 5% leaves room over the floor and still catches that run.
+    lim = ($1 == "dig" ? ddig : dcpu)
+    if ($5 > lim || $9 > dgpu) bad = bad " " $1 "(cpu " $5 " gpu " $9 ")"
   }
   # Thermal clamping only. At 15 W this hardware is *meant* to be power
   # limited -- the CPU and GPU share one rail, so a dip in GPU clock during
@@ -95,10 +113,18 @@ verdict=$(awk \
     hot = hot " " $1 "(" $19 "C)"
   }
   /kcompactd|kswapd/ { note = note " " $2 "=" $1 "s" }
+  # Two lines: what fails the run, then what is merely worth knowing. They
+  # were one string, so a run whose only remark was a reclaim note or an
+  # unjudged phase did not start with "clean" and exited 3 -- a note could
+  # fail a run. Notes are information; only DISTURBED and THROTTLED decide.
   END {
-    print (bad == "" ? "" : "DISTURBED:" bad) (hot == "" ? "" : " THROTTLED:" hot) \
-      (note == "" ? "" : " [reclaim:" note "]")
+    print (bad == "" ? "" : "DISTURBED:" bad) (hot == "" ? "" : " THROTTLED:" hot)
+    print (thin == "" ? "" : "unjudged:" thin) (note == "" ? "" : " reclaim:" note)
   }' "$base.sys.summary")
+verdict=$(sed -n 1p <<<"$verdict_notes")
+notes=$(sed -n 2p <<<"$verdict_notes")
+notes=${notes# }
+[[ -n $notes ]] && echo "notes: $notes" >>"$base.sys.summary"
 
 # A compositor capping us at the display refresh would read as "exactly at the
 # 60 fps target" -- the one failure that looks like success. See pool-ab.md:

@@ -15,9 +15,17 @@
 # `gpu` must stay last: its list can be empty, which would swallow whatever
 # followed it.
 #
-# Env: INTERVAL (default 1.0 on <= 8 cores, else 0.5 -- the sampler forks a
-# few processes per tick and on 4 cores that is itself load), GPU_DEVFREQ,
+# Env: INTERVAL (default 0.25 on <= 8 cores, else 0.5), GPU_DEVFREQ,
 # GPU_HWMON (both probed if unset).
+#
+# The slow default used to be 1.0 on <= 8 cores, on the grounds that the
+# sampler forks a few processes per tick and on 4 cores that is itself load.
+# It is, and it counts as "other" in its own measurement -- but the Deck's
+# short phases are 1.6 s (query) to 2.6 s (spin), so one tick a second gave
+# them one or two samples, and `run.sh` was condemning whole runs on a single
+# reading of a machine whose own idle floor is 8-11% of the CPU. Samples the
+# verdict can stand on are worth more than the tick's own cost; it is small
+# and it shows up in the `other` column, where it can be checked.
 out=$1
 pidfile=$2
 ncpu=$(nproc 2>/dev/null || echo 1)
