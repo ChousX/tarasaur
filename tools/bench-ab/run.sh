@@ -89,7 +89,7 @@ verdict_notes=$(awk \
   # Every measured phase, not just the steady ones: a dig disturbed by
   # another process used to grade clean, and dig is the phase we care most
   # about. load and shots are startup and noisy by nature.
-  $1 ~ /^(hold|spin|fly|edit|box|query|reslot|visibility|dig)$/ {
+  $1 ~ /^(hold|spin|fly|edit|sculpt|box|query|reslot|visibility|dig)$/ {
     # A phase the sampler caught once or twice is not evidence either way.
     # SteamOS idles at 8-11% of this CPU, so a lone sample sits near any
     # useful threshold about as often as not: nine of nine runs were once
@@ -117,7 +117,7 @@ verdict_notes=$(awk \
   # the CPU-bound dig is correct behaviour, not a spoiled run. Rejecting on
   # power would reject every honest run and quietly redefine the target
   # against hardware that does not exist.
-  $1 ~ /^(hold|spin|fly|edit|visibility|dig)$/ && $19 + 0 >= tmax {
+  $1 ~ /^(hold|spin|fly|edit|sculpt|visibility|dig)$/ && $19 + 0 >= tmax {
     hot = hot " " $1 "(" $19 "C)"
   }
   /kcompactd|kswapd/ { note = note " " $2 "=" $1 "s" }
