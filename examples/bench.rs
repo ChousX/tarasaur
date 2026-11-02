@@ -5,6 +5,14 @@
 //!
 //! ```text
 //! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes] [--quick]
+//! ```
+//!
+//! `--out DIR` puts the results somewhere else, and `--world-dir DIR` the
+//! scratch world. Both default under the checkout the binary was built from,
+//! so a run on another machine (see `tools/bench-deck.sh`) needs them, along
+//! with `--commit <sha>` for the result header.
+//!
+//! ```text
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 //! ```
@@ -393,18 +401,31 @@ fn main() -> AppExit {
     }
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let manifest = Path::new(manifest_dir);
+    // Baked at build time, so off the build host it names a path that isn't
+    // there; fall back to the working directory and let the flags below say
+    // where things really go.
+    let base = if manifest.is_dir() {
+        manifest.to_path_buf()
+    } else {
+        PathBuf::from(".")
+    };
     let out = Output {
-        dir: flag("--out").map_or_else(|| manifest.join("bench_results"), PathBuf::from),
+        dir: flag("--out").map_or_else(|| base.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
         depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
         small_arenas: args.iter().any(|a| a == "--small-arenas"),
         quick: args.iter().any(|a| a == "--quick"),
-        commit: std::process::Command::new("git")
-            .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map_or_else(|| "unknown".into(), |s| s.trim().to_string()),
+        // `--commit` for a run off the build host, where the checkout the
+        // binary was built from isn't there to ask.
+        commit: flag("--commit").unwrap_or_else(|| {
+            std::process::Command::new("git")
+                .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .filter(|s| !s.trim().is_empty())
+                .map_or_else(|| "unknown".into(), |s| s.trim().to_string())
+        }),
         stamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
@@ -417,7 +438,10 @@ fn main() -> AppExit {
 
     // An empty scratch save directory, so every run generates the same
     // terrain from scratch and your saves are never read or written.
-    let world_dir = manifest.join("target").join("bench-world");
+    // `--world-dir` for a run off the build host, whose `CARGO_MANIFEST_DIR`
+    // is the build host's path and doesn't exist here.
+    let world_dir =
+        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     let _ = std::fs::remove_dir_all(&world_dir);
 
     // Bevy's default gives io and async_compute 25% of the cores each (capped
@@ -2406,8 +2430,8 @@ fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
     lines
 }
 
-/// Every flag, for offline analysis: `bench_results/mesh-<phase>.csv`.
-fn write_mesh_csv(phase: Phase, r: &MeshReport) {
+/// Every flag, for offline analysis: `<out dir>/mesh-<phase>.csv`.
+fn write_mesh_csv(dir: &Path, phase: Phase, r: &MeshReport) {
     let mut csv = String::from("kind,value,cx,cy,cz,lod,size,lx,ly,lz,neighbours\n");
     let kinds = [
         ("off", &r.off_surface),
@@ -2433,7 +2457,8 @@ fn write_mesh_csv(phase: Phase, r: &MeshReport) {
             );
         }
     }
-    let _ = std::fs::write(format!("bench_results/mesh-{}.csv", phase.name()), csv);
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(format!("mesh-{}.csv", phase.name())), csv);
 }
 
 fn check_meshes(mut bench: ResMut<Bench>, probe: Res<MeshProbe>) {
@@ -2448,7 +2473,7 @@ fn check_meshes(mut bench: ResMut<Bench>, probe: Res<MeshProbe>) {
         match state.done.iter().find(|(p, _)| *p == phase) {
             None => (false, "readback unfinished".to_string()),
             Some((_, r)) => {
-                write_mesh_csv(phase, r);
+                write_mesh_csv(&bench.out.dir, phase, r);
                 // A few folds are still known at LOD seam corners, so they're
                 // reported (and in the CSV) without failing the run.
                 let pass = r.chunks > 0
