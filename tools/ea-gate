@@ -72,8 +72,11 @@ RUNNER_EOF
       # devenv supplies the toolchain through direnv, so the .envrc has to be
       # approved or every gate dies before it starts. Approved here rather
       # than per-run: it is the same two-line `use devenv` as on toth.
+      # A --no-checkout clone has no working tree, so .envrc does not exist yet
+      # and an approve-if-present check silently skips. Materialise a tree first.
       ssh -o BatchMode=yes "$EA" "
         cd \$HOME/Projects/$r 2>/dev/null || exit 0
+        [ -f .envrc ] || git checkout --force --detach origin/HEAD >/dev/null 2>&1 || true
         [ -f .envrc ] || exit 0
         direnv status 2>/dev/null | grep -q 'allowed 0' || direnv allow \$HOME/Projects/$r/.envrc" || true
     done
@@ -110,8 +113,15 @@ MSG
         echo \"ea is not answering: \$l\"; exit 1; }
       awk -v l=\"\$l\" 'BEGIN{exit !(l<3.5)}' && exit 0
       echo \"ea load is \$l, waiting for it to fall below 3.5\"; exit 1"
+    # `ssh -tt`, not plain ssh. Without a tty the remote command SURVIVES the
+    # local ssh dying, so a cancelled or crashed ticket leaves cargo burning ea
+    # while the queue hands the machine to the next waiter -- two jobs at once,
+    # which is the exact thing this queue exists to prevent. Observed, not
+    # theorised: a cancelled warm build kept 7 rustc processes at 95% CPU after
+    # its ticket was gone. With a tty the remote gets SIGHUP on disconnect and
+    # its process group goes with it.
     exec /home/chousx/.local/bin/deck-queue run "ea-${repo}-$(date +%H%M%S)" -- \
-      ssh -o BatchMode=yes "$EA" "$RUNNER" "$repo" "$ref" "$(printf '%s' "$*" | base64 -w0)"
+      ssh -tt -o BatchMode=yes "$EA" "$RUNNER" "$repo" "$ref" "$(printf '%s' "$*" | base64 -w0)"
     ;;
 
   status|log|preflight|cancel)

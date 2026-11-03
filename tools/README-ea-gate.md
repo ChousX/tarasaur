@@ -59,3 +59,31 @@ clone's default HEAD and **reported success**. The command now travels
 base64-encoded to a runner on ea which resolves the ref itself, never pipes the
 checkout, and runs under `bash -eo pipefail -c` — because a gate that returns 0
 while failing is the exact hazard this tooling exists to catch.
+
+## Two bugs found by cancelling a ticket
+
+**A cancelled ticket used to leave the work running.** Plain `ssh host cmd`
+allocates no tty, so the remote command survives the local ssh dying: a
+cancelled warm build kept **seven rustc processes at 95% CPU on ea after its
+ticket was gone**, while the queue handed the machine to the next waiter. Two
+jobs at once is precisely what the queue exists to prevent, so a queue that
+can do this is worse than none — it reports exclusivity it does not have.
+
+`ssh -tt` fixes it: with a tty the remote gets SIGHUP on disconnect and its
+process group goes too. Measured both ways, same command, same host:
+
+| | remote `sleep 277` before kill | after kill |
+|---|---|---|
+| plain `ssh` | 1 | **1** — survives |
+| `ssh -tt` | 1 | **0** — dies with the connection |
+
+**`setup` silently skipped approving `.envrc`.** It tested `[ -f .envrc ]`, but
+a `--no-checkout` clone has no working tree, so the file did not exist yet and
+the approve was skipped without complaint. `tarasaur` appeared to work only
+because a gate had already checked out a ref and created it; `ornisculpt`'s
+first gate then died in 0 s on `.envrc is blocked`. Setup now materialises a
+tree before approving.
+
+Both of these were found by an agent reporting a failure instead of working
+around it, which is the behaviour the house rules ask for and the reason the
+rule is there.
