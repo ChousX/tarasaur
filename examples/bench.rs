@@ -1714,6 +1714,15 @@ const MESH_GAP_CELL: f32 = 1.0;
 /// A vertex further than this from the heightfield, in its chunk's voxels,
 /// is off the surface. Surface nets keeps a vertex inside its cell, and a
 /// seam cell spans at most a few of this chunk's voxels.
+///
+/// That holds for every vertex but one kind, which this number cannot
+/// judge: a vertex the seam stitch pins to a chunk edge or corner. Its
+/// error is the terrain's height above that edge, continuous in it (1.28,
+/// 1.68, 2.07, 2.47, 2.87 Medium voxels at successive lattice steps of one
+/// logged edge), so 2.0 is no structural bound of it, and the logged
+/// failures (2.320, 2.074) and the hold site's corner (1.477 High) are this
+/// kind on the shipped shader (`seam_gpu`). Those are classified
+/// (`voxel::seam::pinned_cell`) and reported, not judged by this number.
 const MESH_MAX_OFF_SURFACE: f32 = 2.0;
 /// A triangle edge longer than this, in its chunk's voxels, is a sliver.
 const MESH_MAX_EDGE: f32 = 6.0;
