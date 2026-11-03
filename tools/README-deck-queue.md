@@ -60,3 +60,27 @@ It does not pick a result name for you. `bench_results/` is shared across
 machines and the findings tables glob by name — there are already two
 different run sets both called `pool-A1` — so that is still yours to get
 right.
+
+## toth needs the same thing, for a different reason
+
+`tools/bench-lock` is the same ticket queue pointed at toth:
+
+```bash
+bench-lock run <name> -- <bench command>
+```
+
+The Deck's problem is that two runs measure each other. toth's problem is
+worse: several agents build and bench here at once, and a timing taken at load
+26 on 16 cores is measuring the other agents rather than the change under test.
+So `bench-lock` admits one run at a time **and** waits for the 1-minute load
+average to fall below `BENCH_LOCK_MAXLOAD` (default 4.0) before letting the
+holder start.
+
+It waits for a quiet gap; it cannot *keep* the machine quiet, so the queue is
+still what stops someone starting a build on top of a measurement. Builds and
+tests do not need it — only numbers you intend to quote.
+
+The readiness check is the one generalisation this needed: `deck-queue` now
+takes `DECK_QUEUE_RESOURCE` (a name for messages) and `DECK_QUEUE_READY_CMD` (a
+command that must succeed before the holder runs). For the Deck that command is
+an ssh login; for toth it is a load-average test.

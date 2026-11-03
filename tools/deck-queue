@@ -21,6 +21,12 @@ set -euo pipefail
 
 STATE="${DECK_QUEUE_STATE:-$HOME/.local/state/deck-queue}"
 DECK="${DECK_HOST:-steamdeck}"
+# The same ticket logic serialises any single-occupancy measurement resource.
+# RESOURCE names it in messages; READY_CMD, when set, must succeed before the
+# holder is allowed to run (for the Deck that is "can we log in"; for toth it
+# is "is the machine quiet enough to measure on").
+RESOURCE="${DECK_QUEUE_RESOURCE:-the Deck}"
+READY_CMD="${DECK_QUEUE_READY_CMD:-}"
 POLL="${DECK_QUEUE_POLL:-2}"          # seconds between turn checks (local dir only)
 DECK_POLL="${DECK_QUEUE_DECK_POLL:-30}"  # seconds between reachability checks
 
@@ -36,10 +42,12 @@ locked(){ flock 9 "$@"; }
 # still refuse until the human clears a browser check.
 deck_up() {
   [ -n "${DECK_QUEUE_NO_PREFLIGHT:-}" ] && return 0
+  if [ -n "$READY_CMD" ]; then bash -c "$READY_CMD" >/dev/null 2>&1; return $?; fi
   timeout 25 ssh -o ConnectTimeout=10 -o BatchMode=yes "$DECK" true >/dev/null 2>&1
 }
 
 deck_why() {
+  if [ -n "$READY_CMD" ]; then bash -c "$READY_CMD" 2>&1 | tail -3; return; fi
   local err
   err=$(timeout 25 ssh -o ConnectTimeout=10 -o BatchMode=yes "$DECK" true 2>&1 >/dev/null || true)
   if [ -z "$err" ]; then echo "reachable"; else printf '%s\n' "$err" | tail -3; fi
@@ -130,8 +138,8 @@ cmd_run() {
     fi
     sleep "$POLL"
   done
-  echo "$(stamp) ticket $ticket HOLDS the Deck: $name" >>"$STATE/log"
-  echo "deck-queue: ticket $ticket holds the Deck" >&2
+  echo "$(stamp) ticket $ticket HOLDS $RESOURCE: $name" >>"$STATE/log"
+  echo "deck-queue: ticket $ticket holds $RESOURCE" >&2
 
   # --- the Deck has to actually be there ------------------------------------
   # We hold the claim while we wait: if the Deck is down, nobody else can use
@@ -140,17 +148,17 @@ cmd_run() {
   local waited=0
   until deck_up; do
     if [ "$waited" -ge "$deck_timeout" ]; then
-      echo "$(stamp) ticket $ticket ABORTED: Deck unreachable after ${waited}s -- $(deck_why)" >>"$STATE/log"
-      echo "deck-queue: Deck unreachable after ${waited}s. $(deck_why)" >&2
+      echo "$(stamp) ticket $ticket ABORTED: $RESOURCE not ready after ${waited}s -- $(deck_why)" >>"$STATE/log"
+      echo "deck-queue: $RESOURCE not ready after ${waited}s. $(deck_why)" >&2
       exit 75   # EX_TEMPFAIL: the work is fine, the instrument is not
     fi
     if [ "$waited" = 0 ]; then
-      echo "deck-queue: Deck not answering, holding ticket $ticket and waiting. $(deck_why)" >&2
-      echo "$(stamp) ticket $ticket waiting on the Deck -- $(deck_why)" >>"$STATE/log"
+      echo "deck-queue: $RESOURCE not ready, holding ticket $ticket and waiting. $(deck_why)" >&2
+      echo "$(stamp) ticket $ticket waiting on $RESOURCE -- $(deck_why)" >>"$STATE/log"
     fi
     sleep "$DECK_POLL"; waited=$((waited+DECK_POLL))
   done
-  [ "$waited" -gt 0 ] && echo "$(stamp) ticket $ticket: Deck came back after ${waited}s" >>"$STATE/log"
+  [ "$waited" -gt 0 ] && echo "$(stamp) ticket $ticket: $RESOURCE became ready after ${waited}s" >>"$STATE/log"
 
   # --- run it ---------------------------------------------------------------
   local logf="$STATE/runs/$(date +%Y%m%dT%H%M%S)-$name.log" rc=0 t0
@@ -185,11 +193,11 @@ cmd_status() {
     printf ']}\n'
     return
   fi
-  echo "Deck: $DECK"
+  echo "Resource: $RESOURCE"
   if [ -e "$STATE/active" ]; then
     echo "  RUNNING  ticket $(sed -n 's/^ticket=//p' "$STATE/active")  $(sed -n 's/^name=//p' "$STATE/active")  since $(sed -n 's/^started=//p' "$STATE/active")"
   else
-    echo "  idle"
+    echo "  free"
   fi
   local f n=0
   for f in $(ls -1 "$STATE"/q 2>/dev/null | sort -n); do
@@ -212,7 +220,7 @@ case "${1:-}" in
                echo "cancelled ticket $t"; echo "$(stamp) ticket $t cancelled" >>"$STATE/log"
              else echo "no waiting ticket $t" >&2; flock -u 9; exit 1; fi
              flock -u 9;;
-  preflight) if deck_up; then echo "Deck ($DECK) reachable"; else echo "Deck ($DECK) NOT reachable: $(deck_why)" >&2; exit 1; fi;;
+  preflight) if deck_up; then echo "$RESOURCE ready"; else echo "$RESOURCE NOT ready: $(deck_why)" >&2; exit 1; fi;;
   ""|-h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d';;
   *) echo "deck-queue: unknown command '$1' (try --help)" >&2; exit 2;;
 esac
