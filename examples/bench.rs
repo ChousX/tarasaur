@@ -1737,6 +1737,9 @@ struct MeshProbeState {
     pending: usize,
     /// Chunks to skip: edited on purpose.
     exclude: Vec<IVec3>,
+    /// World points whose nearby vertices the probe records in
+    /// `MeshReport::near` (the seam-site GPU test). Empty in a bench run.
+    watch: Vec<Vec3>,
     /// Chunks with data when the probe was asked for, meshed or not: an
     /// open edge beside one of these is a gap, beside anything else the edge
     /// of the loaded world.
@@ -1811,6 +1814,23 @@ struct MeshReport {
     loaded: HashSet<IVec3>,
     /// Each meshed chunk's seam ranks, as last uploaded.
     ranks: HashMap<IVec3, [u32; 2]>,
+    /// Vertices within `WATCH_RADIUS` of a `MeshProbeState::watch` point.
+    near: Vec<NearVertex>,
+}
+
+/// How close to a watched point a vertex is recorded, in world units.
+const WATCH_RADIUS: f32 = 1.0;
+
+/// A vertex near a watched point, as the GPU meshed it.
+#[derive(Clone, Copy, Debug)]
+struct NearVertex {
+    pos: IVec3,
+    lod: LOD,
+    world: Vec3,
+    /// Off the heightfield, in this chunk's voxels.
+    off: f32,
+    /// Normal off the heightfield's, in degrees.
+    normal_deg: f32,
 }
 
 /// Edges of the whole terrain mesh used by one triangle only (or by more
@@ -1853,6 +1873,7 @@ impl MeshReport {
         self.bad_normals.extend(part.bad_normals);
         self.world_triangles.extend(part.world_triangles);
         self.ranks.extend(part.ranks);
+        self.near.extend(part.near);
         for (m, p) in self.max_off.iter_mut().zip(part.max_off) {
             *m = m.max(p);
         }
@@ -1924,7 +1945,7 @@ fn read_back_meshes(
     queue: Res<RenderQueue>,
 ) {
     audit_aprons(&probe, &arenas, &device, &queue);
-    let (mesh_arenas, exclude) = {
+    let (mesh_arenas, exclude, watch) = {
         let Ok(mut s) = probe.0.lock() else {
             return;
         };
@@ -1946,7 +1967,11 @@ fn read_back_meshes(
         };
         let mesh_arenas = arenas.mesh_arenas();
         s.pending = mesh_arenas.len();
-        (mesh_arenas, Arc::new(s.exclude.clone()))
+        (
+            mesh_arenas,
+            Arc::new(s.exclude.clone()),
+            Arc::new(s.watch.clone()),
+        )
     };
     for arena in mesh_arenas {
         let sources = [
@@ -1979,6 +2004,7 @@ fn read_back_meshes(
 
         let state = probe.0.clone();
         let exclude = exclude.clone();
+        let watch = watch.clone();
         readback
             .clone()
             .slice(..)
@@ -2002,7 +2028,7 @@ fn read_back_meshes(
                             counts: piece(3),
                             meta: piece(4),
                         };
-                        check_arena_meshes(&arena, &exclude, &mesh, &mut part);
+                        check_arena_meshes(&arena, &exclude, &watch, &mesh, &mut part);
                     }
                     readback.unmap();
                 }
@@ -2322,6 +2348,7 @@ fn exceeds(v: f32, max: f32) -> bool {
 fn check_arena_meshes(
     arena: &tarasaur::voxel::inspect::MeshArena,
     exclude: &[IVec3],
+    watch: &[Vec3],
     mesh: &ArenaBytes,
     report: &mut MeshReport,
 ) {
@@ -2345,7 +2372,7 @@ fn check_arena_meshes(
         if checked {
             report.chunks = report.chunks.saturating_add(1);
             report.vertices = report.vertices.saturating_add(usize_from(count));
-            check_vertices(&chunk, mesh, report);
+            check_vertices(&chunk, mesh, watch, report);
         }
         let index_count = read_u32(mesh.args, u64::from(slot) * MESH_ARGS_BYTES / 4).unwrap_or(0);
         check_triangles(&chunk, index_count, mesh, report);
@@ -2379,13 +2406,29 @@ impl ChunkMesh {
     }
 }
 
-fn check_vertices(chunk: &ChunkMesh, mesh: &ArenaBytes, report: &mut MeshReport) {
+fn check_vertices(chunk: &ChunkMesh, mesh: &ArenaBytes, watch: &[Vec3], report: &mut MeshReport) {
     let voxel = chunk.lod.voxel_size();
     for v in chunk.base..chunk.base.saturating_add(chunk.count) {
         let Some(p) = mesh.position(v) else {
             continue;
         };
         let d = heightfield_distance(p).abs() / voxel;
+        if watch.iter().any(|w| w.distance(p) <= WATCH_RADIUS) {
+            let normal_deg = mesh.normal(v).map_or(f32::NAN, |n| {
+                n.normalize_or_zero()
+                    .dot(heightfield_normal(p))
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees()
+            });
+            report.near.push(NearVertex {
+                pos: chunk.pos,
+                lod: chunk.lod,
+                world: p,
+                off: d,
+                normal_deg,
+            });
+        }
         if let Some(m) = report.max_off.get_mut(usize_from(chunk.lod.rank())) {
             *m = m.max(d);
         }
@@ -2799,6 +2842,13 @@ fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
                 .join(", ")
         ),
     ];
+    // Only with a watch list (the seam-site GPU test); a bench run has none.
+    for v in &r.near {
+        lines.push(format!(
+            "  watched vertex: chunk {} {:?} at {} off {:.3} voxels, normal {:.1} degrees",
+            v.pos, v.lod, v.world, v.off, v.normal_deg
+        ));
+    }
     let mut worst: Vec<_> = r.off_surface.iter().map(|f| ("off", f)).collect();
     worst.extend(r.long_edges.iter().map(|f| ("edge", f)));
     worst.sort_by(|a, b| b.1.value.total_cmp(&a.1.value));
@@ -4038,5 +4088,274 @@ fn parse_msaa(arg: Option<&str>) -> Option<Msaa> {
             eprintln!("bench: --msaa takes 1, 2, 4 or 8, not {other}");
             None
         }
+    }
+}
+
+/// The three logged LOD-seam sites, meshed by the shipped `surface_nets_pass3`.
+/// `src/voxel/seam_repro.rs` predicts them with a hand port of the shader's
+/// seam logic; this holds the GPU to the same predictions, so the port is
+/// checked against the real thing rather than by inspection.
+#[cfg(test)]
+mod seam_gpu {
+    use super::*;
+    use tarasaur::{chunk::Chunk, field::TargetLOD};
+
+    /// One logged site: the meshing chunk, its LOD, and the neighbours at
+    /// another LOD, as `seam_repro::sites()` pins them (keep the two in step).
+    /// Every other chunk of the 3x3x3 block is spawned at `own`, so nothing
+    /// in the block is missing: residency is not a variable.
+    struct GpuSite {
+        name: &'static str,
+        chunk: IVec3,
+        own: LOD,
+        others: &'static [(IVec3, LOD)],
+        /// The port's shared-cell corner, in world units: where it says the
+        /// vertex is pinned.
+        vertex: Vec3,
+        /// The port's distance off the terrain at `vertex`, in `own` voxels.
+        off: f32,
+    }
+
+    const SITES: [GpuSite; 3] = [
+        GpuSite {
+            name: "fly [8,0,4] Medium (8,0,32)",
+            chunk: IVec3::new(8, 0, 4),
+            own: LOD::Medium,
+            others: &[(IVec3::new(0, 0, 1), LOD::Low)],
+            vertex: Vec3::new(82.5, 0.0, 50.0),
+            off: 2.320,
+        },
+        GpuSite {
+            name: "fly [8,0,11] Medium (32,0,16)",
+            chunk: IVec3::new(8, 0, 11),
+            own: LOD::Medium,
+            others: &[
+                (IVec3::new(-1, -1, -1), LOD::Low),
+                (IVec3::new(-1, 0, -1), LOD::Low),
+                (IVec3::new(-1, -1, 0), LOD::Low),
+                (IVec3::new(0, -1, 0), LOD::Low),
+                (IVec3::new(-1, 0, 0), LOD::Low),
+                (IVec3::new(1, -1, 1), LOD::Low),
+                (IVec3::new(-1, 0, 1), LOD::Low),
+                (IVec3::new(0, 0, 1), LOD::Low),
+                (IVec3::new(1, 0, 1), LOD::Low),
+            ],
+            vertex: Vec3::new(90.0, 0.0, 115.0),
+            off: 2.074,
+        },
+        GpuSite {
+            name: "hold [4,-1,4] High (64,64,0)",
+            chunk: IVec3::new(4, -1, 4),
+            own: LOD::High,
+            others: &[
+                (IVec3::new(1, 0, -1), LOD::Medium),
+                (IVec3::new(1, 1, -1), LOD::Medium),
+                (IVec3::new(1, 0, 0), LOD::Medium),
+                (IVec3::new(1, 1, 0), LOD::Medium),
+                (IVec3::new(1, 0, 1), LOD::Medium),
+            ],
+            vertex: Vec3::new(50.0, 0.0, 40.0),
+            off: 1.477,
+        },
+    ];
+
+    impl GpuSite {
+        fn lod_at(&self, offset: IVec3) -> LOD {
+            self.others
+                .iter()
+                .find(|(o, _)| *o == offset)
+                .map_or(self.own, |(_, l)| *l)
+        }
+    }
+
+    fn offsets() -> impl Iterator<Item = IVec3> {
+        (-1..=1)
+            .flat_map(|z| (-1..=1).flat_map(move |y| (-1..=1).map(move |x| IVec3::new(x, y, z))))
+    }
+
+    /// The rank `seam_lod_ranks` stored for `offset`, from a `ChunkMeta`.
+    fn stored_rank(ranks: [u32; 2], offset: IVec3) -> u32 {
+        let k = offset
+            .saturating_add(IVec3::ONE)
+            .dot(IVec3::new(1, 3, 9))
+            .unsigned_abs();
+        ranks
+            .get(usize_from(k / 16))
+            .copied()
+            .unwrap_or(0)
+            .wrapping_shr((k % 16).wrapping_mul(2))
+            & 3
+    }
+
+    /// A camera, so the render world runs as in a bench, with no
+    /// `ChunkLoader`: the test spawns every chunk itself, and with no loader
+    /// nothing replans, retargets or despawns them.
+    fn seam_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+        let mut image = Image::new_target_texture(
+            RESOLUTION.x,
+            RESOLUTION.y,
+            TextureFormat::Rgba8UnormSrgb,
+            None,
+        );
+        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+        let target = images.add(image);
+        commands.spawn((
+            Camera3d::default(),
+            Msaa::Off,
+            Transform::from_xyz(60.0, 30.0, 0.0).looking_at(Vec3::new(70.0, 0.0, 60.0), Vec3::Y),
+            RenderTarget::Image(ImageRenderTarget {
+                handle: target,
+                scale_factor: 1.0,
+            }),
+        ));
+        for site in &SITES {
+            for offset in offsets() {
+                commands.spawn((
+                    Chunk,
+                    ChunkPosition(site.chunk.saturating_add(offset)),
+                    TargetLOD(site.lod_at(offset)),
+                ));
+            }
+        }
+    }
+
+    /// Meshes the three sites on a device and returns the probe's report.
+    fn mesh_sites() -> MeshReport {
+        let dir = std::env::temp_dir().join(format!("tarasaur-seam-gpu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = App::new();
+        add_default_plugins(&mut app, false);
+        app.add_plugins((
+            TarasaurPlugin {
+                save_dir: dir.clone(),
+                autosave_secs: f32::INFINITY,
+                ..default()
+            },
+            MaterialFieldPlugin::<TerrainMaterial>::new(),
+        ));
+        register_terrain(&mut app);
+        let probe = MeshProbe::default();
+        if let Some(render) = app.get_sub_app_mut(RenderApp) {
+            render
+                .insert_resource(probe.clone())
+                .add_systems(Render, read_back_meshes.in_set(RenderSystems::Cleanup));
+        }
+        app.insert_resource(probe.clone())
+            .add_systems(Startup, (seam_camera, setup_terrain_palette));
+        app.finish();
+        app.cleanup();
+
+        let blocks = SITES.len().saturating_mul(27);
+        let mut settled = 0u32;
+        let mut asked = false;
+        for _ in 0..6000 {
+            app.update();
+            if let Ok(s) = probe.0.lock()
+                && let Some((_, r)) = s.done.first()
+            {
+                let report = r.clone();
+                drop(s);
+                let _ = std::fs::remove_dir_all(&dir);
+                return report;
+            }
+            if asked {
+                continue;
+            }
+            let world = app.world_mut();
+            let mut q = world.query::<(&ChunkPosition, &TargetLOD, Option<&LOD>)>();
+            let chunks: Vec<(IVec3, bool)> = q
+                .iter(world)
+                .map(|(p, t, l)| (p.0, l == Some(&t.0)))
+                .collect();
+            if chunks.len() == blocks && chunks.iter().all(|c| c.1) {
+                // Every chunk holds its pinned LOD; give extraction, upload
+                // and both mesh passes time to finish.
+                settled = settled.saturating_add(1);
+            }
+            if settled >= 120 {
+                if let Ok(mut s) = probe.0.lock() {
+                    s.requested = Some(Phase::Hold);
+                    s.loaded = chunks.iter().map(|c| c.0).collect();
+                    s.watch = SITES.iter().map(|site| site.vertex).collect();
+                }
+                asked = true;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("the sites never finished meshing and reading back");
+    }
+
+    /// For each logged site, the shipped shader puts a vertex exactly where
+    /// the port says it is pinned (the shared-cell corner on a chunk edge),
+    /// as far off the terrain as the port computes. It first checks that the
+    /// seam ranks the GPU meshed with are the pinned ones, so a disagreement
+    /// is about the shader, not the harness.
+    ///
+    ///     cargo test --release --example bench seam_gpu -- --ignored --nocapture
+    #[test]
+    #[ignore = "wants a device: run it by name"]
+    fn shipped_shader_pins_the_logged_sites_where_the_port_says() {
+        let report = mesh_sites();
+        let mut wrong = Vec::new();
+        for site in &SITES {
+            // The ranks the meshing chunk was meshed with, from its ChunkMeta.
+            let Some(&ranks) = report.ranks.get(&site.chunk) else {
+                wrong.push(format!("{}: the meshing chunk has no mesh", site.name));
+                continue;
+            };
+            for offset in offsets() {
+                let want = site.lod_at(offset).rank();
+                let got = stored_rank(ranks, offset);
+                if got != want {
+                    wrong.push(format!(
+                        "{}: rank at {offset} is {got}, pinned {want}",
+                        site.name
+                    ));
+                }
+            }
+            let near: Vec<&NearVertex> = report
+                .near
+                .iter()
+                .filter(|v| v.world.distance(site.vertex) <= WATCH_RADIUS)
+                .collect();
+            println!(
+                "{}: {} vertices within {WATCH_RADIUS} of {}",
+                site.name,
+                near.len(),
+                site.vertex
+            );
+            for v in &near {
+                let local = (v.world - v.pos.as_vec3() * CHUNK_SIZE) / v.lod.voxel_size();
+                println!(
+                    "    chunk {} {:?} local ({:.3}, {:.3}, {:.3}) world {:.4} off {:.3} normal {:.1} deg",
+                    v.pos, v.lod, local.x, local.y, local.z, v.world, v.off, v.normal_deg
+                );
+            }
+            let pinned = near
+                .iter()
+                .find(|v| v.pos == site.chunk && v.world.distance(site.vertex) < 1e-3);
+            match pinned {
+                None => wrong.push(format!(
+                    "{}: no vertex of {} at {} (the port's pinned corner)",
+                    site.name, site.chunk, site.vertex
+                )),
+                Some(v) if (v.off - site.off).abs() > 0.005 => wrong.push(format!(
+                    "{}: vertex at {} is {:.3} voxels off, the port says {:.3}",
+                    site.name, site.vertex, v.off, site.off
+                )),
+                Some(v) => println!(
+                    "    => pinned as predicted: {:.3} voxels off, normal {:.1} deg",
+                    v.off, v.normal_deg
+                ),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{}\n(the probe read {} chunks, {} vertices, {} near a watched point)",
+            wrong.join("\n"),
+            report.chunks,
+            report.vertices,
+            report.near.len()
+        );
     }
 }
