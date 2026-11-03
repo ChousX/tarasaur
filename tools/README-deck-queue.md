@@ -84,3 +84,39 @@ The readiness check is the one generalisation this needed: `deck-queue` now
 takes `DECK_QUEUE_RESOURCE` (a name for messages) and `DECK_QUEUE_READY_CMD` (a
 command that must succeed before the holder runs). For the Deck that command is
 an ssh login; for toth it is a load-average test.
+
+## A quiet start is not a quiet batch
+
+`tools/quiet-window` exists because `bench-lock` solves half the problem. The
+lock waits for load to fall before letting a run start, but it cannot keep the
+machine quiet for the five minutes a batch takes: another agent's build resumes
+mid-batch, and the drift that causes is the same size as the effect under test.
+
+Measured, not hypothetical: a real −3.1% on generation CPU had to be recorded
+as a **null** because the base side drifted +3.2% monotonically across one
+313 s batch. Three independent instruments agreed on 3–4.5% and the result
+still was not quotable.
+
+```bash
+quiet-window open 30 <who>    # claim it, time-boxed
+quiet-window check            # exit 0 == open; agents test this before building
+quiet-window close
+```
+
+Two mechanisms, because neither alone is enough:
+
+1. **A marker agents honour** before starting a build. Cooperative, and it is
+   what keeps *new* work off the machine.
+2. **`renice` to 19 on every compiler process already running.** Mechanical,
+   needs nobody's cooperation, and lowering priority never needs privilege. A
+   straggler mid-build keeps making progress and simply yields — nothing is
+   paused and nothing is killed, so a window can never corrupt one agent's work
+   to buy another a number.
+
+Windows are time-boxed and expire on their own, so no agent can be held
+indefinitely by a forgotten claim.
+
+**What it does not do:** nice levels cannot isolate memory bandwidth or
+last-level cache. A window is quieter, not sterile. Numbers taken in one should
+say they were, and a residual drift inside a window is itself a finding — it
+would mean prioritising is not enough and the answer is scheduling.
