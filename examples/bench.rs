@@ -440,8 +440,10 @@ struct Output {
     dig_radius: f32,
     /// Seconds since the epoch at startup, in the result file names.
     stamp: u64,
-    /// Short hash of the checked-out commit.
-    commit: String,
+    /// Short hash of the commit the **binary was built from**, from
+    /// `--commit`. Empty when nothing told us: a run cannot work this out
+    /// for itself, which is the whole point of the field.
+    commit_build: String,
     /// The command line and every knob read off it, for the header.
     knobs: Knobs,
 }
@@ -568,6 +570,104 @@ impl Knobs {
     }
 }
 
+/// Which file the running bench actually is, as a file name, an xxh3-128 and
+/// a length.
+///
+/// `current_exe()` alone is a trap here. `tools/deck/bench.sh` starts the
+/// bench through an explicit dynamic loader -- `ld-linux-x86-64.so.2`
+/// `--library-path ... bin/bench`, nix glibc against SteamOS's own libraries
+/// -- and `current_exe()` then returns **the loader**, which is the same
+/// program whichever variant is running. A fingerprint that silently agreed
+/// across both sides of an A/B would be worse than none at all, and it would
+/// do it on the one machine whose numbers decide things. So when
+/// `current_exe()` looks like a loader, hash `argv[0]` instead, and record
+/// which file was hashed either way rather than leaving it to be assumed.
+///
+/// The file name, not the path: the header is space-separated `key=value`
+/// and a path can contain spaces. The hash is the identity; the name only
+/// has to answer "did this hash the bench or the loader".
+fn bench_binary() -> (String, String, u64) {
+    let looks_like_loader = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("ld-") || n.starts_with("ld."))
+    };
+    let exe = std::env::current_exe().ok().filter(|p| !looks_like_loader(p));
+    let path = exe
+        .or_else(|| std::env::args_os().next().map(PathBuf::from))
+        .unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (name, "unreadable".into(), 0);
+    };
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    h.update(&bytes);
+    (
+        name,
+        format!("{:032x}", h.digest128()),
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    )
+}
+
+/// Records where this run's code came from, which the result could not say
+/// before.
+///
+/// `commit=` used to be `git rev-parse HEAD` taken **at run time**, so it
+/// recorded the checkout the process happened to be sitting in rather than
+/// the tree the binary was compiled from. The two are routinely different --
+/// `tools/bench-deck-ab.sh` builds each variant from its own ref in a
+/// detached worktree while `HEAD` stays put -- and the field gave no hint
+/// which it was. ornisculpt had the identical defect, found the same night.
+///
+/// So the old name is retired rather than redefined. A row saying `commit=`
+/// is, mechanically and with nothing to remember, a row written before this
+/// change; a row saying `commit_build=`/`commit_run=` distinguishes them.
+/// `binary_xxh3` is the one that actually settles it: it identifies the
+/// artifact that ran, whatever any checkout claims.
+///
+/// Nothing fails on a mismatch. A binary built from one ref and run beside
+/// another checkout is the normal case for the Deck driver; `stale=true`
+/// records it, and a warning says so once.
+fn record_provenance(knobs: &Knobs, commit_build: &str) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", env!("CARGO_MANIFEST_DIR")])
+            .args(args)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let commit_run = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    // A separate field, never a `+dirty` suffix on the sha: a suffix stops
+    // the value parsing as a sha and starts it being string-compared, which
+    // is how two identical trees get reported as different.
+    let dirty_run = git(&["status", "--porcelain"]).is_some();
+    let (file, hash, bytes) = bench_binary();
+    // Both known and different. Emitted always, not only when true: an
+    // absent field cannot distinguish "they agreed" from "git was not there"
+    // from "an older binary did not write this".
+    let stale = !commit_build.is_empty() && !commit_run.is_empty() && commit_build != commit_run;
+    if stale {
+        eprintln!(
+            "bench: note: built from {commit_build}, running beside a checkout at \
+             {commit_run}. Normal for a driver-built variant; the binary is what ran."
+        );
+    }
+    knobs.record("commit_build", &commit_build);
+    knobs.record("commit_run", &commit_run);
+    knobs.record("dirty_run", &dirty_run);
+    knobs.record("stale", &stale);
+    knobs.record("binary_xxh3", &hash);
+    knobs.record("binary_bytes", &bytes);
+    knobs.record("binary_file", &file);
+}
+
 /// Where this run's results and scratch world go, and how it labels itself.
 ///
 /// `CARGO_MANIFEST_DIR` is baked in at build time, so off the build host it
@@ -610,15 +710,7 @@ fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
         small_arenas: knobs.switch("--small-arenas"),
         quick: knobs.switch("--quick"),
         dig_radius,
-        commit: flag("--commit").unwrap_or_else(|| {
-            std::process::Command::new("git")
-                .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .filter(|s| !s.trim().is_empty())
-                .map_or_else(|| "unknown".into(), |s| s.trim().to_string())
-        }),
+        commit_build: flag("--commit").unwrap_or_default(),
         stamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
@@ -704,6 +796,7 @@ fn main() -> AppExit {
     // can differ by the whole cost of tracing with nothing in the record to
     // show it.
     knobs.record("tracy", &cfg!(feature = "tracy"));
+    record_provenance(knobs, &out.commit_build);
     // What the frames are presented through. On the Deck this is the single
     // largest lever there is -- the same binary measured 181 fps nested in
     // gamescope, 719 with gamescope's own compositing off and 2645 headless
@@ -3581,7 +3674,6 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
     // tail and the stamp, silently overwriting the previous run and leaving
     // `ab.sh`'s `<label>-*` glob with nothing to match.
     let stem = format!("{}-{}", bench.out.label, bench.out.stamp);
-    let commit = &bench.out.commit;
     // What the compute pool actually got, not what was asked for. A flag
     // A/B whose flag silently did nothing measures a variant against itself
     // and reads as a clean null result, so the run states its own pool size
@@ -3594,7 +3686,7 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
     // Every knob the run read, in read order. Nothing is listed here by name:
     // a flag is in the header because the parser put it there.
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} {}\n",
+        "# label={} adapter={adapter} profile={} {}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"

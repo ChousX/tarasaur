@@ -332,6 +332,24 @@ cargo run --release --example bench -- --compare bench_results/A.summary.csv ben
 cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 ```
 
+Each summary's first line is a `# key=value` header naming every knob the
+run read — the flags above, the compute pool's real thread count, whether it
+was built with `tracy`, and what the frames were presented through — so two
+results can be compared on the record rather than on trust.
+
+Two of those fields are provenance, and **the field changed meaning.**
+`commit_build` is the tree the binary was compiled from; `commit_run` is the
+checkout the process read at run time. Results written before `5d54cc1` have
+a single `commit` field, which is the run-time value and **is not evidence of
+what was measured** — a binary built from one ref and run beside another
+checkout recorded the checkout. `commit_build` is supplied by the A/B driver,
+which knows the ref it built; a hand-run bench leaves it empty and is
+identified by `binary_xxh3` alone. That field is an xxh3-128 of the running
+executable, with `binary_bytes` beside it so a length can be checked by hand,
+and `stale=true` marks a run whose two commits are both known and differ
+(normal for a driver-built variant, and never an error). ornisculpt's bench
+stamps the same fields with the same meanings.
+
 `--out DIR` and `--world-dir DIR` move the results and the scratch world,
 and `--commit <sha>` fills in the result header's `commit=`. All three
 default under the checkout the binary was built from, so a run on another

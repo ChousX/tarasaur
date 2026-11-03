@@ -54,6 +54,10 @@ tracy-client = { version = "0.19", optional = true, features = ["ondemand"] }
 bevy = "0.20"
 # The bench's `--renderdoc` frame capture.
 renderdoc = "0.12.1"
+# Fingerprinting the bench binary in the result header. A dev-dependency, so
+# no consumer of the library gains a dependency for it. xxh3-128 rather than
+# md5 for parity with ornisculpt's bench, which stamps the same way.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.dev]
 opt-level = 1
