@@ -143,7 +143,7 @@ use tarasaur::{
         gpu::{HitResult, PendingVoxelQueries, RayQuery, VoxelQueryResults},
         terrain_ray::TerrainRay,
     },
-    voxel::{ArenaConfig, inspect::ArenaInspector, stats},
+    voxel::{ArenaConfig, inspect::ArenaInspector, seam, stats},
 };
 
 // ---------------------------------------------------------------------------
@@ -1803,8 +1803,19 @@ struct MeshReport {
     /// Vertex normals more than `MESH_MAX_NORMAL_DEG` degrees off the
     /// heightfield's: what showed as dark streaks along LOD seams.
     bad_normals: Vec<MeshFlag>,
+    /// Vertices the seam stitch pins to a chunk edge or corner
+    /// (`voxel::seam::pinned_cell`), every one, value = off-surface voxels.
+    /// Their error is the seam geometry's, not the data's: those over the
+    /// off-surface or normal limit are reported here, not failed.
+    pinned: Vec<MeshFlag>,
+    /// Pinned vertices whose normal is more than `MESH_MAX_NORMAL_DEG` off.
+    pinned_normals: Vec<MeshFlag>,
     /// Largest off-surface distance per LOD rank, in that LOD's voxels.
     max_off: [f32; LOD::COUNT],
+    /// The same, over the vertices not pinned: what the check judges.
+    max_off_unpinned: [f32; LOD::COUNT],
+    /// Where each of those is.
+    worst_unpinned: [Option<MeshFlag>; LOD::COUNT],
     /// Every resident chunk's LOD, to describe the neighbours of a flag.
     lods: HashMap<IVec3, LOD>,
     /// Every triangle, in world space, with its chunk: for the crack check
@@ -1831,6 +1842,8 @@ struct NearVertex {
     off: f32,
     /// Normal off the heightfield's, in degrees.
     normal_deg: f32,
+    /// Classified as pinned by the seam stitch.
+    pinned: bool,
 }
 
 /// Edges of the whole terrain mesh used by one triangle only (or by more
@@ -1871,6 +1884,16 @@ impl MeshReport {
         self.folds.extend(part.folds);
         self.fold_corners.extend(part.fold_corners);
         self.bad_normals.extend(part.bad_normals);
+        self.pinned.extend(part.pinned);
+        self.pinned_normals.extend(part.pinned_normals);
+        for (m, p) in self.max_off_unpinned.iter_mut().zip(part.max_off_unpinned) {
+            *m = m.max(p);
+        }
+        for (w, p) in self.worst_unpinned.iter_mut().zip(part.worst_unpinned) {
+            if p.is_some_and(|p| w.is_none_or(|w| p.value > w.value)) {
+                *w = p;
+            }
+        }
         self.world_triangles.extend(part.world_triangles);
         self.ranks.extend(part.ranks);
         self.near.extend(part.near);
@@ -2372,7 +2395,8 @@ fn check_arena_meshes(
         if checked {
             report.chunks = report.chunks.saturating_add(1);
             report.vertices = report.vertices.saturating_add(usize_from(count));
-            check_vertices(&chunk, mesh, watch, report);
+            let ranks = report.ranks.get(&pos).copied();
+            check_vertices(&chunk, mesh, ranks, watch, report);
         }
         let index_count = read_u32(mesh.args, u64::from(slot) * MESH_ARGS_BYTES / 4).unwrap_or(0);
         check_triangles(&chunk, index_count, mesh, report);
@@ -2406,13 +2430,22 @@ impl ChunkMesh {
     }
 }
 
-fn check_vertices(chunk: &ChunkMesh, mesh: &ArenaBytes, watch: &[Vec3], report: &mut MeshReport) {
+/// `ranks`: the chunk's seam ranks as meshed, to classify pinned vertices.
+fn check_vertices(
+    chunk: &ChunkMesh,
+    mesh: &ArenaBytes,
+    ranks: Option<[u32; 2]>,
+    watch: &[Vec3],
+    report: &mut MeshReport,
+) {
     let voxel = chunk.lod.voxel_size();
     for v in chunk.base..chunk.base.saturating_add(chunk.count) {
         let Some(p) = mesh.position(v) else {
             continue;
         };
         let d = heightfield_distance(p).abs() / voxel;
+        let local = (p - chunk.pos.as_vec3() * CHUNK_SIZE) / voxel;
+        let pinned = ranks.is_some_and(|r| seam::pinned_cell(r, local).is_some());
         if watch.iter().any(|w| w.distance(p) <= WATCH_RADIUS) {
             let normal_deg = mesh.normal(v).map_or(f32::NAN, |n| {
                 n.normalize_or_zero()
@@ -2427,19 +2460,37 @@ fn check_vertices(chunk: &ChunkMesh, mesh: &ArenaBytes, watch: &[Vec3], report: 
                 world: p,
                 off: d,
                 normal_deg,
+                pinned,
             });
         }
-        if let Some(m) = report.max_off.get_mut(usize_from(chunk.lod.rank())) {
+        let rank = usize_from(chunk.lod.rank());
+        if let Some(m) = report.max_off.get_mut(rank) {
             *m = m.max(d);
         }
-        if exceeds(d, MESH_MAX_OFF_SURFACE) {
-            report.off_surface.push(chunk.flag(d, p));
+        if pinned {
+            report.pinned.push(chunk.flag(d, p));
+        } else {
+            if let Some(m) = report.max_off_unpinned.get_mut(rank) {
+                *m = m.max(d);
+            }
+            if let Some(w) = report.worst_unpinned.get_mut(rank)
+                && w.is_none_or(|w| d > w.value)
+            {
+                *w = Some(chunk.flag(d, p));
+            }
+            if exceeds(d, MESH_MAX_OFF_SURFACE) {
+                report.off_surface.push(chunk.flag(d, p));
+            }
         }
         if let Some(n) = mesh.normal(v) {
             let cos = n.normalize_or_zero().dot(heightfield_normal(p));
             let angle = cos.clamp(-1.0, 1.0).acos().to_degrees();
             if exceeds(angle, MESH_MAX_NORMAL_DEG) {
-                report.bad_normals.push(chunk.flag(angle, p));
+                if pinned {
+                    report.pinned_normals.push(chunk.flag(angle, p));
+                } else {
+                    report.bad_normals.push(chunk.flag(angle, p));
+                }
             }
         }
     }
@@ -2816,6 +2867,47 @@ fn describe_flag(kind: &str, f: &MeshFlag, lods: &HashMap<IVec3, LOD>) -> String
 }
 
 /// The report's summary, plus its worst flags.
+/// The pinned seam vertices (reported, not failed), and the worst
+/// off-surface vertex per LOD among the rest, with where it is.
+fn pinned_report_lines(r: &MeshReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    let per_lod = |m: [f32; LOD::COUNT]| {
+        LOD::ALL
+            .iter()
+            .zip(m)
+            .map(|(l, m)| format!("{l:?} {m:.2}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut pinned_max = [0.0f32; LOD::COUNT];
+    for f in &r.pinned {
+        if let Some(m) = pinned_max.get_mut(usize_from(f.lod.rank())) {
+            *m = m.max(f.value);
+        }
+    }
+    lines.push(format!(
+        "  pinned seam vertices, not failed: {} ({} over {MESH_MAX_OFF_SURFACE} voxels, {} normals over {MESH_MAX_NORMAL_DEG} degrees); worst per LOD: {}",
+        r.pinned.len(),
+        r.pinned
+            .iter()
+            .filter(|f| exceeds(f.value, MESH_MAX_OFF_SURFACE))
+            .count(),
+        r.pinned_normals.len(),
+        per_lod(pinned_max)
+    ));
+    lines.push(format!(
+        "  worst off-surface per LOD, not pinned (voxels): {}",
+        per_lod(r.max_off_unpinned)
+    ));
+    for f in r.worst_unpinned.iter().flatten() {
+        lines.push(format!(
+            "    worst not pinned, {:?}: {:.3} at chunk {} local ({:.2}, {:.2}, {:.2})",
+            f.lod, f.value, f.pos, f.local.x, f.local.y, f.local.z
+        ));
+    }
+    lines
+}
+
 fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
     let mut lines = vec![
         format!(
@@ -2842,11 +2934,17 @@ fn mesh_report_lines(r: &MeshReport) -> Vec<String> {
                 .join(", ")
         ),
     ];
+    lines.extend(pinned_report_lines(r));
     // Only with a watch list (the seam-site GPU test); a bench run has none.
     for v in &r.near {
         lines.push(format!(
-            "  watched vertex: chunk {} {:?} at {} off {:.3} voxels, normal {:.1} degrees",
-            v.pos, v.lod, v.world, v.off, v.normal_deg
+            "  watched vertex: chunk {} {:?} at {} off {:.3} voxels, normal {:.1} degrees{}",
+            v.pos,
+            v.lod,
+            v.world,
+            v.off,
+            v.normal_deg,
+            if v.pinned { ", pinned" } else { "" }
         ));
     }
     let mut worst: Vec<_> = r.off_surface.iter().map(|f| ("off", f)).collect();
@@ -2892,6 +2990,8 @@ fn write_mesh_csv(phase: Phase, r: &MeshReport) {
         ("edge", &r.long_edges),
         ("fold", &r.folds),
         ("normal", &r.bad_normals),
+        ("pinned", &r.pinned),
+        ("pinned_normal", &r.pinned_normals),
     ];
     for (kind, list) in kinds {
         for f in list {
@@ -4313,6 +4413,11 @@ mod seam_gpu {
     /// is about the shader, not the harness.
     ///
     ///     cargo test --release --example bench seam_gpu -- --ignored --nocapture
+    ///
+    /// **Read the result line, not the exit code.** The process segfaults on
+    /// its way out after printing `test result` (rc 139, in GPU teardown at
+    /// exit), so the exit code of any run that includes this test is
+    /// meaningless.
     #[test]
     #[ignore = "wants a device: run it by name"]
     fn shipped_shader_pins_the_logged_sites_where_the_port_says() {
@@ -4348,8 +4453,16 @@ mod seam_gpu {
             for v in &near {
                 let local = (v.world - v.pos.as_vec3() * CHUNK_SIZE) / v.lod.voxel_size();
                 println!(
-                    "    chunk {} {:?} local ({:.3}, {:.3}, {:.3}) world {:.4} off {:.3} normal {:.1} deg",
-                    v.pos, v.lod, local.x, local.y, local.z, v.world, v.off, v.normal_deg
+                    "    chunk {} {:?} local ({:.3}, {:.3}, {:.3}) world {:.4} off {:.3} normal {:.1} deg{}",
+                    v.pos,
+                    v.lod,
+                    local.x,
+                    local.y,
+                    local.z,
+                    v.world,
+                    v.off,
+                    v.normal_deg,
+                    if v.pinned { " PINNED" } else { "" }
                 );
             }
             let pinned = near
@@ -4364,8 +4477,12 @@ mod seam_gpu {
                     "{}: vertex at {} is {:.3} voxels off, the port says {:.3}",
                     site.name, site.vertex, v.off, site.off
                 )),
+                Some(v) if !v.pinned => wrong.push(format!(
+                    "{}: the vertex at {} is not classified as pinned",
+                    site.name, site.vertex
+                )),
                 Some(v) => println!(
-                    "    => pinned as predicted: {:.3} voxels off, normal {:.1} deg",
+                    "    => pinned as predicted, and classified: {:.3} voxels off, normal {:.1} deg",
                     v.off, v.normal_deg
                 ),
             }
