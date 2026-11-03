@@ -258,7 +258,13 @@ tag_for() { # tag_for <slot> <binary>
 	if [ -f "$work/refs.txt" ] && grep -q "^$1 " "$work/refs.txt"; then
 		awk -v s="$1" '$1 == s { t = $3 } END { print t }' "$work/refs.txt"
 	else
-		echo "bin-$(md5sum "$2" | cut -c1-8)"
+		# `md5-`, not `bin-`: this lands in the result header's commit_build
+		# field, beside a binary_xxh3 the bench computes for itself. Two
+		# different hashes of the same file must not wear the same-looking
+		# name, or a reader compares one against the other and concludes the
+		# binary changed. tarasaur and ornisculpt both stamp xxh3-128; this
+		# shell tag is md5 only because `md5sum` is what is to hand here.
+		echo "md5-$(md5sum "$2" | cut -c1-8)"
 	fi
 }
 A=$(resolve A "$Aspec")

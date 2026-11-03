@@ -73,6 +73,22 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 wrap="gamescope --backend wayland -W 1280 -H 800 -w 1280 -h 800 -r 240 -b --force-windows-fullscreen --rt --"
 [ "${GAMESCOPE+set}" = set ] && wrap=$GAMESCOPE
 
+# Tell the bench what it is being presented through, so the result header can
+# say it. This is the largest single lever on this hardware -- 181 fps nested,
+# 719 with gamescope's compositing off, 2645 headless -- and it is set by an
+# environment variable on the far side of an ssh, so without this no reader of
+# a summary could tell two runs of the same binary apart. One word, no spaces:
+# the header is space-separated key=value.
+case $wrap in
+	'') TARASAUR_PRESENT=bare ;;
+	gamescope*)
+		backend=$(printf '%s\n' "$wrap" | sed -n 's/.*--backend \([a-z][a-z]*\).*/\1/p')
+		TARASAUR_PRESENT=gamescope:${backend:-wayland}
+		;;
+	*) TARASAUR_PRESENT=custom ;;
+esac
+export TARASAUR_PRESENT
+
 # The bench's own default scratch world is under the checkout it was built
 # from, which isn't here, so supply one unless the caller did.
 case " $* " in

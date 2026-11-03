@@ -64,6 +64,7 @@ where
     T: VoxelField,
 {
     app.init_resource::<PaddedOutbox<T>>()
+        .init_resource::<PadPlanCounts>()
         .add_systems(Last, pad_dirty_chunks::<T>);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
@@ -280,6 +281,38 @@ where
     T::gpu_bytes(&vol)
 }
 
+/// How this frame's dirty chunks were classified, for the frame just planned.
+///
+/// A chunk being marked dirty is not a chunk being re-meshed, and the gap
+/// between the two is large and was unmeasured. `deck-improvements.md`'s
+/// option 1 is held off on a bracket whose cost half is "~0.6 ms per
+/// spuriously re-meshed chunk times 3-8 such chunks a frame", and finding 13
+/// recorded both halves as unverified and **not recomputable from what is on
+/// disk**. These four counters make the second half recomputable from any
+/// run's summary, which is the only way that bracket ever gets settled.
+///
+/// The distinction that matters: a dirty chunk whose [`extract_key`] has not
+/// moved is dropped here and costs nothing at all -- no padding, no upload,
+/// no mesh. So over-reporting a change does not automatically buy a re-mesh,
+/// and the three outcomes have very different prices.
+///
+/// Counts the **shape** channel only, since that is the one that drives GPU
+/// re-meshing. `pad_dirty_chunks` is generic and runs once per field type,
+/// so without that restriction the material and visibility passes overwrite
+/// the shape numbers and `jobs` reads 0 in a phase meshing nine chunks a
+/// frame.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct PadPlanCounts {
+    /// Dirty chunks considered this frame.
+    pub dirty: u32,
+    /// Full re-pad and re-mesh: the expensive outcome.
+    pub jobs: u32,
+    /// Seam ranks moved only: a GPU restitch, no CPU padding.
+    pub meta_only: u32,
+    /// Dirty, but the extract key was unchanged, so nothing happened.
+    pub unchanged: u32,
+}
+
 /// Builds new padded volumes, in parallel, for the chunks whose inputs
 /// changed this frame. Runs in `Last`, after every edit, load and surface
 /// flag of the frame.
@@ -291,6 +324,7 @@ pub fn pad_dirty_chunks<T>(
     mut state: Local<ExtractState>,
     frame: Res<FrameCount>,
     mut outbox: ResMut<PaddedOutbox<T>>,
+    mut counts: ResMut<PadPlanCounts>,
 ) where
     T: VoxelField,
 {
@@ -304,6 +338,8 @@ pub fn pad_dirty_chunks<T>(
     let ExtractState { last, dirty, .. } = &mut *state;
     let mut jobs = Vec::new();
     let mut meta_only = Vec::new();
+    let mut unchanged = 0u32;
+    let dirty_seen = u32::try_from(dirty.len()).unwrap_or(u32::MAX);
     for pos in dirty.iter() {
         let Some(entity) = chunk_manager.get_chunk(pos) else {
             continue;
@@ -329,6 +365,11 @@ pub fn pad_dirty_chunks<T>(
             continue;
         };
         if old == key {
+            // Dirty, but nothing this chunk's padded volume or mesh depends
+            // on actually moved. Counted, because "chunks marked dirty" has
+            // been read as "chunks re-meshed" and they are not the same
+            // number.
+            unchanged = unchanged.saturating_add(1);
             continue;
         }
         // Same LOD and versions: the padded volume would come out the same
@@ -342,6 +383,20 @@ pub fn pad_dirty_chunks<T>(
             continue;
         }
         jobs.push((entity, *pos, field, *lod, key.2));
+    }
+    // The shape channel only. This system is generic and registered once per
+    // field type, so a single shared resource is written several times a
+    // frame and the last writer wins -- which first gave me `pad_jobs` 0 in
+    // `dig` beside 9.26 meshed chunks, because the visibility field ran
+    // last. Shape is the channel that drives GPU re-meshing, which is the
+    // cost option 1 is bracketed against.
+    if T::GPU == GpuChannel::Shape {
+        *counts = PadPlanCounts {
+            dirty: dirty_seen,
+            jobs: u32::try_from(jobs.len()).unwrap_or(u32::MAX),
+            meta_only: u32::try_from(meta_only.len()).unwrap_or(u32::MAX),
+            unchanged,
+        };
     }
 
     // Building the volumes: the expensive part, one task per chunk.
