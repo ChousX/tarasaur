@@ -208,6 +208,8 @@ fn seam_cell(seam: &Seam, id: U3, skip: impl Fn(V3) -> bool) -> Option<Shared> {
 /// A logged failing vertex: the meshing chunk's neighbourhood and the cell.
 struct Site {
     name: &'static str,
+    /// The meshing chunk.
+    chunk: V3,
     seam: Seam,
     id: U3,
     /// The shared cell pass3 builds today: its `lo` is the logged vertex.
@@ -215,6 +217,8 @@ struct Site {
     /// What the bench logged as `none` (no mesh in any arena) among the
     /// neighbours that matter here.
     none: &'static [V3],
+    /// The bench's `off N` for this vertex, if it logged one.
+    off: Option<f32>,
 }
 
 /// The three logged sites. Neighbour LODs are from the bench's
@@ -226,6 +230,8 @@ fn sites() -> [Site; 3] {
         // voxels off. [8,0,5] is Low; [8,-1,4] logged `none`.
         Site {
             name: "fly [8,0,4] Medium (8,0,32)",
+            chunk: [8, 0, 4],
+            off: Some(2.32),
             seam: Seam::new(MEDIUM, &[([0, 0, 1], LOW)]),
             id: [8, 0, 32],
             today: Shared {
@@ -239,6 +245,8 @@ fn sites() -> [Site; 3] {
         // has a mesh: [9,0,11] and [9,-1,11] Medium, [8,-1,11] Low.
         Site {
             name: "fly [8,0,11] Medium (32,0,16)",
+            chunk: [8, 0, 11],
+            off: Some(2.07),
             seam: Seam::new(
                 MEDIUM,
                 &[
@@ -265,6 +273,8 @@ fn sites() -> [Site; 3] {
         // mesh; the twelve `none`s are elsewhere.
         Site {
             name: "hold [4,-1,4] High (64,64,0)",
+            chunk: [4, -1, 4],
+            off: None,
             seam: Seam::new(
                 HIGH,
                 &[
@@ -295,6 +305,58 @@ fn logged_sites_collapse_onto_a_chunk_edge() {
         let cell = seam_cell(&site.seam, site.id, |_| false);
         assert_eq!(cell.as_ref(), Some(&site.today), "{}", site.name);
         assert_eq!(site.today.flat(), 2, "{}", site.name);
+    }
+}
+
+/// `examples/common/mod.rs`'s `terrain_height`, the generated heightfield
+/// the bench checks meshes against.
+fn terrain_height(x: f32, z: f32) -> f32 {
+    let mut h = 0.0;
+    let mut amp = 6.0;
+    let mut freq = 0.03;
+    for _ in 0..4 {
+        h = ((x * freq).sin() * (z * freq * 1.3).cos()).mul_add(amp, h);
+        amp *= 0.5;
+        freq *= 2.1;
+    }
+    h
+}
+
+/// The bench's `heightfield_distance` (`examples/bench.rs`), in world units.
+fn heightfield_distance(x: f32, y: f32, z: f32) -> f32 {
+    let e = 0.05;
+    let gx = (terrain_height(x + e, z) - terrain_height(x - e, z)) / (2.0 * e);
+    let gz = (terrain_height(x, z + e) - terrain_height(x, z - e)) / (2.0 * e);
+    (y - terrain_height(x, z)) / gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt()
+}
+
+/// The numbers themselves: a vertex at each fly site's pinned position is
+/// exactly as far off the terrain as the bench logged, past its 2.0 limit.
+#[test]
+fn pinned_vertices_are_as_far_off_as_logged() {
+    use crate::{
+        chunk::CHUNK_SIZE,
+        field::LOD,
+        num::{f32_from_i32, f32_from_u32},
+    };
+    for site in sites() {
+        let Some(logged) = site.off else { continue };
+        let lod = if site.seam.own() == MEDIUM {
+            LOD::Medium
+        } else {
+            LOD::High
+        };
+        let voxel = lod.voxel_size();
+        let at = |a: usize| {
+            f32_from_i32(site.chunk[a]).mul_add(CHUNK_SIZE, f32_from_u32(site.today.lo[a]) * voxel)
+        };
+        let off = heightfield_distance(at(0), at(1), at(2)).abs() / voxel;
+        assert!(
+            (off - logged).abs() < 0.005,
+            "{}: {off} voxels, logged {logged}",
+            site.name
+        );
+        assert!(off > 2.0, "{}: {off}", site.name);
     }
 }
 
