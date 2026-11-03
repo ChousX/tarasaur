@@ -16,7 +16,7 @@
 # 1-3%, which is the same order as the spread, and pool-ab.md's rejected runs
 # were caught by it.
 FNR == 1 { f++; grp = (f <= pairs) ? "A" : "B" }
-$1 ~ /^(load|hold|spin|fly|edit|box|query|reslot|visibility|dig)$/ && $2 ~ /^(seconds|frame_ms_mean|frame_ms_p95|frame_ms_p99|gpu_raster_ms_mean|gpu_mesh_ms_total)$/ {
+$1 ~ /^(load|hold|spin|fly|edit|box|query|reslot|visibility|sculpt|dig)$/ && $2 ~ /^(seconds|frame_ms_mean|frame_ms_p95|frame_ms_p99|gpu_raster_ms_mean|gpu_mesh_ms_total)$/ {
   if ($1 == "load" && $2 != "seconds") next
   if ($1 != "load" && $2 == "seconds") next
   k = $1 " " $2; if (!(k in seen)) { seen[k] = 1; keys[++nk] = k }
