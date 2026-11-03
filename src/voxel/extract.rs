@@ -313,6 +313,20 @@ pub struct PadPlanCounts {
     pub unchanged: u32,
 }
 
+/// What [`pad_dirty_chunks`] writes: the padded volumes themselves, and how
+/// it classified the dirty chunks on the way.
+///
+/// One parameter rather than two because they are the same thing twice --
+/// the work done, and the account of it -- and because this file already
+/// groups a system's inputs this way (`ExtractFilter`, `FieldQuery`,
+/// `FieldChanges`). Keeping them separate is what pushed this signature past
+/// `clippy::too_many_arguments`.
+#[derive(SystemParam)]
+pub struct PadOutputs<'w, T: VoxelField> {
+    outbox: ResMut<'w, PaddedOutbox<T>>,
+    counts: ResMut<'w, PadPlanCounts>,
+}
+
 /// Builds new padded volumes, in parallel, for the chunks whose inputs
 /// changed this frame. Runs in `Last`, after every edit, load and surface
 /// flag of the frame.
@@ -323,11 +337,11 @@ pub fn pad_dirty_chunks<T>(
     mut changes: FieldChanges<T>,
     mut state: Local<ExtractState>,
     frame: Res<FrameCount>,
-    mut outbox: ResMut<PaddedOutbox<T>>,
-    mut counts: ResMut<PadPlanCounts>,
+    mut out: PadOutputs<T>,
 ) where
     T: VoxelField,
 {
+    let (outbox, counts) = (&mut out.outbox, &mut out.counts);
     outbox.chunks.clear();
     state.collect(&mut changes);
     if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
@@ -391,7 +405,7 @@ pub fn pad_dirty_chunks<T>(
     // last. Shape is the channel that drives GPU re-meshing, which is the
     // cost option 1 is bracketed against.
     if T::GPU == GpuChannel::Shape {
-        *counts = PadPlanCounts {
+        **counts = PadPlanCounts {
             dirty: dirty_seen,
             jobs: u32::try_from(jobs.len()).unwrap_or(u32::MAX),
             meta_only: u32::try_from(meta_only.len()).unwrap_or(u32::MAX),
