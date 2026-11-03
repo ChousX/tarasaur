@@ -224,6 +224,47 @@ GPU meshing what the cheaper raster saved (mesh time +17%). Expect MSAA to buy
 frame time in the phases that are raster-bound and nothing at all in the ones
 that are CPU-bound.
 
+Task pools are the application's too, for the same reason, and they carry a
+similar measurement. Bevy's default split gives io and `async_compute` 25% of
+the logical cores each and compute the rest; while tarasaur is editing, the
+CSG and padding scopes are the critical path and those two pools sit idle, so
+compute is the pool that wants the cores. **On a Steam Deck, widening it is
+worth 10.5% of `dig`.** Measured on a Deck (4 physical / 8 logical cores,
+15 W shared rail), three runs a side, rotated, one binary with a flag as the
+only difference:
+
+| compute threads | `dig` mean | p95 | spread |
+|---|---|---|---|
+| 6 (`task_pools`) | **29.52 ms** | 39.59 ms | 0.42% |
+| 4 (Bevy's default) | 32.63 ms | 45.10 ms | 0.94% |
+
+**+10.53% on the mean, +13.91% on p95**, against spreads under 1% and with no
+overlap between the groups.
+
+Nothing installs this for you — `TarasaurPlugin` changes no default and does
+not touch your pools. Opt in with one line:
+
+```rust
+App::new().add_plugins(DefaultPlugins.set(tarasaur::task_pools::edit_task_pools()));
+```
+
+or take just the compute policy if you build your own `TaskPoolOptions`:
+
+```rust
+let options = TaskPoolOptions { compute: tarasaur::task_pools::edit_compute_policy(), ..my_options };
+```
+
+Three things to know before expecting that number. It is a **`dig`-phase**
+win — the heavy continuous-editing phase, and the only one on that hardware
+badly missing 60 fps; phases that are not editing have far less to gain, and
+whether they *lose* anything to the wider pool is still being measured. It
+was measured on **4 physical cores**, where the default split leaves compute
+short; a machine with many cores has less to redistribute and one with very
+few has nothing. And the thread count is a recommendation, not a contract:
+call the function rather than hard-coding what it returns, because it is
+expected to move as it is measured on more hardware, and a future version may
+widen only while an edit is in flight.
+
 The arenas size themselves from the device's
 `max_storage_buffer_binding_size` and `max_buffer_size`, capped by
 `ArenaConfig::max_buffer_bytes` (256 MiB by default; each arena takes about
