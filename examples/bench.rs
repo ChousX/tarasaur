@@ -171,6 +171,10 @@ const SHOT_VIEWS: u32 = 4;
 /// turning twice as far per frame, `fly` stopping halfway, with everything
 /// after it placed from where it stops), and `sculpt`, `box`, `query`,
 /// `reslot` and `dig` are skipped.
+///
+/// The one place the setting lives: `Phase` reads it from free functions, so
+/// it cannot be a field of [`Output`] like the other flags, and the result
+/// header reads it back through [`quick`] rather than keeping a second copy.
 static QUICK: AtomicBool = AtomicBool::new(false);
 
 fn quick() -> bool {
@@ -449,8 +453,6 @@ struct Output {
     small_arenas: bool,
     /// `--layer`: a second surface layer (`common::water`) over the terrain.
     layer: bool,
-    /// `--quick`: see `QUICK`.
-    quick: bool,
     /// `--dig-radius`: the `dig` brush's radius in world units, normally
     /// `DIG_RADIUS`. Only vary it to find out what the phase's cost scales
     /// with -- a run with another radius is not comparable to a baseline.
@@ -505,7 +507,6 @@ fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
         depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
         small_arenas: args.iter().any(|a| a == "--small-arenas"),
         layer: args.iter().any(|a| a == "--layer"),
-        quick: args.iter().any(|a| a == "--quick"),
         dig_radius,
         commit: flag("--commit").unwrap_or_else(|| {
             std::process::Command::new("git")
@@ -585,10 +586,11 @@ fn main() -> AppExit {
         );
     }
     let flag = |name: &str| arg_value(&args, name);
+    // Before anything reads `Phase::frames`, which `quick()` shortens.
+    QUICK.store(args.iter().any(|a| a == "--quick"), Ordering::Relaxed);
     let Some((out, world_dir)) = bench_paths(&args) else {
         return AppExit::error();
     };
-    QUICK.store(out.quick, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&world_dir);
 
     let mut app = App::new();
@@ -3730,7 +3732,7 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         bench.out.depth_prepass,
         bench.out.small_arenas,
         bench.out.layer,
-        bench.out.quick,
+        quick(),
         bench.out.dig_radius,
     );
 
