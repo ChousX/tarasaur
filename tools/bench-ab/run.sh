@@ -43,6 +43,10 @@ mon=$!
 sleep 1.5 # idle samples before the bench starts
 
 cd "$repo" || exit 1
+# A run launched straight from here is presented by whatever desktop
+# compositor is up; the Deck launcher overrides this with what it wrapped the
+# bench in. Either way the header says, rather than leaving it unknowable.
+export TARASAUR_PRESENT=${TARASAUR_PRESENT:-host}
 if [[ ${BENCH_PIDFILE_OWNER:-} == cmd ]]; then
   launch=(env "BENCH_PIDFILE=$pidfile" "$bin" --label "$label" --out "$results" "$@")
 else

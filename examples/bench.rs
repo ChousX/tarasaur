@@ -442,6 +442,8 @@ struct Output {
     stamp: u64,
     /// Short hash of the checked-out commit.
     commit: String,
+    /// The command line and every knob read off it, for the header.
+    knobs: Knobs,
 }
 
 #[derive(Component)]
@@ -455,6 +457,117 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
+/// The command line, and what each knob on it resolved to.
+///
+/// An A/B is only checkable from the record if the saved summary proves which
+/// knob differed, and twice now it has not. `--compute-floor` gave six clean
+/// runs and a perfect null because the flag set a floor and so could not
+/// lower the thread count; that was caught only because the pool size had
+/// just been added to the header. The lesson was then not generalised, and
+/// the night's biggest result -- an MSAA A/B worth -25.3% on `hold` -- cannot
+/// be checked at all, because `--msaa` was never in the header either. Both
+/// are one bug: a flag the parser knew about and the header did not.
+///
+/// So reading a knob and reporting it are the same operation here. Every knob
+/// that can change a number goes through [`Knobs::switch`], [`Knobs::parsed`]
+/// or [`Knobs::resolved`], each of which records the value it returned, and
+/// [`Knobs::header_fields`] prints exactly that set. Adding a flag without
+/// adding it to the header now takes deliberately going around these.
+///
+/// What is read with [`Knobs::raw`] instead, because none of it can change a
+/// measurement: the paths (`--out`, `--world-dir`), the run's own identity
+/// (`--label`, `--commit`, already in the header by other means) and the two
+/// non-run modes (`--compare`, `--diff`), which never reach a result file.
+struct Knobs {
+    args: Vec<String>,
+    /// `key=value` in the order the run read them. Behind a lock only so a
+    /// `&Knobs` can be recorded into from the ECS at write time; there is no
+    /// contention.
+    recorded: Mutex<Vec<(String, String)>>,
+}
+
+impl Knobs {
+    const fn new(args: Vec<String>) -> Self {
+        Self {
+            args,
+            recorded: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The value after `flag`, recording nothing. Only for knobs that cannot
+    /// change a measurement -- see the type's note.
+    fn raw(&self, flag: &str) -> Option<String> {
+        arg_value(&self.args, flag)
+    }
+
+    /// Records the value `flag` resolved to, replacing any earlier one: the
+    /// run may learn later what a knob really got, and the later word wins.
+    fn record(&self, flag: &str, value: &dyn std::fmt::Display) {
+        let key = flag.trim_start_matches('-').replace('-', "_");
+        let value = value.to_string();
+        let mut rec = self
+            .recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = rec.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        } else {
+            rec.push((key, value));
+        }
+    }
+
+    /// Whether the bare `flag` is present. Recorded either way: "absent" is
+    /// as much a side of an A/B as "present".
+    fn switch(&self, flag: &str) -> bool {
+        let on = self.args.iter().any(|a| a == flag);
+        self.record(flag, &on);
+        on
+    }
+
+    /// `parse` applied to `flag`'s value, where a bad value should stop the
+    /// run. `None` is the run refusing to start, so nothing is recorded.
+    fn parsed<T>(
+        &self,
+        flag: &str,
+        parse: impl FnOnce(Option<&str>) -> Option<T>,
+        show: impl FnOnce(&T) -> String,
+    ) -> Option<T> {
+        let value = parse(self.raw(flag).as_deref())?;
+        self.record(flag, &show(&value));
+        Some(value)
+    }
+
+    /// `f` applied to `flag`'s value, where every value resolves to something
+    /// -- a default, or a clamp. What is recorded is what came back, not what
+    /// was asked for.
+    fn resolved<T: std::fmt::Display>(&self, flag: &str, f: impl FnOnce(Option<&str>) -> T) -> T {
+        let value = f(self.raw(flag).as_deref());
+        self.record(flag, &value);
+        value
+    }
+
+    /// An environment variable that shapes the run, recorded under `key`.
+    /// `absent` is a value like any other: an A/B that turned one of these
+    /// off has to be as provable as one that turned it on.
+    fn env(&self, key: &str, var: &str) -> Option<String> {
+        let value = std::env::var(var).ok().filter(|v| !v.is_empty());
+        self.record(key, &value.clone().unwrap_or_else(|| "absent".into()));
+        value
+    }
+
+    /// `key=value key=value ...` for the result header, in read order.
+    fn header_fields(&self) -> String {
+        let rec = self
+            .recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        rec.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 /// Where this run's results and scratch world go, and how it labels itself.
 ///
 /// `CARGO_MANIFEST_DIR` is baked in at build time, so off the build host it
@@ -463,8 +576,8 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
 /// instead (see `tools/bench-deck.sh`).
 ///
 /// `None` if a flag's value doesn't parse, having said which.
-fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
-    let flag = |name: &str| arg_value(args, name);
+fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
+    let flag = |name: &str| knobs.raw(name);
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let manifest = Path::new(manifest_dir);
     let base = if manifest.is_dir() {
@@ -472,22 +585,30 @@ fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
     } else {
         PathBuf::from(".")
     };
-    let dig_radius = match flag("--dig-radius") {
-        None => DIG_RADIUS,
-        Some(v) => match v.parse::<f32>() {
-            Ok(r) if r.is_finite() && r > 0.0 => r,
-            _ => {
-                eprintln!("--dig-radius wants a positive number of world units, got {v:?}");
-                return None;
-            }
+    let dig_radius = knobs.parsed(
+        "--dig-radius",
+        |v| {
+            v.map_or(Some(DIG_RADIUS), |v| match v.parse::<f32>() {
+                Ok(r) if r.is_finite() && r > 0.0 => Some(r),
+                _ => {
+                    eprintln!("--dig-radius wants a positive number of world units, got {v:?}");
+                    None
+                }
+            })
         },
-    };
+        f32::to_string,
+    )?;
+    // An empty scratch save directory, so every run generates the same
+    // terrain from scratch and your saves are never read or written. Resolved
+    // before the knobs move into `out`, since both read the command line.
+    let world_dir =
+        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     let out = Output {
         dir: flag("--out").map_or_else(|| base.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
-        depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
-        small_arenas: args.iter().any(|a| a == "--small-arenas"),
-        quick: args.iter().any(|a| a == "--quick"),
+        depth_prepass: knobs.switch("--depth-prepass"),
+        small_arenas: knobs.switch("--small-arenas"),
+        quick: knobs.switch("--quick"),
         dig_radius,
         commit: flag("--commit").unwrap_or_else(|| {
             std::process::Command::new("git")
@@ -501,15 +622,12 @@ fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
         stamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        knobs,
     };
     let out = Output {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
         ..out
     };
-    // An empty scratch save directory, so every run generates the same
-    // terrain from scratch and your saves are never read or written.
-    let world_dir =
-        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     Some((out, world_dir))
 }
 
@@ -565,7 +683,6 @@ fn main() -> AppExit {
     if let Some(i) = args.iter().position(|a| a == "--compare") {
         return compare_args(args.get(i.saturating_add(1)), args.get(i.saturating_add(2)));
     }
-    let flag = |name: &str| arg_value(&args, name);
     if let Some(i) = args.iter().position(|a| a == "--diff") {
         return diff_args(
             args.get(i.saturating_add(1)),
@@ -573,13 +690,33 @@ fn main() -> AppExit {
             args.get(i.saturating_add(3)),
         );
     }
-    let Some((out, world_dir)) = bench_paths(&args) else {
+    let Some((out, world_dir)) = bench_paths(Knobs::new(args)) else {
         return AppExit::error();
     };
+    let knobs = &out.knobs;
+    // Not flags, but they change the numbers as much as any flag does.
+    //
+    // `tracy` recompiles the bench with Bevy's instrumentation in it, and
+    // `profile=` says only debug or release, so two runs of "the same commit"
+    // can differ by the whole cost of tracing with nothing in the record to
+    // show it.
+    knobs.record("tracy", &cfg!(feature = "tracy"));
+    // What the frames are presented through. On the Deck this is the single
+    // largest lever there is -- the same binary measured 181 fps nested in
+    // gamescope, 719 with gamescope's own compositing off and 2645 headless
+    // (`tools/deck/bench.sh`) -- and it is set by an environment variable on
+    // the far side of an ssh, which no reader of a result could ever check.
+    // The launcher names what it used; a bare desktop run says so.
+    knobs.env("present", "TARASAUR_PRESENT");
     QUICK.store(out.quick, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&world_dir);
 
-    let Some(compute_pool) = parse_compute_threads(flag("--compute-threads").as_deref()) else {
+    // Recorded here as what was asked for, then overwritten in
+    // `write_results` by the pool's actual size -- the asking is not the
+    // getting, which is the whole reason this is in the header.
+    let Some(compute_pool) = knobs.parsed("--compute-threads", parse_compute_threads, |p| {
+        p.exact().map_or_else(|| "bevy".into(), |n| n.to_string())
+    }) else {
         return AppExit::error();
     };
     let mut app = App::new();
@@ -589,9 +726,10 @@ fn main() -> AppExit {
             // Disk writes would only add noise; nothing here needs to persist.
             autosave_secs: f32::INFINITY,
             depth_prepass: out.depth_prepass,
-            max_loads_in_flight: flag("--max-loads")
-                .and_then(|n| n.parse().ok())
-                .unwrap_or_else(|| TarasaurPlugin::default().max_loads_in_flight),
+            max_loads_in_flight: knobs.resolved("--max-loads", |v| {
+                v.and_then(|n| n.parse().ok())
+                    .unwrap_or_else(|| TarasaurPlugin::default().max_loads_in_flight)
+            }),
             arenas: if out.small_arenas {
                 BENCH_ARENAS
             } else {
@@ -607,11 +745,11 @@ fn main() -> AppExit {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     register_terrain(&mut app);
-    let Some(msaa) = parse_msaa(flag("--msaa").as_deref()) else {
+    let Some(msaa) = knobs.parsed("--msaa", parse_msaa, |m| msaa_samples(*m).to_string()) else {
         return AppExit::error();
     };
     app.insert_resource(BenchMsaa(msaa));
-    if args.iter().any(|a| a == "--renderdoc") {
+    if knobs.switch("--renderdoc") {
         let Some(capture) = FrameCapture::attach(&out) else {
             return AppExit::error();
         };
@@ -619,7 +757,7 @@ fn main() -> AppExit {
             .add_systems(Update, trigger_frame_capture);
     }
 
-    add_checked_phases(&mut app, out.small_arenas);
+    add_checked_phases(&mut app, knobs, out.small_arenas);
     app.insert_resource(CursorBrush {
         enabled: false,
         ..default()
@@ -660,7 +798,7 @@ struct SmallArenas(bool);
 
 /// The phases with checks: their drivers, the checks themselves, and the
 /// render-world readbacks the checks read.
-fn add_checked_phases(app: &mut App, small_arenas: bool) {
+fn add_checked_phases(app: &mut App, knobs: &Knobs, small_arenas: bool) {
     let probe = SlotProbe::default();
     let mesh_probe = MeshProbe::default();
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -680,7 +818,7 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
     }
     app.insert_resource(probe)
         .insert_resource(mesh_probe)
-        .insert_resource(GapProbes(std::env::args().any(|a| a == "--gap-probes")))
+        .insert_resource(GapProbes(knobs.switch("--gap-probes")))
         .insert_resource(SmallArenas(small_arenas))
         .init_resource::<QueryWatch>()
         .add_systems(
@@ -3441,23 +3579,26 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
     // `ab.sh`'s `<label>-*` glob with nothing to match.
     let stem = format!("{}-{}", bench.out.label, bench.out.stamp);
     let commit = &bench.out.commit;
+    // What the compute pool actually got, not what was asked for. A flag
+    // A/B whose flag silently did nothing measures a variant against itself
+    // and reads as a clean null result, so the run states its own pool size
+    // rather than leaving it to be trusted. This replaces the value recorded
+    // when `--compute-threads` was parsed.
+    bench.out.knobs.record(
+        "--compute-threads",
+        &bevy::tasks::ComputeTaskPool::get().thread_num(),
+    );
+    // Every knob the run read, in read order. Nothing is listed here by name:
+    // a flag is in the header because the parser put it there.
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} quick={} dig_radius={} compute_threads={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} {}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
         } else {
             "release"
         },
-        bench.out.depth_prepass,
-        bench.out.small_arenas,
-        bench.out.quick,
-        bench.out.dig_radius,
-        // What the compute pool actually got, not what was asked for. A flag
-        // A/B whose flag silently did nothing measures a variant against
-        // itself and reads as a clean null result, so the run states its own
-        // pool size rather than leaving it to be trusted.
-        bevy::tasks::ComputeTaskPool::get().thread_num(),
+        bench.out.knobs.header_fields(),
     );
 
     let mut frames = header.clone();
@@ -3801,6 +3942,18 @@ fn parse_compute_threads(arg: Option<&str>) -> Option<ComputePool> {
                 None
             }
         },
+    }
+}
+
+/// How many samples an [`Msaa`] is, for the result header. `--msaa` was the
+/// one flag an A/B could turn and the record could not show, and finding 1's
+/// MSAA result is unverifiable for exactly that reason.
+const fn msaa_samples(msaa: Msaa) -> u32 {
+    match msaa {
+        Msaa::Off => 1,
+        Msaa::Sample2 => 2,
+        Msaa::Sample4 => 4,
+        Msaa::Sample8 => 8,
     }
 }
 
