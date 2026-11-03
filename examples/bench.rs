@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--layer] [--gap-probes] [--quick]
+//!   [--compute-threads bevy|N] [--settle-stream]
 //! ```
 //!
 //! `--out DIR` puts the results somewhere else, and `--world-dir DIR` the
@@ -166,6 +167,10 @@ const EDIT_FRAMES: u32 = 300;
 const SHOT_FRAMES_PER_VIEW: u32 = 30;
 /// `shots`: views of the loaded world from `START`, a quarter turn apart.
 const SHOT_VIEWS: u32 = 4;
+
+/// How long `--settle-stream` waits for chunk streaming to drain before it
+/// gives up and measures anyway, having said so.
+const SETTLE_STREAM_TIMEOUT_SECS: f32 = 20.0;
 
 /// `--quick`: `hold`, `spin` and `fly` run half as many frames (`spin`
 /// turning twice as far per frame, `fly` stopping halfway, with everything
@@ -439,6 +444,9 @@ struct Bench {
     /// flatten one (so, after the smooth one). Each is captured on the
     /// first frame of its stroke that finds the spot at High: a phase's
     /// first edits can wait for `MaxEditLod`.
+    /// `--settle-stream`: this phase's measured frames have not started yet,
+    /// because chunk streaming from an earlier phase is still draining.
+    settling: bool,
     sculpt_start: Option<SculptMetrics>,
     sculpt_mid: Option<SculptMetrics>,
     out: Output,
@@ -457,10 +465,17 @@ struct Output {
     /// `DIG_RADIUS`. Only vary it to find out what the phase's cost scales
     /// with -- a run with another radius is not comparable to a baseline.
     dig_radius: f32,
+    /// `--settle-stream`: hold each fixed-length phase before its measured
+    /// frames begin until chunk streaming has drained.
+    settle_stream: SettleStream,
     /// Seconds since the epoch at startup, in the result file names.
     stamp: u64,
-    /// Short hash of the checked-out commit.
-    commit: String,
+    /// Short hash of the commit the **binary was built from**, from
+    /// `--commit`. Empty when nothing told us: a run cannot work this out
+    /// for itself, which is the whole point of the field.
+    commit_build: String,
+    /// The command line and every knob read off it, for the header.
+    knobs: Knobs,
 }
 
 #[derive(Component)]
@@ -474,6 +489,268 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
+/// `--settle-stream`: whether a phase may begin measuring while chunk
+/// streaming from an earlier phase is still draining.
+///
+/// A two-variant enum rather than a fourth `bool` on `Output`:
+/// `clippy::struct_excessive_bools` fires at four, and its own advice is to
+/// refactor into two-variant enums. It also makes the header line say which
+/// mode a run used rather than `true`/`false`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettleStream {
+    /// Start measuring at once. The default, so a run stays comparable with
+    /// every result already on disk.
+    Off,
+    /// Hold each fixed-length phase until `loads_in_flight == 0 &&
+    /// lod_pending == 0`, or `SETTLE_STREAM_TIMEOUT_SECS` elapses.
+    WaitForDrain,
+}
+
+impl SettleStream {
+    /// Reads `--settle-stream` through [`Knobs`], so the header carries it
+    /// because the parser recorded it rather than because `write_results`
+    /// names it -- and records the mode's own word rather than a bare
+    /// `true`/`false`. The second `record` replaces the `switch`'s bool,
+    /// since a later word for the same key wins.
+    fn from_args(knobs: &Knobs) -> Self {
+        let mode = if knobs.switch("--settle-stream") {
+            Self::WaitForDrain
+        } else {
+            Self::Off
+        };
+        knobs.record("--settle-stream", &mode.tag());
+        mode
+    }
+
+    /// What the result header records, so a flag A/B can verify it took.
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::WaitForDrain => "wait",
+        }
+    }
+}
+
+#[derive(Component)]
+struct BenchCamera;
+
+/// The value after `name` in `args`, if it's there.
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i.saturating_add(1)))
+        .cloned()
+}
+
+/// The command line, and what each knob on it resolved to.
+///
+/// An A/B is only checkable from the record if the saved summary proves which
+/// knob differed, and twice now it has not. `--compute-floor` gave six clean
+/// runs and a perfect null because the flag set a floor and so could not
+/// lower the thread count; that was caught only because the pool size had
+/// just been added to the header. The lesson was then not generalised, and
+/// the night's biggest result -- an MSAA A/B worth -25.3% on `hold` -- cannot
+/// be checked at all, because `--msaa` was never in the header either. Both
+/// are one bug: a flag the parser knew about and the header did not.
+///
+/// So reading a knob and reporting it are the same operation here. Every knob
+/// that can change a number goes through [`Knobs::switch`], [`Knobs::parsed`]
+/// or [`Knobs::resolved`], each of which records the value it returned, and
+/// [`Knobs::header_fields`] prints exactly that set. Adding a flag without
+/// adding it to the header now takes deliberately going around these.
+///
+/// What is read with [`Knobs::raw`] instead, because none of it can change a
+/// measurement: the paths (`--out`, `--world-dir`), the run's own identity
+/// (`--label`, `--commit`, already in the header by other means) and the two
+/// non-run modes (`--compare`, `--diff`), which never reach a result file.
+struct Knobs {
+    args: Vec<String>,
+    /// `key=value` in the order the run read them. Behind a lock only so a
+    /// `&Knobs` can be recorded into from the ECS at write time; there is no
+    /// contention.
+    recorded: Mutex<Vec<(String, String)>>,
+}
+
+impl Knobs {
+    const fn new(args: Vec<String>) -> Self {
+        Self {
+            args,
+            recorded: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The value after `flag`, recording nothing. Only for knobs that cannot
+    /// change a measurement -- see the type's note.
+    fn raw(&self, flag: &str) -> Option<String> {
+        arg_value(&self.args, flag)
+    }
+
+    /// Records the value `flag` resolved to, replacing any earlier one: the
+    /// run may learn later what a knob really got, and the later word wins.
+    fn record(&self, flag: &str, value: &dyn std::fmt::Display) {
+        let key = flag.trim_start_matches('-').replace('-', "_");
+        let value = value.to_string();
+        let mut rec = self
+            .recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = rec.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        } else {
+            rec.push((key, value));
+        }
+    }
+
+    /// Whether the bare `flag` is present. Recorded either way: "absent" is
+    /// as much a side of an A/B as "present".
+    fn switch(&self, flag: &str) -> bool {
+        let on = self.args.iter().any(|a| a == flag);
+        self.record(flag, &on);
+        on
+    }
+
+    /// `parse` applied to `flag`'s value, where a bad value should stop the
+    /// run. `None` is the run refusing to start, so nothing is recorded.
+    fn parsed<T>(
+        &self,
+        flag: &str,
+        parse: impl FnOnce(Option<&str>) -> Option<T>,
+        show: impl FnOnce(&T) -> String,
+    ) -> Option<T> {
+        let value = parse(self.raw(flag).as_deref())?;
+        self.record(flag, &show(&value));
+        Some(value)
+    }
+
+    /// `f` applied to `flag`'s value, where every value resolves to something
+    /// -- a default, or a clamp. What is recorded is what came back, not what
+    /// was asked for.
+    fn resolved<T: std::fmt::Display>(&self, flag: &str, f: impl FnOnce(Option<&str>) -> T) -> T {
+        let value = f(self.raw(flag).as_deref());
+        self.record(flag, &value);
+        value
+    }
+
+    /// An environment variable that shapes the run, recorded under `key`.
+    /// `absent` is a value like any other: an A/B that turned one of these
+    /// off has to be as provable as one that turned it on.
+    fn env(&self, key: &str, var: &str) -> Option<String> {
+        let value = std::env::var(var).ok().filter(|v| !v.is_empty());
+        self.record(key, &value.clone().unwrap_or_else(|| "absent".into()));
+        value
+    }
+
+    /// `key=value key=value ...` for the result header, in read order.
+    fn header_fields(&self) -> String {
+        let rec = self
+            .recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        rec.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Which file the running bench actually is, as a file name, an xxh3-128 and
+/// a length.
+///
+/// `current_exe()` alone is a trap here. `tools/deck/bench.sh` starts the
+/// bench through an explicit dynamic loader -- `ld-linux-x86-64.so.2`
+/// `--library-path ... bin/bench`, nix glibc against SteamOS's own libraries
+/// -- and `current_exe()` then returns **the loader**, which is the same
+/// program whichever variant is running. A fingerprint that silently agreed
+/// across both sides of an A/B would be worse than none at all, and it would
+/// do it on the one machine whose numbers decide things. So when
+/// `current_exe()` looks like a loader, hash `argv[0]` instead, and record
+/// which file was hashed either way rather than leaving it to be assumed.
+///
+/// The file name, not the path: the header is space-separated `key=value`
+/// and a path can contain spaces. The hash is the identity; the name only
+/// has to answer "did this hash the bench or the loader".
+fn bench_binary() -> (String, String, u64) {
+    let looks_like_loader = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("ld-") || n.starts_with("ld."))
+    };
+    let exe = std::env::current_exe().ok().filter(|p| !looks_like_loader(p));
+    let path = exe
+        .or_else(|| std::env::args_os().next().map(PathBuf::from))
+        .unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (name, "unreadable".into(), 0);
+    };
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    h.update(&bytes);
+    (
+        name,
+        format!("{:032x}", h.digest128()),
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    )
+}
+
+/// Records where this run's code came from, which the result could not say
+/// before.
+///
+/// `commit=` used to be `git rev-parse HEAD` taken **at run time**, so it
+/// recorded the checkout the process happened to be sitting in rather than
+/// the tree the binary was compiled from. The two are routinely different --
+/// `tools/bench-deck-ab.sh` builds each variant from its own ref in a
+/// detached worktree while `HEAD` stays put -- and the field gave no hint
+/// which it was. ornisculpt had the identical defect, found the same night.
+///
+/// So the old name is retired rather than redefined. A row saying `commit=`
+/// is, mechanically and with nothing to remember, a row written before this
+/// change; a row saying `commit_build=`/`commit_run=` distinguishes them.
+/// `binary_xxh3` is the one that actually settles it: it identifies the
+/// artifact that ran, whatever any checkout claims.
+///
+/// Nothing fails on a mismatch. A binary built from one ref and run beside
+/// another checkout is the normal case for the Deck driver; `stale=true`
+/// records it, and a warning says so once.
+fn record_provenance(knobs: &Knobs, commit_build: &str) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", env!("CARGO_MANIFEST_DIR")])
+            .args(args)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let commit_run = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    // A separate field, never a `+dirty` suffix on the sha: a suffix stops
+    // the value parsing as a sha and starts it being string-compared, which
+    // is how two identical trees get reported as different.
+    let dirty_run = git(&["status", "--porcelain"]).is_some();
+    let (file, hash, bytes) = bench_binary();
+    // Both known and different. Emitted always, not only when true: an
+    // absent field cannot distinguish "they agreed" from "git was not there"
+    // from "an older binary did not write this".
+    let stale = !commit_build.is_empty() && !commit_run.is_empty() && commit_build != commit_run;
+    if stale {
+        eprintln!(
+            "bench: note: built from {commit_build}, running beside a checkout at \
+             {commit_run}. Normal for a driver-built variant; the binary is what ran."
+        );
+    }
+    knobs.record("commit_build", &commit_build);
+    knobs.record("commit_run", &commit_run);
+    knobs.record("dirty_run", &dirty_run);
+    knobs.record("stale", &stale);
+    knobs.record("binary_xxh3", &hash);
+    knobs.record("binary_bytes", &bytes);
+    knobs.record("binary_file", &file);
+}
+
 /// Where this run's results and scratch world go, and how it labels itself.
 ///
 /// `CARGO_MANIFEST_DIR` is baked in at build time, so off the build host it
@@ -482,8 +759,12 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
 /// instead (see `tools/bench-deck.sh`).
 ///
 /// `None` if a flag's value doesn't parse, having said which.
-fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
-    let flag = |name: &str| arg_value(args, name);
+fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
+    let flag = |name: &str| knobs.raw(name);
+    // Before anything reads `Phase::frames`, which `quick()` shortens -- and
+    // through `Knobs`, so the header still records it. `main` keeps no second
+    // copy of this on `Output`, and that stays true.
+    QUICK.store(knobs.switch("--quick"), Ordering::Relaxed);
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let manifest = Path::new(manifest_dir);
     let base = if manifest.is_dir() {
@@ -491,44 +772,43 @@ fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
     } else {
         PathBuf::from(".")
     };
-    let dig_radius = match flag("--dig-radius") {
-        None => DIG_RADIUS,
-        Some(v) => match v.parse::<f32>() {
-            Ok(r) if r.is_finite() && r > 0.0 => r,
-            _ => {
-                eprintln!("--dig-radius wants a positive number of world units, got {v:?}");
-                return None;
-            }
+    let dig_radius = knobs.parsed(
+        "--dig-radius",
+        |v| {
+            v.map_or(Some(DIG_RADIUS), |v| match v.parse::<f32>() {
+                Ok(r) if r.is_finite() && r > 0.0 => Some(r),
+                _ => {
+                    eprintln!("--dig-radius wants a positive number of world units, got {v:?}");
+                    None
+                }
+            })
         },
-    };
+        f32::to_string,
+    )?;
     let out = Output {
         dir: flag("--out").map_or_else(|| base.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
-        depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
-        small_arenas: args.iter().any(|a| a == "--small-arenas"),
-        layer: args.iter().any(|a| a == "--layer"),
+        depth_prepass: knobs.switch("--depth-prepass"),
+        small_arenas: knobs.switch("--small-arenas"),
+        layer: knobs.switch("--layer"),
         dig_radius,
-        commit: flag("--commit").unwrap_or_else(|| {
-            std::process::Command::new("git")
-                .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .filter(|s| !s.trim().is_empty())
-                .map_or_else(|| "unknown".into(), |s| s.trim().to_string())
-        }),
+        settle_stream: SettleStream::from_args(&knobs),
+        commit_build: flag("--commit").unwrap_or_default(),
         stamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        knobs,
     };
+    // An empty scratch save directory, so every run generates the same
+    // terrain from scratch and your saves are never read or written.
+    // Resolved before the knobs move into `out`, since both read the command
+    // line.
+    let world_dir =
+        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     let out = Output {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
         ..out
     };
-    // An empty scratch save directory, so every run generates the same
-    // terrain from scratch and your saves are never read or written.
-    let world_dir =
-        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     Some((out, world_dir))
 }
 
@@ -585,25 +865,47 @@ fn main() -> AppExit {
             args.get(i.saturating_add(3)),
         );
     }
-    let flag = |name: &str| arg_value(&args, name);
-    // Before anything reads `Phase::frames`, which `quick()` shortens.
-    QUICK.store(args.iter().any(|a| a == "--quick"), Ordering::Relaxed);
-    let Some((out, world_dir)) = bench_paths(&args) else {
+    let Some((out, world_dir)) = bench_paths(Knobs::new(args)) else {
+        return AppExit::error();
+    };
+    let knobs = &out.knobs;
+    // Not flags, but they change the numbers as much as any flag does.
+    //
+    // `tracy` recompiles the bench with Bevy's instrumentation in it, and
+    // `profile=` says only debug or release, so two runs of "the same commit"
+    // can differ by the whole cost of tracing with nothing in the record to
+    // show it.
+    knobs.record("tracy", &cfg!(feature = "tracy"));
+    record_provenance(knobs, &out.commit_build);
+    // What the frames are presented through. On the Deck this is the single
+    // largest lever there is -- the same binary measured 181 fps nested in
+    // gamescope, 719 with gamescope's own compositing off and 2645 headless
+    // (`tools/deck/bench.sh`) -- and it is set by an environment variable on
+    // the far side of an ssh, which no reader of a result could ever check.
+    // The launcher names what it used; a bare desktop run says so.
+    knobs.env("present", "TARASAUR_PRESENT");
+    // Recorded as what was asked for, then overwritten in `write_results` by
+    // the pool's actual size -- the asking is not the getting, which is the
+    // whole reason this is in the header.
+    let Some(compute_pool) = knobs.parsed("--compute-threads", parse_compute_threads, |p| {
+        p.exact().map_or_else(|| "bevy".into(), |n| n.to_string())
+    }) else {
         return AppExit::error();
     };
     let _ = std::fs::remove_dir_all(&world_dir);
 
     let mut app = App::new();
-    add_default_plugins(&mut app, args.iter().any(|a| a == "--renderdoc"));
+    add_default_plugins(&mut app, knobs.switch("--renderdoc"), compute_pool);
     app.add_plugins((
         TarasaurPlugin {
             save_dir: world_dir,
             // Disk writes would only add noise; nothing here needs to persist.
             autosave_secs: f32::INFINITY,
             depth_prepass: out.depth_prepass,
-            max_loads_in_flight: flag("--max-loads")
-                .and_then(|n| n.parse().ok())
-                .unwrap_or_else(|| TarasaurPlugin::default().max_loads_in_flight),
+            max_loads_in_flight: knobs.resolved("--max-loads", |v| {
+                v.and_then(|n| n.parse().ok())
+                    .unwrap_or_else(|| TarasaurPlugin::default().max_loads_in_flight)
+            }),
             arenas: if out.small_arenas {
                 BENCH_ARENAS
             } else {
@@ -622,7 +924,7 @@ fn main() -> AppExit {
     if out.layer {
         common::water::add_water_layer(&mut app);
     }
-    let Some(msaa) = parse_msaa(flag("--msaa").as_deref()) else {
+    let Some(msaa) = knobs.parsed("--msaa", parse_msaa, |m| msaa_samples(*m).to_string()) else {
         return AppExit::error();
     };
     app.insert_resource(BenchMsaa(msaa));
@@ -647,6 +949,7 @@ fn main() -> AppExit {
         load_timed_out: false,
         rows: Vec::new(),
         seen: HashMap::new(),
+        settling: false,
         sculpt_start: None,
         sculpt_mid: None,
         out,
@@ -659,7 +962,7 @@ fn main() -> AppExit {
         (
             drive_camera,
             take_shots,
-            drive_edits,
+            drive_edits.run_if(not_settling),
             ignore_cursor
                 .after(resolve_cursor_hit)
                 .before(update_cursor_focus),
@@ -670,9 +973,31 @@ fn main() -> AppExit {
 }
 
 /// Bevy's plugins, headless unless `renderdoc` (RenderDoc captures on present).
-fn add_default_plugins(app: &mut App, renderdoc: bool) {
+///
+/// `compute_pool` is `--compute-threads`. The widening lives only in this
+/// bench: the library ships it as an opt-in (`tarasaur::task_pools`) and
+/// changes no default, so an app that does not ask gets Bevy's split. "Is
+/// the floor worth it" therefore has to be answerable without rebuilding
+/// (`bench_results/deck-improvements.md`, option 6), and the count comes from
+/// `task_pools::edit_compute_threads` so the bench measures the number an
+/// app would get rather than a copy of it.
+fn add_default_plugins(app: &mut App, renderdoc: bool, compute_pool: ComputePool) {
+    let compute = compute_pool.exact().map_or_else(
+        || TaskPoolOptions::default().compute,
+        |n| bevy::app::TaskPoolThreadAssignmentPolicy {
+            min_threads: n,
+            max_threads: n,
+            ..TaskPoolOptions::default().compute
+        },
+    );
+    let pools = TaskPoolPlugin {
+        task_pool_options: TaskPoolOptions {
+            compute,
+            ..default()
+        },
+    };
     if renderdoc {
-        app.add_plugins(DefaultPlugins.set(render_plugin()).set(WindowPlugin {
+        app.add_plugins(DefaultPlugins.set(render_plugin()).set(pools).set(WindowPlugin {
             primary_window: Some(Window {
                 title: "tarasaur bench".into(),
                 resolution: WindowResolution::new(RESOLUTION.x, RESOLUTION.y),
@@ -686,6 +1011,7 @@ fn add_default_plugins(app: &mut App, renderdoc: bool) {
         app.add_plugins((
             DefaultPlugins
                 .set(render_plugin())
+                .set(pools)
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -703,6 +1029,16 @@ fn add_default_plugins(app: &mut App, renderdoc: bool) {
                 .add_systems(Render, throttle_gpu.in_set(RenderSystems::Cleanup));
         }
     }
+}
+
+/// `--settle-stream` is not holding this phase's measured frames back.
+///
+/// The drivers and checks run only when this is true, so a settling phase
+/// streams and renders but is not yet sculpting, digging or being checked --
+/// otherwise the gate would hold `frame_in_phase` at 0 while `drive_sculpt`
+/// poked the same spot for the whole wait.
+fn not_settling(bench: Res<Bench>) -> bool {
+    !bench.settling
 }
 
 /// Whether the run uses `BENCH_ARENAS` (`--small-arenas`).
@@ -734,7 +1070,7 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
     }
     app.insert_resource(probe)
         .insert_resource(mesh_probe)
-        .insert_resource(GapProbes(std::env::args().any(|a| a == "--gap-probes")))
+        .insert_resource(GapProbes(knobs.switch("--gap-probes")))
         .insert_resource(SmallArenas(small_arenas))
         .init_resource::<QueryWatch>()
         .add_systems(
@@ -755,7 +1091,8 @@ fn add_checked_phases(app: &mut App, small_arenas: bool) {
                 check_visibility,
                 check_dig,
                 check_meshes,
-            ),
+            )
+                .run_if(not_settling),
         );
 }
 
@@ -3619,6 +3956,36 @@ fn record_frame(
         values,
     };
     let idle = is_idle(&row);
+
+    // `--settle-stream`: don't start a phase's measured frames while chunk
+    // streaming from an earlier phase is still draining. Deliberately not
+    // `is_idle`, which also demands `meshed_chunks == 0` -- a sculpting phase
+    // never reaches that, so `is_idle` can't gate one. Only the streaming
+    // pair is tested. `load` is exempt (`frames()` is `None`): it *is* the
+    // phase that does the streaming.
+    if bench.out.settle_stream == SettleStream::WaitForDrain
+        && bench.frame_in_phase == 0
+        && bench.phase.frames().is_some()
+    {
+        let clear = |name| row.get(name).is_some_and(|v| v == 0.0);
+        let drained = clear("loads_in_flight") && clear("lod_pending");
+        let timed_out = bench.phase_started.elapsed().as_secs_f32() > SETTLE_STREAM_TIMEOUT_SECS;
+        if !drained && !timed_out {
+            // Not recorded and `frame_in_phase` not advanced, so the phase
+            // still runs exactly the number of measured frames it declares
+            // and the result tables are unchanged in shape.
+            bench.settling = true;
+            return;
+        }
+        if timed_out && !drained {
+            warn!(
+                "[bench] {}: --settle-stream gave up after {SETTLE_STREAM_TIMEOUT_SECS}s; \
+                 streaming still busy, this phase is contaminated",
+                bench.phase.name()
+            );
+        }
+        bench.settling = false;
+    }
     bench.rows.push(row);
     bench.frame_in_phase = bench.frame_in_phase.saturating_add(1);
 
@@ -3770,20 +4137,28 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
     // tail and the stamp, silently overwriting the previous run and leaving
     // `ab.sh`'s `<label>-*` glob with nothing to match.
     let stem = format!("{}-{}", bench.out.label, bench.out.stamp);
-    let commit = &bench.out.commit;
+    // What the compute pool actually got, not what was asked for. A flag
+    // A/B whose flag silently did nothing measures a variant against itself
+    // and reads as a clean null result, so the run states its own pool size
+    // rather than leaving it to be trusted. This replaces the value recorded
+    // when `--compute-threads` was parsed.
+    bench.out.knobs.record(
+        "--compute-threads",
+        &bevy::tasks::ComputeTaskPool::get().thread_num(),
+    );
+    // Every knob the run read, in read order. Nothing is listed here by name:
+    // a flag is in the header because the parser put it there. A hand-written
+    // field list is how `msaa=` went unrecorded for the night's biggest
+    // result, so this must not become one again.
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} layer={} quick={} dig_radius={}\n",
+        "# label={} adapter={adapter} profile={} {}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
         } else {
             "release"
         },
-        bench.out.depth_prepass,
-        bench.out.small_arenas,
-        bench.out.layer,
-        quick(),
-        bench.out.dig_radius,
+        bench.out.knobs.header_fields(),
     );
 
     let mut frames = header.clone();
@@ -4075,6 +4450,64 @@ fn trigger_frame_capture(bench: Res<Bench>, capture: Res<FrameCapture>) {
 /// The camera's MSAA, from `--msaa` (default: Bevy's default, 4x).
 #[derive(Resource)]
 struct BenchMsaa(Msaa);
+
+/// What `--compute-threads` asked for.
+#[derive(Clone, Copy)]
+enum ComputePool {
+    /// Leave Bevy's own split alone. This is what an application that does
+    /// not opt into `tarasaur::task_pools` gets.
+    Bevy,
+    /// Give the compute pool exactly this many threads.
+    ///
+    /// Both bounds, not just `min_threads`. `min_threads` is only a floor --
+    /// "force using at least this many" -- so asking for fewer threads than
+    /// Bevy's percentage split already allocates does nothing at all. That
+    /// cost a six-run experiment: `--compute-floor 2` against
+    /// `--compute-floor 1` on a Deck both ran 4 compute threads and measured a
+    /// null, which is indistinguishable from "thread count doesn't matter".
+    Exact(usize),
+}
+
+impl ComputePool {
+    /// The thread count to pin both bounds to, or `None` to set nothing.
+    const fn exact(self) -> Option<usize> {
+        match self {
+            Self::Bevy => None,
+            Self::Exact(n) => Some(n),
+        }
+    }
+}
+
+/// `--compute-threads`: how many threads the compute pool gets.
+///
+/// Absent, the bench widens the pool as it always has. `bevy` leaves Bevy's
+/// own split alone. A number pins the pool to exactly that many. `None` means
+/// the value was bad and the run should not start.
+fn parse_compute_threads(arg: Option<&str>) -> Option<ComputePool> {
+    match arg {
+        None => Some(ComputePool::Exact(tarasaur::task_pools::edit_compute_threads())),
+        Some("bevy" | "default") => Some(ComputePool::Bevy),
+        Some(other) => match other.parse::<usize>() {
+            Ok(n) if n >= 1 => Some(ComputePool::Exact(n)),
+            _ => {
+                eprintln!("bench: --compute-threads takes `bevy` or a count >= 1, not {other}");
+                None
+            }
+        },
+    }
+}
+
+/// How many samples an [`Msaa`] is, for the result header. `--msaa` was the
+/// one flag an A/B could turn and the record could not show, and finding 1's
+/// MSAA result is unverifiable for exactly that reason.
+const fn msaa_samples(msaa: Msaa) -> u32 {
+    match msaa {
+        Msaa::Off => 1,
+        Msaa::Sample2 => 2,
+        Msaa::Sample4 => 4,
+        Msaa::Sample8 => 8,
+    }
+}
 
 /// `--msaa`: 1, 2, 4 or 8 samples; Bevy's default (4x) when absent.
 fn parse_msaa(arg: Option<&str>) -> Option<Msaa> {

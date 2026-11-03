@@ -33,6 +33,7 @@ mod plugin;
 pub mod prelude;
 pub mod raycast;
 pub mod storage;
+pub mod task_pools;
 pub mod texture_palette;
 pub mod voxel;
 

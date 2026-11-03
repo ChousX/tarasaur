@@ -245,6 +245,11 @@ impl Field<f32> for SDF {
         self.data.get(i).copied().unwrap_or(SDF_BAND)
     }
 
+    /// Clamped to the narrow band, as [`Field::set`] stores it.
+    fn storable(&self, value: f32) -> f32 {
+        value.clamp(-SDF_BAND, SDF_BAND)
+    }
+
     /// Out-of-range coordinates are ignored.
     fn set(&mut self, x: u32, y: u32, z: u32, value: f32) {
         let i = self.flatten(x, y, z);

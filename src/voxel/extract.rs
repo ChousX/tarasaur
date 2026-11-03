@@ -150,6 +150,7 @@ where
     C: VoxelField<Elem = f32>,
 {
     app.insert_resource(PaddedOutbox::<T>::new(config))
+        .init_resource::<PadPlanCounts>()
         .add_systems(Last, pad_dirty_chunks::<T, C>);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(ExtractSchedule, extract_voxel_chunks::<T>);
@@ -638,6 +639,39 @@ type Job<'a, T> = (Entity, IVec3, &'a T, LOD, [u32; 2]);
 /// seam ranks).
 type MetaOnly = (Entity, IVec3, LOD, [u32; 2]);
 
+/// How this frame's dirty chunks were classified, for the frame just planned.
+///
+/// A chunk being marked dirty is not a chunk being re-meshed, and the gap
+/// between the two is large and was unmeasured. `deck-improvements.md`'s
+/// option 1 is held off on a bracket whose cost half is "~0.6 ms per
+/// spuriously re-meshed chunk times 3-8 such chunks a frame", and finding 13
+/// recorded both halves as unverified and **not recomputable from what is on
+/// disk**. These four counters make the second half recomputable from any
+/// run's summary, which is the only way that bracket ever gets settled.
+///
+/// The distinction that matters: a dirty chunk whose [`extract_key`] has not
+/// moved is dropped in `plan_jobs` and costs nothing at all -- no padding, no
+/// upload, no mesh. Measured on `dig`, that is 64.67 chunks a frame of 138.67
+/// marked dirty, against 14.62 getting a full re-pad: over-reporting a change
+/// does not automatically buy a re-mesh, and the outcomes have very different
+/// prices.
+///
+/// Counts the **shape** channel only, since that is the one that drives GPU
+/// re-meshing. `pad_dirty_chunks` is generic and runs once per field type, so
+/// without that restriction the material and visibility passes overwrite the
+/// shape numbers and `jobs` reads 0 in a phase meshing nine chunks a frame.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct PadPlanCounts {
+    /// Dirty chunks considered this frame.
+    pub dirty: u32,
+    /// Full re-pad and re-mesh: the expensive outcome.
+    pub jobs: u32,
+    /// Seam ranks moved only: a GPU restitch, no CPU padding.
+    pub meta_only: u32,
+    /// Dirty, but the extract key had not moved, so nothing happened.
+    pub unchanged: u32,
+}
+
 /// Which dirty chunks need a new volume, and which only new seam ranks:
 /// cheap, sequential.
 fn plan_jobs<'a, T, C>(
@@ -645,7 +679,7 @@ fn plan_jobs<'a, T, C>(
     src: Sources<'a, '_, '_, T, C>,
     filter: &ExtractFilter,
     config: ExtractConfig<T>,
-) -> (Vec<Job<'a, T>>, Vec<MetaOnly>)
+) -> (Vec<Job<'a, T>>, Vec<MetaOnly>, PadPlanCounts)
 where
     T: VoxelField,
     C: VoxelField,
@@ -653,6 +687,8 @@ where
     let ExtractState { last, dirty, .. } = state;
     let mut jobs = Vec::new();
     let mut meta_only = Vec::new();
+    let mut unchanged = 0u32;
+    let dirty_seen = u32::try_from(dirty.len()).unwrap_or(u32::MAX);
     for pos in dirty.iter() {
         let Some(entity) = src.manager.get_chunk(pos) else {
             continue;
@@ -678,6 +714,11 @@ where
             continue;
         };
         if old == key {
+            // Dirty, but nothing this chunk's padded volume or mesh depends
+            // on actually moved. Counted, because "chunks marked dirty" has
+            // been read as "chunks re-meshed" and they are not the same
+            // number.
+            unchanged = unchanged.saturating_add(1);
             continue;
         }
         // Same LOD and versions: the padded volume would come out the same
@@ -692,7 +733,13 @@ where
         }
         jobs.push((entity, *pos, field, *lod, key.3));
     }
-    (jobs, meta_only)
+    let counts = PadPlanCounts {
+        dirty: dirty_seen,
+        jobs: u32::try_from(jobs.len()).unwrap_or(u32::MAX),
+        meta_only: u32::try_from(meta_only.len()).unwrap_or(u32::MAX),
+        unchanged,
+    };
+    (jobs, meta_only, counts)
 }
 
 /// What `pad_dirty_chunks` reads: every chunk's shape `T` and clip `C`,
@@ -724,6 +771,7 @@ pub fn pad_dirty_chunks<T, C>(
     mut state: Local<ExtractState>,
     frame: Res<FrameCount>,
     mut outbox: ResMut<PaddedOutbox<T>>,
+    mut counts: ResMut<PadPlanCounts>,
 ) where
     T: VoxelField,
     C: VoxelField<Elem = f32>,
@@ -735,7 +783,14 @@ pub fn pad_dirty_chunks<T, C>(
     if cfg!(debug_assertions) && frame.0.is_multiple_of(AUDIT_INTERVAL) {
         audit_extraction(&mut state, src, &inputs.filter, config);
     }
-    let (jobs, meta_only) = plan_jobs(&mut state, src, &inputs.filter, config);
+    let (jobs, meta_only, planned) = plan_jobs(&mut state, src, &inputs.filter, config);
+    // Shape only: this system is registered once per field type, so a shared
+    // resource is written several times a frame and the last writer wins --
+    // which first read `jobs` 0 in `dig` beside 9.26 meshed chunks, because
+    // the visibility field ran last.
+    if T::GPU == GpuChannel::Shape {
+        *counts = planned;
+    }
 
     // Building the volumes: the expensive part, one task per chunk.
     let mut built: Vec<(usize, SurfaceBytes)> = ComputeTaskPool::get().scope(|s| {

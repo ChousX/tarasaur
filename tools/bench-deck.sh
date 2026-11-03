@@ -53,12 +53,19 @@
 #   LABEL    result label                 (deck-<short sha>)
 #   POLL     seconds between completion checks, when falling back (30)
 #   NOTIFY_PORT  the port the Deck reports completion on (45987)
+#   BENCH_BIN   package this prebuilt bench instead of building one. The
+#               caller owns the build, which is what lets tools/bench-deck-ab.sh
+#               lay out two variants without either one's cargo build
+#               clobbering the other's binary in target/.
+#   BENCH_PKG   where to lay the package out (target/deck/tarasaur-bench).
+#               Two variants need two directories, since install rsyncs
+#               --delete and would otherwise overwrite the first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DECK=${DECK:-steamdeck}
 REMOTE=${REMOTE:-tarasaur-bench}
 RUNDIR=${RUNDIR:-tarasaur-run}
-PKG=target/deck/tarasaur-bench
+PKG=${BENCH_PKG:-target/deck/tarasaur-bench}
 
 # cargo and the devenv environment both come from the devenv shell; outside
 # it, borrow them. Testing `command -v cargo` alone is not enough: a cargo on
@@ -81,8 +88,14 @@ fi
 # it was linked against, and the launcher.
 package() {
 	[ "$(uname -m)" = x86_64 ] || { echo "package: needs an x86_64 host" >&2; exit 1; }
-	cargo build --release --example bench
-	local bin=target/release/examples/bench
+	local bin
+	if [ -n "${BENCH_BIN:-}" ]; then
+		bin=$(realpath "$BENCH_BIN")
+		[ -x "$bin" ] || { echo "package: no such bench binary: $BENCH_BIN" >&2; exit 1; }
+	else
+		cargo build --release --example bench
+		bin=target/release/examples/bench
+	fi
 	lib() { ldd "$bin" | awk -v l="$1" '$1 == l { print $3 }'; }
 	rm -rf "$PKG"
 	mkdir -p "$PKG/bin" "$PKG/lib"

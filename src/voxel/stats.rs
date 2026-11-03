@@ -64,8 +64,18 @@ pub const REINITS: DiagnosticPath = DiagnosticPath::const_new("voxel/reinits");
 pub const DIRTY_SLOTS: DiagnosticPath = DiagnosticPath::const_new("voxel/dirty_slots");
 pub const RESLOTTED: DiagnosticPath = DiagnosticPath::const_new("voxel/reslotted");
 pub const SIDE_REFILLS: DiagnosticPath = DiagnosticPath::const_new("voxel/side_refills");
+/// Chunks marked dirty for re-padding this frame, before any of them is
+/// classified. Not the same number as [`MESHED_CHUNKS`], and the gap between
+/// them is the point -- see `PadPlanCounts` in `voxel::extract`.
+pub const PAD_DIRTY: DiagnosticPath = DiagnosticPath::const_new("voxel/pad_dirty");
+/// Of those, the ones getting a full re-pad and re-mesh.
+pub const PAD_JOBS: DiagnosticPath = DiagnosticPath::const_new("voxel/pad_jobs");
+/// Of those, the ones needing only a GPU restitch (seam ranks moved).
+pub const PAD_META_ONLY: DiagnosticPath = DiagnosticPath::const_new("voxel/pad_meta_only");
+/// Of those, the ones whose extract key had not moved, so nothing happened.
+pub const PAD_UNCHANGED: DiagnosticPath = DiagnosticPath::const_new("voxel/pad_unchanged");
 
-pub const ALL: [DiagnosticPath; 12] = [
+pub const ALL: [DiagnosticPath; 16] = [
     DRAWS,
     RESIDENT,
     MESHED_CHUNKS,
@@ -78,6 +88,10 @@ pub const ALL: [DiagnosticPath; 12] = [
     REINITS,
     RESLOTTED,
     SIDE_REFILLS,
+    PAD_DIRTY,
+    PAD_JOBS,
+    PAD_META_ONLY,
+    PAD_UNCHANGED,
 ];
 
 /// Publishes [`VoxelFrameStats`] and main-world chunk counts as diagnostics.
@@ -143,8 +157,13 @@ type ChunkState = (
 fn publish_voxel_diagnostics(
     mut diagnostics: Diagnostics,
     channel: Res<VoxelStatsChannel>,
+    pad: Res<crate::voxel::extract::PadPlanCounts>,
     chunks: Query<ChunkState, With<Chunk>>,
 ) {
+    diagnostics.add_measurement(&PAD_DIRTY, || f64::from(pad.dirty));
+    diagnostics.add_measurement(&PAD_JOBS, || f64::from(pad.jobs));
+    diagnostics.add_measurement(&PAD_META_ONLY, || f64::from(pad.meta_only));
+    diagnostics.add_measurement(&PAD_UNCHANGED, || f64::from(pad.unchanged));
     let (mut total, mut loading, mut lod_pending, mut reinits) = (0usize, 0usize, 0usize, 0usize);
     for (lod, target, load, reinit) in &chunks {
         total = total.saturating_add(1);

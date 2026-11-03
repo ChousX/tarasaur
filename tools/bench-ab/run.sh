@@ -27,6 +27,7 @@
 #   DISTURB_MIN_SAMPLES
 #                    samples a phase needs before it can be graded at all (3)
 #   THROTTLE_DEGC    GPU temperature that spoils a phase (92)
+#   REFRESH_MS       the refresh period a compositor cap would pin us to (16.67)
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
@@ -43,6 +44,10 @@ mon=$!
 sleep 1.5 # idle samples before the bench starts
 
 cd "$repo" || exit 1
+# A run launched straight from here is presented by whatever desktop
+# compositor is up; the Deck launcher overrides this with what it wrapped the
+# bench in. Either way the header says, rather than leaving it unknowable.
+export TARASAUR_PRESENT=${TARASAUR_PRESENT:-host}
 if [[ ${BENCH_PIDFILE_OWNER:-} == cmd ]]; then
   launch=(env "BENCH_PIDFILE=$pidfile" "$bin" --label "$label" --out "$results" "$@")
 else
@@ -89,7 +94,7 @@ verdict_notes=$(awk \
   # Every measured phase, not just the steady ones: a dig disturbed by
   # another process used to grade clean, and dig is the phase we care most
   # about. load and shots are startup and noisy by nature.
-  $1 ~ /^(hold|spin|fly|edit|box|query|reslot|visibility|dig)$/ {
+  $1 ~ /^(hold|spin|fly|edit|sculpt|box|query|reslot|visibility|dig)$/ {
     # A phase the sampler caught once or twice is not evidence either way.
     # SteamOS idles at 8-11% of this CPU, so a lone sample sits near any
     # useful threshold about as often as not: nine of nine runs were once
@@ -117,7 +122,7 @@ verdict_notes=$(awk \
   # the CPU-bound dig is correct behaviour, not a spoiled run. Rejecting on
   # power would reject every honest run and quietly redefine the target
   # against hardware that does not exist.
-  $1 ~ /^(hold|spin|fly|edit|visibility|dig)$/ && $19 + 0 >= tmax {
+  $1 ~ /^(hold|spin|fly|edit|sculpt|visibility|dig)$/ && $19 + 0 >= tmax {
     hot = hot " " $1 "(" $19 "C)"
   }
   /kcompactd|kswapd/ { note = note " " $2 "=" $1 "s" }
@@ -175,6 +180,13 @@ fi
 
 verdict=${verdict# }
 [[ -z $verdict ]] && verdict=clean
+# The thresholds that produced that verdict, not just the verdict. They are
+# all environment variables, so a rerun with a looser bound reads exactly like
+# a run that was genuinely clean, and the saved file could not tell you which.
+echo "thresholds: cpu=${DISTURB_CPU_PCT:-15} cpu_dig=${DISTURB_CPU_PCT_DIG:-10}" \
+	"gpu=${DISTURB_GPU_PCT:-5} min_samples=${DISTURB_MIN_SAMPLES:-3}" \
+	"throttle_degC=${THROTTLE_DEGC:-92} refresh_ms=${REFRESH_MS:-16.67}" \
+	>>"$base.sys.summary"
 echo "verdict: $verdict" >>"$base.sys.summary"
 cat "$base.sys.summary"
 grep -E "^[0-9]+ (summary|frames):" "$base.bench.log" | sed 's/^[0-9]* //'

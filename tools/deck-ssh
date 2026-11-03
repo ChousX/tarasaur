@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# deck-ssh - talk to the Steam Deck, but only while holding its queue claim.
+#
+# "Don't poll the machine under test" cost a run once already: an ssh login
+# lands in the `other` CPU column the disturbance verdict reads, and rejected
+# a run at 18.4% foreign CPU. This refuses rather than reminds.
+set -euo pipefail
+DECK="${DECK_HOST:-steamdeck}"
+if [ -z "${DECK_QUEUE_TICKET:-}" ]; then
+  cat >&2 <<'MSG'
+deck-ssh: refusing — you do not hold the Deck.
+
+The Deck runs one benchmark at a time. Take a ticket and run your work inside it:
+
+    deck-queue run <name> -- <your command>
+
+and call that as a *background* Bash command so you are re-invoked when it
+finishes. Inside that command DECK_QUEUE_TICKET is set and this wrapper works.
+
+Never ssh the Deck while someone else's run is in flight: the login itself
+shows up in the measurement. `deck-queue status` says who holds it.
+MSG
+  exit 77
+fi
+exec ssh -o ConnectTimeout=15 -o BatchMode=yes "$DECK" "$@"

@@ -249,6 +249,20 @@ pub struct ArenaGpu<'w> {
     render_queue: Res<'w, RenderQueue>,
 }
 
+/// Re-mesh scratch left per LOD this frame, over its arenas. A LOD with none
+/// yet makes one with room.
+fn scratch_left_per_lod(arena_set: &VoxelChunkArenaSet) -> [usize; LOD::COUNT] {
+    arena_set.arenas.each_ref().map(|arenas| {
+        if arenas.is_empty() {
+            return usize::MAX;
+        }
+        arenas
+            .iter()
+            .map(|a| usize_from(a.scratch_chunks).saturating_sub(a.dirty_slots.len()))
+            .sum()
+    })
+}
+
 /// This frame's uploads, in `pending`'s order (oldest wait first).
 ///
 /// Pending chunks already on screen that touch (26-neighbours) form a
@@ -279,17 +293,7 @@ fn admit<'a, F: VoxelField>(
             .collect::<Vec<_>>(),
     );
 
-    // Re-mesh scratch left per LOD this frame, over its arenas. A LOD with
-    // none yet makes one with room.
-    let mut scratch_left = arena_set.arenas.each_ref().map(|arenas| {
-        if arenas.is_empty() {
-            return usize::MAX;
-        }
-        arenas
-            .iter()
-            .map(|a| usize_from(a.scratch_chunks).saturating_sub(a.dirty_slots.len()))
-            .sum()
-    });
+    let mut scratch_left = scratch_left_per_lod(arena_set);
     let mut cells_left = cells_per_frame;
     let mut admitted_any = false;
     let mut admitted = vec![false; items.len()];

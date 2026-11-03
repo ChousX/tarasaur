@@ -266,6 +266,47 @@ GPU meshing what the cheaper raster saved (mesh time +17%). Expect MSAA to buy
 frame time in the phases that are raster-bound and nothing at all in the ones
 that are CPU-bound.
 
+Task pools are the application's too, for the same reason, and they carry a
+similar measurement. Bevy's default split gives io and `async_compute` 25% of
+the logical cores each and compute the rest; while tarasaur is editing, the
+CSG and padding scopes are the critical path and those two pools sit idle, so
+compute is the pool that wants the cores. **On a Steam Deck, widening it is
+worth 10.5% of `dig`.** Measured on a Deck (4 physical / 8 logical cores,
+15 W shared rail), three runs a side, rotated, one binary with a flag as the
+only difference:
+
+| compute threads | `dig` mean | p95 | spread |
+|---|---|---|---|
+| 6 (`task_pools`) | **29.52 ms** | 39.59 ms | 0.42% |
+| 4 (Bevy's default) | 32.63 ms | 45.10 ms | 0.94% |
+
+**+10.53% on the mean, +13.91% on p95**, against spreads under 1% and with no
+overlap between the groups.
+
+Nothing installs this for you — `TarasaurPlugin` changes no default and does
+not touch your pools. Opt in with one line:
+
+```rust
+App::new().add_plugins(DefaultPlugins.set(tarasaur::task_pools::edit_task_pools()));
+```
+
+or take just the compute policy if you build your own `TaskPoolOptions`:
+
+```rust
+let options = TaskPoolOptions { compute: tarasaur::task_pools::edit_compute_policy(), ..my_options };
+```
+
+Three things to know before expecting that number. It is a **`dig`-phase**
+win — the heavy continuous-editing phase, and the only one on that hardware
+badly missing 60 fps; phases that are not editing have far less to gain, and
+whether they *lose* anything to the wider pool is still being measured. It
+was measured on **4 physical cores**, where the default split leaves compute
+short; a machine with many cores has less to redistribute and one with very
+few has nothing. And the thread count is a recommendation, not a contract:
+call the function rather than hard-coding what it returns, because it is
+expected to move as it is measured on more hardware, and a future version may
+widen only while an edit is in flight.
+
 The arenas size themselves from the device's
 `max_storage_buffer_binding_size` and `max_buffer_size`, capped by
 `ArenaConfig::max_buffer_bytes` (256 MiB by default; each arena takes about
@@ -304,15 +345,17 @@ cargo test -j 2      # full parallelism can run out of memory
 
 ## Benchmarking and profiling
 
-The bench runs repeatable phases (load, shots, hold, spin, fly, edit, box,
-query, reslot, visibility, dig) and writes its results to `bench_results/`
-after every phase. It runs headless, as ornithochory's grove does: no
-window, a fixed 1280x800 render target (a window's size depended on the
-display's scale: 2240x1400 on a 1.75x laptop), and at most two frames in
+The bench runs repeatable phases (load, shots, hold, spin, fly, edit, sculpt,
+box, query, reslot, visibility, dig) and writes its results to
+`bench_results/` after every phase. It runs headless, as ornithochory's grove
+does: no window, a fixed 1280x800 render target (a window's size depended on
+the display's scale: 2240x1400 on a 1.75x laptop), and at most two frames in
 flight on the GPU, as a window's swapchain allows. Only `--renderdoc`, which
-captures on present, opens a window. `shots` saves four views to `bench_results/shots/`;
-`--diff` compares two of them. The last
-five also check correctness: box brushes stay inside the box, GPU ray queries
+captures on present, opens a window. `shots` saves four views to
+`bench_results/shots/`; `--diff` compares two of them. The last
+six also check correctness: a smooth brush rounds off creases a CSG edit left
+and a flatten brush pulls the field onto its plane, box brushes stay inside
+the box, GPU ray queries
 return one result per ray and agree with the CPU ray, chunks that lose and
 regain their arena slot get their materials back (read back from the GPU),
 the shapes on the GPU are the SDF clipped by the edited and removed
@@ -336,6 +379,29 @@ cargo run --release --example bench -- --compare bench_results/A.summary.csv ben
 cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 ```
 
+Each summary's first line is a `# key=value` header naming every knob the
+run read — the flags above, the compute pool's real thread count, whether it
+was built with `tracy`, and what the frames were presented through — so two
+results can be compared on the record rather than on trust.
+
+Two of those fields are provenance, and **the field changed meaning.**
+`commit_build` is the tree the binary was compiled from; `commit_run` is the
+checkout the process read at run time. Results written before `5d54cc1` have
+a single `commit` field, which is the run-time value and **is not evidence of
+what was measured** — a binary built from one ref and run beside another
+checkout recorded the checkout. `commit_build` is supplied by the A/B driver,
+which knows the ref it built; a hand-run bench leaves it empty and is
+identified by `binary_xxh3` alone. That field is an xxh3-128 of the running
+executable, with `binary_bytes` beside it so a length can be checked by hand,
+and `stale=true` marks a run whose two commits are both known and differ
+(normal for a driver-built variant, and never an error). ornisculpt's bench
+stamps the same fields with the same meanings.
+
+`--out DIR` and `--world-dir DIR` move the results and the scratch world,
+and `--commit <sha>` fills in the result header's `commit=`. All three
+default under the checkout the binary was built from, so a run on another
+machine needs them (`tools/bench-deck.sh` passes all three).
+
 `tools/bench-ab/ab.sh <name> <bench-A> <bench-B> [pairs] [-- bench args]`
 runs two bench binaries in turn (`--quick` unless given other args) with a
 system sampler alongside: CPU (whole system, the bench, everything else), GPU
@@ -345,10 +411,44 @@ screenshot diffs go to `target/bench-ab/exp/<name>.txt`. Copy each variant's
 binary out of `target/` before building the next; `tools/bench-ab/run.sh` is
 a single run.
 
+A run is rejected, and rerun, when it isn't a measurement: other load
+disturbed a measured phase, the GPU thermally clamped, or a compositor capped
+the frame rate at the display refresh. That last one is worth knowing about —
+`AutoNoVsync` is not always honoured, and a cap reads as "exactly 60 fps"
+rather than as a failure. Being *slower* than the refresh is a measurement,
+not a rejection. On an integrated GPU the sampler also records the SoC power
+rail against its cap, the GPU temperature and the CPU clock; at a shared 15 W
+budget the GPU clock dropping during a CPU-bound phase is correct behaviour,
+so power is reported and never used to reject.
+
 On a Steam Deck, run `tools/bench-deck.sh [label] [-- bench args]` from a
-checkout on the Deck. It builds in a distrobox (created on first run, with
-Rust and Bevy's deps), works over ssh too (it draws on the Deck's screen),
-and labels results `deck-<label>` (default: the commit hash).
+checkout **here**, not on the Deck. SteamOS has no compiler and its root is
+read-only, so the bench is built here and shipped with the loader and C
+runtime it was linked against, taking Vulkan, the driver and Wayland from
+SteamOS; everything else it needs is checked to be there at package time. The
+bench loads no files, so the Deck needs no checkout. Results come back to
+`bench_results/` labelled `deck-<label>` (default: the commit hash).
+
+The package also carries `tools/bench-ab` as `ab/`, so a Deck run can have
+the sampler and the verdicts alongside it — the sampler has to run on the
+machine being measured:
+
+```sh
+ssh steamdeck 'BENCH_AB_DIR=$HOME/r/ab BENCH_RESULTS=$HOME/r/results \
+  BENCH_PIDFILE_OWNER=cmd tarasaur-bench/ab/run.sh tarasaur-bench/bench <label>'
+```
+
+`BENCH_PIDFILE_OWNER=cmd` is needed there: the launcher wraps the bench in
+gamescope, which forks, so the launcher records the pid to measure rather than
+`run.sh` timing the wrapper.
+
+`tools/deck/bench.sh` is the launcher installed on the Deck. It runs the
+bench inside a nested gamescope, which is how a game runs there: a real
+swapchain, present and composite path, with the render resolution fixed at
+1280x800 whatever the host does with gamescope's window. Set `GAMESCOPE` to
+change the wrapper — `--backend headless` to prove a cap is the host
+compositor's, `--backend drm` to put it on the Deck's own panel at its real
+refresh rate.
 
 CPU profiling uses [Tracy](https://github.com/wolfpld/tracy). The dev shell
 pins Tracy 0.14.1, the protocol version Bevy 0.20's client speaks
@@ -368,13 +468,23 @@ captures one frame in the middle of its `hold` phase, and the summary
 script replays that frame headlessly:
 
 ```sh
-renderdoccmd capture -w target/release/examples/bench --renderdoc --label rdc
+WGPU_DEBUG=1 renderdoccmd capture -w target/release/examples/bench --renderdoc --label rdc
 RDC=bench_results/rdc_frameN.rdc RDC_OUT=summary.txt qrenderdoc --python tools/renderdoc_summary.py
 ```
 
-On tiling GPUs (Adreno, Mali), RenderDoc times each draw by replaying it on
-its own. Use its timings for proportions, and the bench's per-pass times
-for totals.
+`WGPU_DEBUG=1` is what puts the pass names in the capture: wgpu only emits
+debug markers with `InstanceFlags::DEBUG`, which it takes from that variable,
+and release builds leave it off. Without it the summary can only group draws
+by raw Vulkan call.
+
+RenderDoc times each action by replaying it on its own, so a pass made of many
+draws accumulates per-draw overhead and loses the overlap the GPU gets in a
+real frame. The more actions a pass has, the more its total is inflated: a
+224-draw `voxel_raster_pass` came out 2.1x the bench's own counter on a
+GTX 1070, while single-draw `upscaling` matched it exactly. It is worst on
+tiling GPUs (Adreno, Mali), but it is not only them. Use RenderDoc's timings
+for proportions within a pass and for ranking individual draws, and the
+bench's per-pass times for totals.
 
 ## License
 
