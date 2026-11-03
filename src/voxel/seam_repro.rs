@@ -4,9 +4,11 @@
 //! The defect is in `surface_nets_pass3.wesl`, which no test can run, but
 //! the part that decides it is pure integer logic on the 27 seam ranks:
 //! `seam_depth_shift`, `seam_shift`, `seam_collapse` and the head of
-//! `seam_cell`. This is a line-for-line port of those, fed the neighbour
-//! LODs the bench logged at each failing vertex, so residency is pinned
-//! exactly instead of left to whichever frame the probe catches.
+//! `seam_cell`. `super::seam` is a line-for-line port of those; this feeds
+//! it the neighbour LODs the bench logged at each failing vertex, so
+//! residency is pinned exactly instead of left to whichever frame the probe
+//! catches. The bench's `seam_gpu` test holds the shipped shader to the
+//! same answers.
 //!
 //! When two axes collapse, the shared cell is a segment on a chunk edge.
 //! `relaxed_vertex` leaves step-0 axes where they are ("Flat (step 0) axes
@@ -14,195 +16,20 @@
 //! is: that is the off-surface vertex and the bad normal. A port can
 //! drift from the shader; keep it in step with pass3 by hand.
 
+use bevy::math::Vec3;
+
+use super::seam::{Seam, SharedCell as Shared, pinned_cell, seam_cell as port_cell};
+
 type V3 = [i32; 3];
 type U3 = [u32; 3];
-
-/// log2 of each chunk's voxels per edge around the meshing chunk, by
-/// offset `(dx, dy, dz)` in -1..=1, as `seam_log2` reads them from the
-/// ranks: 4 (Low), 5 (Medium), 6 (High).
-struct Seam {
-    log2: [i32; 27],
-}
 
 const LOW: i32 = 4;
 const MEDIUM: i32 = 5;
 const HIGH: i32 = 6;
 
-impl Seam {
-    /// Every neighbour at `own`, then `(offset, log2)` overrides.
-    fn new(own: i32, others: &[(V3, i32)]) -> Self {
-        let mut log2 = [own; 27];
-        for &(o, l) in others {
-            log2[index(o)] = l;
-        }
-        Self { log2 }
-    }
-
-    fn at(&self, o: V3) -> i32 {
-        self.log2[index(o)]
-    }
-
-    fn own(&self) -> i32 {
-        self.at([0; 3])
-    }
-}
-
-fn index(o: V3) -> usize {
-    let k = o[0]
-        .wrapping_add(1)
-        .wrapping_add(o[1].wrapping_add(1).wrapping_mul(3))
-        .wrapping_add(o[2].wrapping_add(1).wrapping_mul(9));
-    usize::try_from(k).unwrap()
-}
-
-fn add(a: V3, b: V3) -> V3 {
-    [0, 1, 2].map(|i| a[i].wrapping_add(b[i]))
-}
-
-/// pass3 `below_offset`.
-fn below_offset(i: u32) -> V3 {
-    [i & 1, (i >> 1) & 1, (i >> 2) & 1].map(|b| b.cast_signed().wrapping_neg())
-}
-
-/// Whether below-offset `d` touches a cell starting at 0 on `zero`.
-fn touches(d: V3, zero: [bool; 3]) -> bool {
-    (0..3).all(|b| d[b] >= 0 || zero[b])
-}
-
-/// pass3 `seam_shift`.
-fn seam_shift(seam: &Seam, o: V3, o_log2: i32, zero: [bool; 3]) -> i32 {
-    (1..8)
-        .map(below_offset)
-        .filter(|&d| touches(d, zero))
-        .map(|d| o_log2.wrapping_sub(seam.at(add(o, d))))
-        .fold(0, i32::max)
-}
-
-/// pass3 `seam_depth_shift`.
-fn seam_depth_shift(seam: &Seam, o: V3, o_log2: i32, id_o: U3) -> i32 {
-    let mut s = 0;
-    for d in (1..8).map(below_offset) {
-        let sd = o_log2.wrapping_sub(seam.at(add(o, d)));
-        if sd <= 0 {
-            continue;
-        }
-        let reach = 1u32.wrapping_shl(sd.cast_unsigned());
-        if (0..3).all(|a| id_o[a] < reach || d[a] == 0) {
-            s = s.max(sd);
-        }
-    }
-    s
-}
-
-/// pass3 `seam_collapse`, with `skip` dropping the below-neighbours a
-/// candidate fix would no longer agree with.
-fn seam_collapse(
-    seam: &Seam,
-    o: V3,
-    o_log2: i32,
-    zero: [bool; 3],
-    s: i32,
-    skip: impl Fn(V3) -> bool,
-) -> [bool; 3] {
-    let mut collapse = [false; 3];
-    for d in (1..8).map(below_offset) {
-        if !touches(d, zero) || skip(add(o, d)) {
-            continue;
-        }
-        let l = seam.at(add(o, d));
-        for b in 0..3 {
-            if d[b] == 0 {
-                continue;
-            }
-            let mut across = d;
-            across[b] = 0;
-            let seen = o_log2.wrapping_sub(l.min(seam.at(add(o, across))));
-            if seen != s {
-                collapse[b] = true;
-            }
-        }
-    }
-    collapse
-}
-
-/// The shared cell pass3's `seam_cell` builds for cell `id`, in the
-/// meshing chunk's texels, or `None` where it keeps the cell's own.
-#[derive(Debug, PartialEq, Eq)]
-struct Shared {
-    lo: U3,
-    step: U3,
-}
-
-impl Shared {
-    /// Axes the cell is flat on: the vertex cannot leave `lo` on them.
-    fn flat(&self) -> usize {
-        self.step.iter().filter(|&&s| s == 0).count()
-    }
-}
-
+/// The shared cell `super::seam` (the port) builds for cell `id`.
 fn seam_cell(seam: &Seam, id: U3, skip: impl Fn(V3) -> bool) -> Option<Shared> {
-    let own_log2 = seam.own();
-    let n = 1u32.wrapping_shl(own_log2.cast_unsigned());
-    let coarsest = seam.log2.iter().copied().fold(own_log2, i32::min);
-    let reach = 1u32.wrapping_shl(own_log2.wrapping_sub(coarsest).cast_unsigned());
-    if id.iter().all(|&c| c >= reach && c < n) {
-        return None;
-    }
-    let o = id.map(|c| i32::from(c >= n));
-    let o_log2 = seam.at(o);
-    let up = own_log2.wrapping_sub(o_log2);
-    let up_u = up.max(0).cast_unsigned();
-    let down_u = up.wrapping_neg().max(0).cast_unsigned();
-    let id_o: U3 = [0, 1, 2].map(|a| {
-        if o[a] == 1 {
-            0
-        } else {
-            id[a].wrapping_shr(up_u).wrapping_shl(down_u)
-        }
-    });
-    let snap = |s: i32| {
-        id_o.map(|c| {
-            c.wrapping_shr(s.cast_unsigned())
-                .wrapping_shl(s.cast_unsigned())
-        })
-    };
-    let mut s = seam_depth_shift(seam, o, o_log2, id_o);
-    let mut lo = snap(s);
-    for _ in 0..3 {
-        let s2 = seam_shift(seam, o, o_log2, lo.map(|c| c == 0));
-        if s2 == s {
-            break;
-        }
-        s = s2;
-        lo = snap(s);
-    }
-    let collapse = seam_collapse(seam, o, o_log2, lo.map(|c| c == 0), s, skip);
-    if s == 0 && up == 0 && !collapse.contains(&true) {
-        return None;
-    }
-    let face_shift =
-        [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map(|axis| own_log2.wrapping_sub(seam.at(axis)).max(0));
-    let r = 1u32.wrapping_shl(s.cast_unsigned());
-    let mut lo_t = [0u32; 3];
-    let mut step = [0u32; 3];
-    for a in 0..3 {
-        if o[a] == 1 {
-            lo_t[a] = n;
-            step[a] = 1;
-            if face_shift[a].wrapping_sub(own_log2) != s.wrapping_sub(o_log2) && !collapse[a] {
-                return None;
-            }
-        } else {
-            lo_t[a] = lo[a].wrapping_shl(up_u).wrapping_shr(down_u);
-            step[a] = r.wrapping_shl(up_u).wrapping_shr(down_u);
-        }
-    }
-    for a in 0..3 {
-        if collapse[a] {
-            step[a] = 0;
-        }
-    }
-    Some(Shared { lo: lo_t, step })
+    port_cell(seam, id, &skip)
 }
 
 /// A logged failing vertex: the meshing chunk's neighbourhood and the cell.
@@ -404,4 +231,51 @@ fn no_logged_site_is_pinned_to_an_edge() {
         .map(|site| site.name)
         .collect();
     assert!(pinned.is_empty(), "pinned to a chunk edge: {pinned:?}");
+}
+
+/// The classifier fires on each logged site's vertex, as the GPU meshes it,
+/// on a cell flat where the port's is. (A vertex at a lattice point lies on
+/// the end of one collapsed segment and the start of the next, so either
+/// may be named; both pin it the same way.)
+#[test]
+fn classifier_finds_each_logged_vertex() {
+    for site in sites() {
+        let local = Vec3::from_array(site.today.lo.map(crate::num::f32_from_u32));
+        let cell = pinned_cell(site.seam.ranks(), local);
+        let Some(cell) = cell else {
+            panic!("{}: not classified", site.name);
+        };
+        assert!(cell.flat() >= 2, "{}: {cell:?}", site.name);
+        for a in 0..3 {
+            if site.today.step[a] == 0 {
+                assert_eq!(cell.step[a], 0, "{}: {cell:?}", site.name);
+                assert_eq!(cell.lo[a], site.today.lo[a], "{}: {cell:?}", site.name);
+            }
+        }
+    }
+}
+
+/// And on nothing else: the same spot a hair off its face, the same spot
+/// in a chunk with no seam, and an ordinary vertex inside the chunk.
+#[test]
+fn classifier_needs_the_pinned_position_exactly() {
+    for site in sites() {
+        let at = Vec3::from_array(site.today.lo.map(crate::num::f32_from_u32));
+        let ranks = site.seam.ranks();
+        // Off a flat axis by 0.01 voxels: a solved vertex, not a pinned one.
+        let flat = site.today.step.iter().position(|&s| s == 0).unwrap();
+        let mut nudged = at;
+        nudged[flat] += if at[flat] > 0.0 { -0.01 } else { 0.01 };
+        assert_eq!(pinned_cell(ranks, nudged), None, "{}: nudged", site.name);
+        // The same position with every neighbour at this chunk's LOD.
+        let flat_world = Seam::new(site.seam.own(), &[]).ranks();
+        assert_eq!(pinned_cell(flat_world, at), None, "{}: no seam", site.name);
+        // Inside the chunk.
+        assert_eq!(
+            pinned_cell(ranks, Vec3::splat(7.3)),
+            None,
+            "{}: interior",
+            site.name
+        );
+    }
 }
