@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# quiet-window - give one measurement the machine, without stopping anyone.
+#
+# `bench-lock` gets a run a quiet *start* (it waits for load to fall), but it
+# cannot keep toth quiet for the five minutes a batch takes: another agent's
+# build resumes mid-batch and the drift it causes is the same size as the
+# effect under test. That is not hypothetical -- it turned a measured -3.1%
+# into an honest null, because the base side drifted +3.2% across one 313 s
+# batch.
+#
+# Two mechanisms, because neither alone is enough:
+#
+#   1. A marker other agents are asked to honour before starting a build.
+#      Cooperative, and it keeps new work off the machine.
+#   2. `renice` to 19 on every compiler process already running. Mechanical,
+#      needs nobody's cooperation, and lowering priority never needs
+#      privilege. Stragglers keep making progress; they just yield.
+#
+#   quiet-window open <minutes> <who>   claim it
+#   quiet-window close <who>            release it -- ONLY if <who> owns it
+#   quiet-window check                  exit 0 if a window is open (for agents)
+#   quiet-window status
+#
+# It does not pause anyone and it does not kill anything. Nice levels cannot
+# isolate memory bandwidth or cache, so a window is quieter, not sterile --
+# say so when quoting numbers taken in one.
+set -euo pipefail
+MARK="${QUIET_WINDOW_MARK:-/mnt/ssd/agents/QUIET-WINDOW}"
+PATTERN='rustc|cargo|^cc1|^ld$|^lld|collect2|^as$|bevy'
+
+renice_builds() {
+  local n=0 p
+  for p in $(pgrep -u "$(id -u)" -f "$PATTERN" 2>/dev/null); do
+    # never renice the window's own caller or this script
+    [ "$p" = "$$" ] && continue
+    if renice -n 19 -p "$p" >/dev/null 2>&1; then n=$((n+1)); fi
+  done
+  echo "$n"
+}
+
+case "${1:-status}" in
+  open)
+    mins=${2:?need minutes}; who=${3:?need a name}
+    # Refuse to take a window someone else still holds, rather than
+    # overwriting their marker -- the mirror of the close race below.
+    if [ -e "$MARK" ]; then
+      cur=$(sed -n 's/^who=//p' "$MARK"); u=$(sed -n 's/^until=//p' "$MARK")
+      if [ "$(date +%s)" -lt "${u:-0}" ] && [ "$cur" != "$who" ]; then
+        echo "quiet-window: '$cur' holds it until $(sed -n 's/^until_human=//p' "$MARK"); not taking it from them" >&2
+        exit 3
+      fi
+    fi
+    end=$(( $(date +%s) + mins*60 ))
+    printf 'who=%s\nuntil=%s\nuntil_human=%s\nopened=%s\n' \
+      "$who" "$end" "$(date -d "@$end" -Is)" "$(date -Is)" > "$MARK"
+    n=$(renice_builds)
+    echo "quiet-window: open for $who until $(date -d "@$end" +%H:%M:%S) (${mins}m)"
+    echo "quiet-window: reniced $n compiler processes to 19"
+    echo "quiet-window: load now $(cut -d' ' -f1 /proc/loadavg)"
+    ;;
+  renice) echo "quiet-window: reniced $(renice_builds) compiler processes to 19";;
+  close)
+    # `close` used to take no argument and closed whatever was open. Two
+    # agents each doing the recommended thing -- claim the window inside your
+    # ticket, close it in your exit trap -- then collide at the handover
+    # between consecutive tickets: A's trap fires just after B's ticket has
+    # started and opened its own window, and A closes B's. That happened:
+    # orn-bodyfield's trap closed orn-provenance-hashab's window the second
+    # ticket 13 began, leaving a live measurement unprotected.
+    #
+    # So closing now requires naming yourself, and refuses a window you do
+    # not own. A trap that passes the wrong name becomes a harmless no-op
+    # instead of someone else's problem.
+    who=${2:-}
+    if [ ! -e "$MARK" ]; then echo "quiet-window: none open"; exit 0; fi
+    cur=$(sed -n 's/^who=//p' "$MARK")
+    if [ -z "$who" ]; then
+      cat >&2 <<MSG
+quiet-window: close now needs your own label: quiet-window close <who>
+
+'$cur' currently holds the window. Closing without naming yourself used to
+close whoever's window was open, which let one agent's exit trap close
+another's measurement. Nothing has been closed.
+MSG
+      exit 2
+    fi
+    if [ "$who" = "--force" ]; then echo "quiet-window: force-closing ($cur)"; rm -f "$MARK"; exit 0; fi
+    if [ "$who" != "$cur" ]; then
+      echo "quiet-window: '$who' does not own this window ('$cur' does); nothing closed" >&2
+      exit 3
+    fi
+    echo "quiet-window: closing ($cur)"; rm -f "$MARK"
+    ;;
+  check)
+    [ -e "$MARK" ] || exit 1
+    u=$(sed -n 's/^until=//p' "$MARK")
+    if [ "$(date +%s)" -ge "$u" ]; then rm -f "$MARK"; exit 1; fi
+    exit 0
+    ;;
+  status)
+    if [ -e "$MARK" ]; then
+      u=$(sed -n 's/^until=//p' "$MARK")
+      left=$(( u - $(date +%s) ))
+      if [ "$left" -le 0 ]; then echo "expired, clearing"; rm -f "$MARK";
+      else echo "OPEN for $(sed -n 's/^who=//p' "$MARK"), ${left}s left (until $(sed -n 's/^until_human=//p' "$MARK"))"; fi
+    else echo "no quiet window open"; fi
+    echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
+    ;;
+  *) echo "quiet-window: unknown '$1'" >&2; exit 2;;
+esac

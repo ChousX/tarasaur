@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# deck-queue - one benchmark at a time on the Steam Deck.
+#
+# The Deck is a single shared measurement instrument: two runs at once measure
+# each other, and even an ssh login during a run lands in the `other` CPU
+# column the disturbance verdict reads and has rejected a run before. So every
+# agent that wants the Deck takes a ticket here and waits its turn, and nothing
+# else is allowed to touch it while a run holds the claim.
+#
+#   deck-queue run <name> -- <cmd...>   take a ticket, wait, then run <cmd>
+#   deck-queue status [--json]          who holds the Deck and who is waiting
+#   deck-queue log [-n N]               what has run
+#   deck-queue cancel <ticket>          drop a waiting ticket
+#   deck-queue preflight                is the Deck reachable
+#   deck-ssh <cmd...>                   ssh the Deck; refuses without a claim
+#
+# `run` blocks, so an agent calls it as a background Bash command and is
+# re-invoked when its turn has come and gone.
+
+set -euo pipefail
+
+STATE="${DECK_QUEUE_STATE:-$HOME/.local/state/deck-queue}"
+DECK="${DECK_HOST:-steamdeck}"
+# The same ticket logic serialises any single-occupancy measurement resource.
+# RESOURCE names it in messages; READY_CMD, when set, must succeed before the
+# holder is allowed to run (for the Deck that is "can we log in"; for toth it
+# is "is the machine quiet enough to measure on").
+RESOURCE="${DECK_QUEUE_RESOURCE:-the Deck}"
+READY_CMD="${DECK_QUEUE_READY_CMD:-}"
+POLL="${DECK_QUEUE_POLL:-2}"          # seconds between turn checks (local dir only)
+DECK_POLL="${DECK_QUEUE_DECK_POLL:-30}"  # seconds between reachability checks
+
+mkdir -p "$STATE/q" "$STATE/runs"
+touch "$STATE/log"
+
+now()  { date +%s; }
+stamp(){ date -Is; }
+locked(){ flock 9 "$@"; }
+
+# --- is the Deck there, and can we log in -----------------------------------
+# A TCP open on 22 is not enough: Tailscale SSH can hold the port open and
+# still refuse until the human clears a browser check.
+deck_up() {
+  [ -n "${DECK_QUEUE_NO_PREFLIGHT:-}" ] && return 0
+  if [ -n "$READY_CMD" ]; then bash -c "$READY_CMD" >/dev/null 2>&1; return $?; fi
+  timeout 25 ssh -o ConnectTimeout=10 -o BatchMode=yes "$DECK" true >/dev/null 2>&1
+}
+
+deck_why() {
+  if [ -n "$READY_CMD" ]; then bash -c "$READY_CMD" 2>&1 | tail -3; return; fi
+  local err
+  err=$(timeout 25 ssh -o ConnectTimeout=10 -o BatchMode=yes "$DECK" true 2>&1 >/dev/null || true)
+  if [ -z "$err" ]; then echo "reachable"; else printf '%s\n' "$err" | tail -3; fi
+}
+
+# --- ticket bookkeeping ------------------------------------------------------
+# Every mutation of seq/, q/ and active happens under $STATE/.lock, and every
+# waiter prunes entries whose process is gone, so a killed agent cannot wedge
+# the queue.
+alive(){ [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+prune() {
+  local f pid
+  for f in "$STATE"/q/*; do
+    [ -e "$f" ] || continue
+    pid=$(sed -n 's/^pid=//p' "$f")
+    alive "$pid" || { rm -f "$f"; echo "$(stamp) pruned ticket $(basename "$f" .ticket) (pid $pid gone)" >>"$STATE/log"; }
+  done
+  if [ -e "$STATE/active" ]; then
+    pid=$(sed -n 's/^pid=//p' "$STATE/active")
+    alive "$pid" || { echo "$(stamp) released stale claim (pid $pid gone)" >>"$STATE/log"; rm -f "$STATE/active"; }
+  fi
+}
+
+lowest() {
+  local f best=""
+  for f in "$STATE"/q/*; do
+    [ -e "$f" ] || continue
+    local n; n=$(basename "$f" .ticket)
+    [ -z "$best" ] && best=$n
+    [ "$n" -lt "$best" ] && best=$n
+  done
+  echo "$best"
+}
+
+cmd_run() {
+  local name="" deck_timeout=3600
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deck-timeout) deck_timeout=$2; shift 2;;
+      --) shift; break;;
+      -*) echo "deck-queue run: unknown flag $1" >&2; exit 2;;
+      *) if [ -z "$name" ]; then name=$1; shift; else echo "deck-queue run: one name only" >&2; exit 2; fi;;
+    esac
+  done
+  [ -n "$name" ] || { echo "deck-queue run: need a name" >&2; exit 2; }
+  [ $# -gt 0 ] || { echo "deck-queue run: need a command after --" >&2; exit 2; }
+  case "$name" in *[!A-Za-z0-9._-]*) echo "deck-queue run: name must be [A-Za-z0-9._-]" >&2; exit 2;; esac
+
+  local ticket
+  exec 9>"$STATE/.lock"
+  flock 9
+  prune
+  local seq; seq=$(cat "$STATE/seq" 2>/dev/null || echo 0); seq=$((seq+1)); echo "$seq" >"$STATE/seq"
+  ticket=$seq
+  { echo "pid=$$"; echo "name=$name"; echo "queued=$(stamp)"; echo "cwd=$PWD"; printf 'cmd='; printf '%q ' "$@"; echo; } \
+    >"$STATE/q/$ticket.ticket"
+  flock -u 9
+  echo "$(stamp) ticket $ticket queued: $name  [$*]" >>"$STATE/log"
+  echo "deck-queue: ticket $ticket for '$name'" >&2
+
+  # Always give the Deck back, however we leave.
+  release() {
+    exec 9>"$STATE/.lock"; flock 9
+    rm -f "$STATE/q/$ticket.ticket"
+    if [ -e "$STATE/active" ] && [ "$(sed -n 's/^ticket=//p' "$STATE/active")" = "$ticket" ]; then rm -f "$STATE/active"; fi
+    flock -u 9
+  }
+  trap 'release; echo "$(stamp) ticket '"$ticket"' interrupted" >>"$STATE/log"; exit 130' INT TERM
+  trap 'release' EXIT
+
+  # --- wait for our turn ----------------------------------------------------
+  local announced=0
+  while :; do
+    exec 9>"$STATE/.lock"; flock 9
+    prune
+    if [ ! -e "$STATE/active" ] && [ "$(lowest)" = "$ticket" ]; then
+      { echo "ticket=$ticket"; echo "pid=$$"; echo "name=$name"; echo "started=$(stamp)"; } >"$STATE/active"
+      rm -f "$STATE/q/$ticket.ticket"
+      flock -u 9
+      break
+    fi
+    local holder; holder=$(sed -n 's/^name=//p' "$STATE/active" 2>/dev/null || true)
+    flock -u 9
+    if [ "$announced" = 0 ]; then
+      echo "deck-queue: ticket $ticket waiting${holder:+ (Deck held by '$holder')}" >&2
+      announced=1
+    fi
+    sleep "$POLL"
+  done
+  echo "$(stamp) ticket $ticket HOLDS $RESOURCE: $name" >>"$STATE/log"
+  echo "deck-queue: ticket $ticket holds $RESOURCE" >&2
+
+  # --- the Deck has to actually be there ------------------------------------
+  # We hold the claim while we wait: if the Deck is down, nobody else can use
+  # it either, so keeping our place in the queue costs nothing and losing it
+  # would reorder the night's measurements for no reason.
+  local waited=0
+  until deck_up; do
+    if [ "$waited" -ge "$deck_timeout" ]; then
+      echo "$(stamp) ticket $ticket ABORTED: $RESOURCE not ready after ${waited}s -- $(deck_why)" >>"$STATE/log"
+      echo "deck-queue: $RESOURCE not ready after ${waited}s. $(deck_why)" >&2
+      exit 75   # EX_TEMPFAIL: the work is fine, the instrument is not
+    fi
+    if [ "$waited" = 0 ]; then
+      echo "deck-queue: $RESOURCE not ready, holding ticket $ticket and waiting. $(deck_why)" >&2
+      echo "$(stamp) ticket $ticket waiting on $RESOURCE -- $(deck_why)" >>"$STATE/log"
+    fi
+    sleep "$DECK_POLL"; waited=$((waited+DECK_POLL))
+  done
+  [ "$waited" -gt 0 ] && echo "$(stamp) ticket $ticket: $RESOURCE became ready after ${waited}s" >>"$STATE/log"
+
+  # --- run it ---------------------------------------------------------------
+  local logf="$STATE/runs/$(date +%Y%m%dT%H%M%S)-$name.log" rc=0 t0
+  t0=$(now)
+  echo "deck-queue: log $logf" >&2
+  # DECK_QUEUE_TICKET is what deck-ssh checks for: only the holder may talk to
+  # the Deck, which is how "never poll the machine under test" is enforced
+  # rather than merely asked for.
+  DECK_QUEUE_TICKET="$ticket" DECK_QUEUE_NAME="$name" \
+    "$@" > >(tee "$logf") 2>&1 || rc=$?
+  local dt=$(( $(now) - t0 ))
+  echo "$(stamp) ticket $ticket done: $name rc=$rc in ${dt}s -> $logf" >>"$STATE/log"
+  echo "deck-queue: ticket $ticket finished rc=$rc in ${dt}s" >&2
+  exit "$rc"
+}
+
+cmd_status() {
+  exec 9>"$STATE/.lock"; flock 9; prune; flock -u 9
+  if [ "${1:-}" = "--json" ]; then
+    local active="null"
+    if [ -e "$STATE/active" ]; then
+      active=$(sed 's/^\([a-z]*\)=\(.*\)$/"\1":"\2"/' "$STATE/active" | paste -sd, -); active="{$active}"
+    fi
+    printf '{"deck":"%s","active":%s,"waiting":[' "$DECK" "$active"
+    local first=1 f
+    for f in $(ls -1 "$STATE"/q 2>/dev/null | sort -n); do
+      [ "$first" = 1 ] || printf ','; first=0
+      printf '{"ticket":%s,' "${f%.ticket}"
+      sed 's/^\([a-z]*\)=\(.*\)$/"\1":"\2"/' "$STATE/q/$f" | paste -sd, - | tr -d '\n'
+      printf '}'
+    done
+    printf ']}\n'
+    return
+  fi
+  echo "Resource: $RESOURCE"
+  if [ -e "$STATE/active" ]; then
+    echo "  RUNNING  ticket $(sed -n 's/^ticket=//p' "$STATE/active")  $(sed -n 's/^name=//p' "$STATE/active")  since $(sed -n 's/^started=//p' "$STATE/active")"
+  else
+    echo "  free"
+  fi
+  local f n=0
+  for f in $(ls -1 "$STATE"/q 2>/dev/null | sort -n); do
+    n=$((n+1))
+    echo "  waiting  ticket ${f%.ticket}  $(sed -n 's/^name=//p' "$STATE/q/$f")  queued $(sed -n 's/^queued=//p' "$STATE/q/$f")"
+  done
+  [ "$n" = 0 ] && echo "  (nothing queued)"
+  return 0
+}
+
+case "${1:-}" in
+  run)       shift; cmd_run "$@";;
+  status)    shift; cmd_status "${1:-}";;
+  log)       shift; tail -n "${2:-40}" "$STATE/log";;
+  cancel)    shift; t=${1:?need a ticket}
+             exec 9>"$STATE/.lock"; flock 9
+             if [ -e "$STATE/q/$t.ticket" ]; then
+               p=$(sed -n 's/^pid=//p' "$STATE/q/$t.ticket"); rm -f "$STATE/q/$t.ticket"
+               alive "$p" && kill -TERM "$p" 2>/dev/null || true
+               echo "cancelled ticket $t"; echo "$(stamp) ticket $t cancelled" >>"$STATE/log"
+             else echo "no waiting ticket $t" >&2; flock -u 9; exit 1; fi
+             flock -u 9;;
+  preflight) if deck_up; then echo "$RESOURCE ready"; else echo "$RESOURCE NOT ready: $(deck_why)" >&2; exit 1; fi;;
+  ""|-h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d';;
+  *) echo "deck-queue: unknown command '$1' (try --help)" >&2; exit 2;;
+esac
