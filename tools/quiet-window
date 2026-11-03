@@ -17,7 +17,7 @@
 #      privilege. Stragglers keep making progress; they just yield.
 #
 #   quiet-window open <minutes> <who>   claim it
-#   quiet-window close                  release it
+#   quiet-window close <who>            release it -- ONLY if <who> owns it
 #   quiet-window check                  exit 0 if a window is open (for agents)
 #   quiet-window status
 #
@@ -41,6 +41,15 @@ renice_builds() {
 case "${1:-status}" in
   open)
     mins=${2:?need minutes}; who=${3:?need a name}
+    # Refuse to take a window someone else still holds, rather than
+    # overwriting their marker -- the mirror of the close race below.
+    if [ -e "$MARK" ]; then
+      cur=$(sed -n 's/^who=//p' "$MARK"); u=$(sed -n 's/^until=//p' "$MARK")
+      if [ "$(date +%s)" -lt "${u:-0}" ] && [ "$cur" != "$who" ]; then
+        echo "quiet-window: '$cur' holds it until $(sed -n 's/^until_human=//p' "$MARK"); not taking it from them" >&2
+        exit 3
+      fi
+    fi
     end=$(( $(date +%s) + mins*60 ))
     printf 'who=%s\nuntil=%s\nuntil_human=%s\nopened=%s\n' \
       "$who" "$end" "$(date -d "@$end" -Is)" "$(date -Is)" > "$MARK"
@@ -51,8 +60,36 @@ case "${1:-status}" in
     ;;
   renice) echo "quiet-window: reniced $(renice_builds) compiler processes to 19";;
   close)
-    if [ -e "$MARK" ]; then echo "quiet-window: closing ($(sed -n 's/^who=//p' "$MARK"))"; rm -f "$MARK"
-    else echo "quiet-window: none open"; fi
+    # `close` used to take no argument and closed whatever was open. Two
+    # agents each doing the recommended thing -- claim the window inside your
+    # ticket, close it in your exit trap -- then collide at the handover
+    # between consecutive tickets: A's trap fires just after B's ticket has
+    # started and opened its own window, and A closes B's. That happened:
+    # orn-bodyfield's trap closed orn-provenance-hashab's window the second
+    # ticket 13 began, leaving a live measurement unprotected.
+    #
+    # So closing now requires naming yourself, and refuses a window you do
+    # not own. A trap that passes the wrong name becomes a harmless no-op
+    # instead of someone else's problem.
+    who=${2:-}
+    if [ ! -e "$MARK" ]; then echo "quiet-window: none open"; exit 0; fi
+    cur=$(sed -n 's/^who=//p' "$MARK")
+    if [ -z "$who" ]; then
+      cat >&2 <<MSG
+quiet-window: close now needs your own label: quiet-window close <who>
+
+'$cur' currently holds the window. Closing without naming yourself used to
+close whoever's window was open, which let one agent's exit trap close
+another's measurement. Nothing has been closed.
+MSG
+      exit 2
+    fi
+    if [ "$who" = "--force" ]; then echo "quiet-window: force-closing ($cur)"; rm -f "$MARK"; exit 0; fi
+    if [ "$who" != "$cur" ]; then
+      echo "quiet-window: '$who' does not own this window ('$cur' does); nothing closed" >&2
+      exit 3
+    fi
+    echo "quiet-window: closing ($cur)"; rm -f "$MARK"
     ;;
   check)
     [ -e "$MARK" ] || exit 1

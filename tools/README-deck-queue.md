@@ -120,3 +120,27 @@ indefinitely by a forgotten claim.
 last-level cache. A window is quieter, not sterile. Numbers taken in one should
 say they were, and a residual drift inside a window is itself a finding — it
 would mean prioritising is not enough and the answer is scheduling.
+
+### A window must be closed by its owner
+
+`quiet-window close` originally took no argument and closed whichever window
+was open. That is fine with one measurer and wrong with two, because the
+recommended usage — claim the window inside your ticket, close it in your exit
+trap — puts the collision exactly at the handover between consecutive tickets:
+A's trap fires just after B's ticket has started and opened its own window, so
+A closes B's.
+
+It happened. One agent's trap closed another's window the second its ticket
+began, and that agent then measured for several minutes with four compiler
+processes running; re-opening the window dropped load from 3.91 to 2.23 on the
+spot, which is the measure of how much the batch was polluted.
+
+So `close` takes the caller's label and refuses a window it does not own, and
+`open` refuses to take one someone else still holds. Verified in all four
+directions: foreign close rc=3, bare close rc=2 and closes nothing, foreign
+open rc=3, owner's close rc=0. Re-opening with the same label extends rather
+than collides, and `close --force` clears a stale one.
+
+A trap that still calls bare `close` degrades to a no-op with a message, which
+is the right failure: a tool that cannot tell whose window it is should decline,
+not guess.
