@@ -4232,6 +4232,7 @@ mod seam_gpu {
                 ..default()
             },
             MaterialFieldPlugin::<TerrainMaterial>::new(),
+            stats::VoxelDiagnosticsPlugin,
         ));
         register_terrain(&mut app);
         let probe = MeshProbe::default();
@@ -4247,6 +4248,7 @@ mod seam_gpu {
 
         let blocks = SITES.len().saturating_mul(27);
         let mut settled = 0u32;
+        let mut meshed_any = false;
         let mut asked = false;
         for _ in 0..6000 {
             app.update();
@@ -4267,12 +4269,31 @@ mod seam_gpu {
                 .iter(world)
                 .map(|(p, t, l)| (p.0, l == Some(&t.0)))
                 .collect();
-            if chunks.len() == blocks && chunks.iter().all(|c| c.1) {
-                // Every chunk holds its pinned LOD; give extraction, upload
-                // and both mesh passes time to finish.
-                settled = settled.saturating_add(1);
-            }
-            if settled >= 120 {
+            // The bench's own "load done" test (`is_idle`), with `resident`
+            // for `draws`: the camera needn't see the blocks. A fixed frame
+            // count is not enough: the mesh pipelines compile asynchronously,
+            // and until they do the slots stay dirty and hold no vertices.
+            let store = world.resource::<DiagnosticsStore>();
+            let value = |p: &DiagnosticPath| store.get(p).and_then(|d| d.value());
+            meshed_any |= value(&stats::MESHED_CHUNKS).is_some_and(|v| v > 0.0);
+            let idle = value(&stats::RESIDENT).is_some_and(|v| v > 0.0)
+                && [
+                    stats::LOADS_IN_FLIGHT,
+                    stats::LOD_PENDING,
+                    stats::PENDING_UPLOADS,
+                    stats::DIRTY_SLOTS,
+                    stats::MESHED_CHUNKS,
+                    stats::REINITS,
+                ]
+                .iter()
+                .all(|p| value(p) == Some(0.0));
+            settled = if meshed_any && idle && chunks.len() == blocks && chunks.iter().all(|c| c.1)
+            {
+                settled.saturating_add(1)
+            } else {
+                0
+            };
+            if settled >= SETTLE_FRAMES {
                 if let Ok(mut s) = probe.0.lock() {
                     s.requested = Some(Phase::Hold);
                     s.loaded = chunks.iter().map(|c| c.0).collect();
