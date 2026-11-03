@@ -60,10 +60,21 @@ REMOTE=${REMOTE:-tarasaur-bench}
 RUNDIR=${RUNDIR:-tarasaur-run}
 PKG=target/deck/tarasaur-bench
 
-# cargo comes from the devenv shell; outside it, borrow one.
-if ! command -v cargo >/dev/null; then
-	command -v direnv >/dev/null || { echo "no cargo and no direnv: enter the devenv shell" >&2; exit 1; }
-	exec direnv exec . "$0" "$@"
+# cargo and the devenv environment both come from the devenv shell; outside
+# it, borrow them. Testing `command -v cargo` alone is not enough: a cargo on
+# PATH does not imply the environment the build needs. A nix rust-nightly
+# satisfies it with PKG_CONFIG_PATH unset, the guard then passes, and the
+# build dies minutes later in wayland-sys's build script -- which resolves
+# wayland-client through pkg-config -- looking like a broken commit rather
+# than a missing shell. So test for what is actually required.
+if ! command -v cargo >/dev/null || ! pkg-config --exists wayland-client 2>/dev/null; then
+	if [ -n "${BENCH_DECK_REEXEC:-}" ]; then
+		echo "re-exec under direnv still has no cargo or no wayland-client:" >&2
+		echo "is this checkout's .envrc allowed? (direnv allow)" >&2
+		exit 1
+	fi
+	command -v direnv >/dev/null || { echo "no devenv shell and no direnv: enter the devenv shell" >&2; exit 1; }
+	exec env BENCH_DECK_REEXEC=1 direnv exec . "$0" "$@"
 fi
 
 # Builds the bench and lays out $PKG: the binary, the loader and C/C++ runtime
