@@ -642,11 +642,14 @@ fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
 /// mid-edit, so compute gets a floor of all but two cores instead. This
 /// oversubscribes on purpose: idle pool threads block rather than spin.
 ///
-/// `ComputePool::Bevy` leaves Bevy's own split alone. That matters because **the widening
-/// lives only in this bench**: a real application using the library gets
-/// Bevy's default whatever happens here, so "is the floor worth it" has to be
-/// answerable without rebuilding, and on a 4-physical-core machine the answer
-/// may well be no (`bench_results/deck-improvements.md`, option 6).
+/// `ComputePool::Bevy` leaves Bevy's own split alone. That matters because **nothing
+/// installs the widening for an application**: the library ships it as an
+/// opt-in (`tarasaur::task_pools`) and changes no default, so an app that
+/// does not ask gets Bevy's split. "Is the floor worth it" therefore has to
+/// be answerable without rebuilding, on whatever hardware is being measured
+/// (`bench_results/deck-improvements.md`, option 6). The count itself comes
+/// from `task_pools::edit_compute_threads`, so the bench measures the same
+/// number an app would get rather than a copy of it.
 fn default_plugins(compute_pool: ComputePool) -> impl PluginGroup {
     let compute = compute_pool.exact().map_or_else(
         || TaskPoolOptions::default().compute,
@@ -3891,19 +3894,11 @@ fn trigger_frame_capture(bench: Res<Bench>, capture: Res<FrameCapture>) {
 #[derive(Resource)]
 struct BenchMsaa(Msaa);
 
-/// All but two cores, at least one: the floor `default_plugins` describes.
-fn widened_compute_floor() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
-        .saturating_sub(2)
-        .max(1)
-}
-
 /// What `--compute-threads` asked for.
 #[derive(Clone, Copy)]
 enum ComputePool {
-    /// Leave Bevy's own split alone. This is what a real application using
-    /// the library gets, since the widening lives only in this bench.
+    /// Leave Bevy's own split alone. This is what an application that does
+    /// not opt into `tarasaur::task_pools` gets.
     Bevy,
     /// Give the compute pool exactly this many threads.
     ///
@@ -3933,7 +3928,7 @@ impl ComputePool {
 /// the value was bad and the run should not start.
 fn parse_compute_threads(arg: Option<&str>) -> Option<ComputePool> {
     match arg {
-        None => Some(ComputePool::Exact(widened_compute_floor())),
+        None => Some(ComputePool::Exact(tarasaur::task_pools::edit_compute_threads())),
         Some("bevy" | "default") => Some(ComputePool::Bevy),
         Some(other) => match other.parse::<usize>() {
             Ok(n) if n >= 1 => Some(ComputePool::Exact(n)),
