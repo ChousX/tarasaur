@@ -19,9 +19,11 @@ MAXLOAD="${BENCH_LOCK_MAXLOAD:-4.0}"
 export DECK_QUEUE_STATE="${BENCH_LOCK_STATE:-$HOME/.local/state/toth-bench}"
 export DECK_QUEUE_RESOURCE="toth (quiet, load < $MAXLOAD)"
 export DECK_QUEUE_DECK_POLL="${BENCH_LOCK_POLL:-60}"
-export DECK_QUEUE_READY_CMD='
-  l=$(cut -d" " -f1 /proc/loadavg)
-  awk -v l="$l" -v m="'"$MAXLOAD"'" "BEGIN{exit !(l<m)}" \
-    || { echo \"toth load is $l, waiting for it to fall below '"$MAXLOAD"'\"; exit 1; }
-'
+export DECK_QUEUE_READY_CMD="
+  l=\$(cut -d' ' -f1 /proc/loadavg)
+  if awk -v l=\"\$l\" -v m=$MAXLOAD 'BEGIN{exit !(l<m)}'; then exit 0; fi
+  echo \"toth load is \$l, waiting for it to fall below $MAXLOAD\"
+  exit 1
+"
+
 exec /home/chousx/.local/bin/deck-queue "$@"
