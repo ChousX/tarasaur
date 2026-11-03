@@ -2909,9 +2909,29 @@ fn pinned_report_lines(r: &MeshReport) -> Vec<String> {
         per_lod(r.max_off_unpinned)
     ));
     for f in r.worst_unpinned.iter().flatten() {
+        // Which of the stitch's cells, if any, holds it: the first thing
+        // to know about a near-threshold vertex that is not pinned.
+        let cell = r
+            .ranks
+            .get(&f.pos)
+            .and_then(|&ranks| seam::holding_cell(ranks, f.local, 0));
         lines.push(format!(
-            "    worst not pinned, {:?}: {:.3} at chunk {} local ({:.2}, {:.2}, {:.2})",
-            f.lod, f.value, f.pos, f.local.x, f.local.y, f.local.z
+            "    worst not pinned, {:?}: {:.3} at chunk {} local ({:.2}, {:.2}, {:.2}); {}",
+            f.lod,
+            f.value,
+            f.pos,
+            f.local.x,
+            f.local.y,
+            f.local.z,
+            cell.map_or_else(
+                || "in no shared cell".to_string(),
+                |c| format!(
+                    "in a shared cell flat on {} axes, lo {:?} step {:?}",
+                    c.flat(),
+                    c.lo,
+                    c.step
+                )
+            )
         ));
     }
     lines

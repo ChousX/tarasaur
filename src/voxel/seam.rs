@@ -322,12 +322,23 @@ pub fn shared_cell(ranks: [u32; 2], id: [u32; 3]) -> Option<SharedCell> {
 /// has.
 #[must_use]
 pub fn pinned_cell(ranks: [u32; 2], local: Vec3) -> Option<SharedCell> {
+    holding_cell(ranks, local, 2)
+}
+
+/// The flattest shared cell, flat on `min_flat` axes or more, that holds
+/// the vertex at `local`.
+///
+/// [`pinned_cell`] is this with 2. `None` if no shared cell near the vertex
+/// holds it: then it is its own cell's vertex, not the stitch's. A vertex
+/// on fewer than `min_flat` chunk faces is rejected at once.
+#[must_use]
+pub fn holding_cell(ranks: [u32; 2], local: Vec3, min_flat: usize) -> Option<SharedCell> {
     let seam = Seam::from_ranks(ranks);
     let (n, reach) = extent(&seam);
     let nf = f32_from_u32(n);
     let p = local.to_array();
     let on_face = |x: f32| x.abs() <= ON_FACE || (x - nf).abs() <= ON_FACE;
-    if p.iter().filter(|&&x| on_face(x)).count() < 2 {
+    if p.iter().filter(|&&x| on_face(x)).count() < min_flat {
         return None;
     }
     // Where a texel sits, per axis (pass3 `texel_pos`): past the edge, one
@@ -344,21 +355,25 @@ pub fn pinned_cell(ranks: [u32; 2], local: Vec3) -> Option<SharedCell> {
     // Every cell whose shared cell could hold the vertex: up to a lattice
     // step (`reach`) below it on each axis, and the one it is in.
     let range = |x: f32| {
+        // Apron vertices (past `n`) belong to the cells at `n`.
         let at = if x <= 0.0 {
             0
         } else {
-            crate::num::u32_from_f32(x.floor())
+            crate::num::u32_from_f32(x.floor()).min(n)
         };
         at.saturating_sub(reach)..=at.saturating_add(1).min(n)
     };
     let [px, py, pz] = p;
+    let mut best = None;
     for z in range(pz) {
         for y in range(py) {
             for x in range(px) {
                 let Some(cell) = seam_cell(&seam, [x, y, z], &|_| false) else {
                     continue;
                 };
-                if cell.flat() < 2 {
+                if cell.flat() < min_flat
+                    || best.is_some_and(|b: SharedCell| b.flat() >= cell.flat())
+                {
                     continue;
                 }
                 let holds = AXES.into_iter().all(|a| {
@@ -369,10 +384,10 @@ pub fn pinned_cell(ranks: [u32; 2], local: Vec3) -> Option<SharedCell> {
                     v >= from - ON_FACE && v <= to + ON_FACE
                 });
                 if holds {
-                    return Some(cell);
+                    best = Some(cell);
                 }
             }
         }
     }
-    None
+    best
 }
