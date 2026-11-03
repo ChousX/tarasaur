@@ -515,6 +515,11 @@ fn seam_cell(sdf_base: u32, id: vec3<u32>) -> SeamCell {
     // The surface misses the shared cell (a feature finer than it, or
     // flattened away): every chunk sharing it still needs one vertex, so
     // not our own cell's but a point near the surface from its corners.
+    // That is a point near the surface only while the cell keeps two axes
+    // or more. Flattened on two (a segment on a chunk edge) or three (a
+    // corner), relaxed_vertex can't leave the flat axes, so the vertex
+    // stays on the edge at the terrain's height above it, voxels off;
+    // voxel::seam::pinned_cell classifies these on the CPU.
     if (out.vert.w == 0.0) {
         out.vert = vec4<f32>(relaxed_vertex(sdf_base, lo_t, step), 1.0);
     }

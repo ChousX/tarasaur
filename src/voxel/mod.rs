@@ -26,6 +26,7 @@ pub(crate) mod mesh;
 pub(crate) mod pipeline;
 pub(crate) mod raster;
 pub(crate) mod resident;
+pub mod seam;
 #[cfg(test)]
 mod seam_repro;
 pub mod stats;
