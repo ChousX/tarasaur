@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# ea-gate - run a correctness gate on ea, so toth's clock stays clean.
+#
+# ea is a 4-thread, 8 GB laptop that is always on and almost always idle. It is
+# NOT a measurement host and must never be used as one: different CPU from
+# toth, and it runs Kodi and Jellyfin, so any timing it produces is
+# incomparable to toth's bench/LOG.md rows and to the Deck's. What it IS good
+# for is the compiler-bound work a toth quiet window otherwise stalls --
+# `cargo test`, `cargo clippy`, `cargo check`, `cargo doc`.
+#
+#   ea-gate setup [repos...]              clone/refresh repos + runner on ea
+#   ea-gate run <repo> <ref> -- <cmd...>  run a gate there, one at a time
+#   ea-gate status | log | preflight | cancel
+#
+# One job at a time: 4 threads cannot be shared. Everything runs at nice 19
+# with -j 3 so Kodi and Jellyfin stay smooth -- ea is a television in use.
+#
+# Refs are fetched from toth over ssh, so an agent's local-only branch is
+# reachable without pushing anywhere.
+#
+# The work is done by a runner installed ON ea rather than by a command string
+# quoted through bash -> ssh -> bash -> direnv -> bash. The first version tried
+# the quoting and it broke twice: once mangling the command, and once letting a
+# `| tail` swallow a failed checkout's exit status so the gate ran against the
+# clone's default HEAD and reported success.
+set -euo pipefail
+
+EA="${EA_HOST:-ea}"
+TOTH_PROJECTS=/home/chousx/Projects
+RUNNER='$HOME/.local/bin/ea-gate-runner'
+
+qstate() {
+  export DECK_QUEUE_STATE="${EA_GATE_STATE:-$HOME/.local/state/ea-gate}"
+  export DECK_QUEUE_RESOURCE="ea (4 threads, gates only)"
+}
+
+case "${1:-}" in
+  setup)
+    shift
+    # The runner lives on ea. Quoted heredoc: nothing here is expanded locally.
+    ssh -o BatchMode=yes "$EA" 'mkdir -p ~/.local/bin ~/Projects && cat > ~/.local/bin/ea-gate-runner && chmod +x ~/.local/bin/ea-gate-runner' <<'RUNNER_EOF'
+#!/usr/bin/env bash
+# ea-gate-runner <repo> <ref> <cmd-base64>  -- installed by ea-gate on toth.
+set -euo pipefail
+repo=${1:?repo}; ref=${2:?ref}; cmd=$(printf %s "${3:?cmd}" | base64 -d)
+cd "$HOME/Projects/$repo"
+git fetch origin --prune --tags --quiet
+# Resolve the ref here: a --no-checkout clone has no local branches, so a bare
+# branch name exists only under origin/. Never pipe the checkout -- a
+# pipeline's status is its last command's.
+if   sha=$(git rev-parse --verify --quiet "origin/$ref"); then :
+elif sha=$(git rev-parse --verify --quiet "$ref"); then :
+else echo "ea-gate-runner: no such ref on ea: $ref" >&2; exit 2; fi
+git checkout --force --detach "$sha" >/dev/null
+echo "ea-gate: $(git log --oneline -1)"
+echo "ea-gate: nice 19, -j 3: $cmd"
+echo "ea-gate: ---"
+# -e and pipefail: a gate that reports rc=0 while failing is the exact
+# hazard this whole setup exists to police. Without -e, `a; b; c` returns
+# c's status and a failed test in the middle passes silently.
+exec nice -n 19 direnv exec . env CARGO_BUILD_JOBS=3 bash -eo pipefail -c "$cmd"
+RUNNER_EOF
+    echo "runner installed on $EA"
+    for r in ${*:-tarasaur ornisculpt}; do
+      printf '=== %s: ' "$r"
+      ssh -o BatchMode=yes "$EA" "
+        if [ -d \$HOME/Projects/$r/.git ]; then
+          git -C \$HOME/Projects/$r fetch --all --prune --quiet && echo 'fetched'
+        else
+          git clone --quiet --no-checkout ssh://toth$TOTH_PROJECTS/$r \$HOME/Projects/$r && echo 'cloned'
+        fi"
+      # devenv supplies the toolchain through direnv, so the .envrc has to be
+      # approved or every gate dies before it starts. Approved here rather
+      # than per-run: it is the same two-line `use devenv` as on toth.
+      ssh -o BatchMode=yes "$EA" "
+        cd \$HOME/Projects/$r 2>/dev/null || exit 0
+        [ -f .envrc ] || exit 0
+        direnv status 2>/dev/null | grep -q 'allowed 0' || direnv allow \$HOME/Projects/$r/.envrc" || true
+    done
+    ;;
+
+  run)
+    shift
+    repo=${1:?need a repo}; ref=${2:?need a ref}; shift 2
+    [ "${1:-}" = "--" ] && shift
+    [ $# -gt 0 ] || { echo "ea-gate run: need a command after --" >&2; exit 2; }
+
+    case "$*" in
+      *bench*|*criterion*|*perf\ record*|*tracy*|*flow_cost*|*pipes_cost*)
+        cat >&2 <<'MSG'
+ea-gate: refusing -- that looks like a measurement.
+
+ea is a different CPU from toth and it runs Kodi and Jellyfin, so a timing from
+here cannot be compared to toth's bench/LOG.md rows or to the Deck's.
+Measurements go through:
+
+    /home/chousx/.local/bin/bench-lock run <name> -- <cmd>    (toth, load-gated)
+    /home/chousx/.local/bin/deck-queue  run <name> -- <cmd>    (the Deck)
+
+For a correctness run that merely lives in the bench binary, set
+EA_GATE_ALLOW_BENCH=1 -- and then do not quote a number from it.
+MSG
+        [ -n "${EA_GATE_ALLOW_BENCH:-}" ] || exit 2;;
+    esac
+
+    qstate
+    export DECK_QUEUE_DECK_POLL=30
+    export DECK_QUEUE_READY_CMD="
+      l=\$(timeout 25 ssh -o ConnectTimeout=10 -o BatchMode=yes $EA 'cut -d\" \" -f1 /proc/loadavg' 2>&1) || {
+        echo \"ea is not answering: \$l\"; exit 1; }
+      awk -v l=\"\$l\" 'BEGIN{exit !(l<3.5)}' && exit 0
+      echo \"ea load is \$l, waiting for it to fall below 3.5\"; exit 1"
+    exec /home/chousx/.local/bin/deck-queue run "ea-${repo}-$(date +%H%M%S)" -- \
+      ssh -o BatchMode=yes "$EA" "$RUNNER" "$repo" "$ref" "$(printf '%s' "$*" | base64 -w0)"
+    ;;
+
+  status|log|preflight|cancel)
+    qstate
+    export DECK_QUEUE_READY_CMD="timeout 25 ssh -o ConnectTimeout=10 -o BatchMode=yes $EA true 2>&1"
+    exec /home/chousx/.local/bin/deck-queue "$@"
+    ;;
+
+  ""|-h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d';;
+  *) echo "ea-gate: unknown '$1' (try --help)" >&2; exit 2;;
+esac
