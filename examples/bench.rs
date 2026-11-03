@@ -363,7 +363,7 @@ const PHASES: [Phase; 12] = [
 
 /// Diagnostics recorded every frame. Render spans only produce a value on
 /// frames they ran in, so a column is empty when nothing new arrived.
-const COLUMNS: [(&str, &str); 17] = [
+const COLUMNS: [(&str, &str); 21] = [
     ("gpu_mesh_ms", "render/voxel_mesh/elapsed_gpu"),
     ("gpu_query_ms", "render/voxel_query/elapsed_gpu"),
     ("reslotted", "voxel/reslotted"),
@@ -381,6 +381,10 @@ const COLUMNS: [(&str, &str); 17] = [
     ("loads_in_flight", "voxel/loads_in_flight"),
     ("lod_pending", "voxel/lod_pending"),
     ("reinits", "voxel/reinits"),
+    ("pad_dirty", "voxel/pad_dirty"),
+    ("pad_jobs", "voxel/pad_jobs"),
+    ("pad_meta_only", "voxel/pad_meta_only"),
+    ("pad_unchanged", "voxel/pad_unchanged"),
 ];
 
 fn column(name: &str) -> Option<usize> {
@@ -3658,7 +3662,16 @@ fn summarize(phase: Phase, rows: &[&FrameRow], load_timed_out: bool) -> Vec<(Str
         out.push((format!("{name}_total"), total(&v)));
         out.push((format!("{name}_per_dispatch"), mean(&v)));
     }
-    for name in ["meshed_chunks", "meshed_cells", "reslotted", "side_refills"] {
+    for name in [
+        "meshed_chunks",
+        "meshed_cells",
+        "reslotted",
+        "side_refills",
+        "pad_dirty",
+        "pad_jobs",
+        "pad_meta_only",
+        "pad_unchanged",
+    ] {
         out.push((format!("{name}_total"), total(&present(name))));
     }
     if phase == Phase::Load {
