@@ -1008,7 +1008,7 @@ impl SignedDistance for f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CsgShape, Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sphere, Sweep, UVec3, Vec3,
+        CsgShape, Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sweep, UVec3, Vec3,
         brush_falloff,
     };
     use crate::{

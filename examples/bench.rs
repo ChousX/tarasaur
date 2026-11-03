@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--layer] [--gap-probes] [--quick]
-//!   [--compute-threads bevy|N] [--settle-stream]
+//!   [--compute-threads bevy|N] [--settle-stream] [--sculpt-offset dx,dz]
 //! ```
 //!
 //! `--out DIR` puts the results somewhere else, and `--world-dir DIR` the
@@ -93,7 +93,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -184,6 +184,45 @@ static QUICK: AtomicBool = AtomicBool::new(false);
 
 fn quick() -> bool {
     QUICK.load(Ordering::Relaxed)
+}
+
+/// `--sculpt-offset dx,dz`: moves where the `sculpt` phase works, in world
+/// units, from the spot it has always used.
+///
+/// Exists to answer a question nothing on disk can. `terrain_height`
+/// (`examples/common/mod.rs`) is a **fixed analytic sin/cos surface with no
+/// seed and no flag** -- four hardcoded octaves, identical in every run this
+/// bench has ever produced -- and `sculpt_target` works one fixed spot on
+/// it. So *every* tarasaur measurement ever taken shares one terrain, and a
+/// result that is really a property of that surface's local curvature would
+/// look exactly like a property of the engine, in all 118 historical runs
+/// and in everything measured next.
+///
+/// Specifically: the `sculpt` phase's smooth and flatten strokes trade work
+/// run to run (wave-2 report, r = -0.290 over 22 independent arms, variance
+/// ratio 0.749), and that could be the stroke pair or it could be this one
+/// patch of hillside. Moving the strokes to a different patch of the same
+/// surface separates the two without needing a different world: if the
+/// ratio stays below 1 across offsets it is the stroke pair, and if it
+/// tracks the patch it is the curvature.
+///
+/// Two `f32` bits in one atomic, because `sculpt_target` is a free function
+/// called from four places and threading a parameter through all of them
+/// would be a worse change than the one it tests. Defaults to `(0, 0)` --
+/// the spot every existing result used -- so nothing on disk moves.
+static SCULPT_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+fn sculpt_offset() -> Vec2 {
+    let bits = SCULPT_OFFSET.load(Ordering::Relaxed);
+    // `try_from` rather than `as`: both halves are 32 bits wide by
+    // construction, so neither conversion can fail and no truncation is
+    // being hidden. The crate denies `as_conversions`, and it is right to --
+    // an `as` here would still compile if the packing ever changed width.
+    let half = |v: u64| u32::try_from(v & 0xFFFF_FFFF).unwrap_or(0);
+    Vec2::new(
+        f32::from_bits(half(bits >> 32)),
+        f32::from_bits(half(bits)),
+    )
 }
 
 /// How much faster `spin` turns per frame, and how many times fewer frames
@@ -474,6 +513,9 @@ struct Output {
     /// `--commit`. Empty when nothing told us: a run cannot work this out
     /// for itself, which is the whole point of the field.
     commit_build: String,
+    /// `--sculpt-offset dx,dz`: where the `sculpt` phase works, relative to
+    /// the spot every existing result used. See [`SCULPT_OFFSET`].
+    sculpt_offset: Vec2,
     /// The command line and every knob read off it, for the header.
     knobs: Knobs,
 }
@@ -529,17 +571,6 @@ impl SettleStream {
             Self::WaitForDrain => "wait",
         }
     }
-}
-
-#[derive(Component)]
-struct BenchCamera;
-
-/// The value after `name` in `args`, if it's there.
-fn arg_value(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i.saturating_add(1)))
-        .cloned()
 }
 
 /// The command line, and what each knob on it resolved to.
@@ -772,6 +803,26 @@ fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
     } else {
         PathBuf::from(".")
     };
+    // `dx,dz` as one value, not two arguments: the header is space-separated
+    // `key=value`, so a knob that spans a space cannot be recorded in it.
+    let sculpt_offset = knobs.parsed(
+        "--sculpt-offset",
+        |v| {
+            v.map_or(Some(Vec2::ZERO), |v| {
+                let parsed = v
+                    .split_once(',')
+                    .and_then(|(a, b)| {
+                        Some(Vec2::new(a.trim().parse().ok()?, b.trim().parse().ok()?))
+                    })
+                    .filter(|o| o.is_finite());
+                if parsed.is_none() {
+                    eprintln!("--sculpt-offset wants `dx,dz` in world units, got {v:?}");
+                }
+                parsed
+            })
+        },
+        |o| format!("{},{}", o.x, o.y),
+    )?;
     let dig_radius = knobs.parsed(
         "--dig-radius",
         |v| {
@@ -785,12 +836,19 @@ fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
         },
         f32::to_string,
     )?;
+    // An empty scratch save directory, so every run generates the same
+    // terrain from scratch and your saves are never read or written.
+    // Resolved before the knobs move into `out`, since both read the command
+    // line.
+    let world_dir =
+        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     let out = Output {
         dir: flag("--out").map_or_else(|| base.join("bench_results"), PathBuf::from),
         label: flag("--label").unwrap_or_else(|| "run".into()),
         depth_prepass: knobs.switch("--depth-prepass"),
         small_arenas: knobs.switch("--small-arenas"),
         layer: knobs.switch("--layer"),
+        sculpt_offset,
         dig_radius,
         settle_stream: SettleStream::from_args(&knobs),
         commit_build: flag("--commit").unwrap_or_default(),
@@ -799,12 +857,6 @@ fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
             .map_or(0, |d| d.as_secs()),
         knobs,
     };
-    // An empty scratch save directory, so every run generates the same
-    // terrain from scratch and your saves are never read or written.
-    // Resolved before the knobs move into `out`, since both read the command
-    // line.
-    let world_dir =
-        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
     let out = Output {
         dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
         ..out
@@ -852,6 +904,24 @@ fn throttle_gpu(
     }
 }
 
+/// The things that change what a run measures and are not command-line
+/// knobs, recorded for the header alongside the ones that are.
+fn record_unflagged(knobs: &Knobs, commit_build: &str) {
+    // `tracy` recompiles the bench with Bevy's instrumentation in it, and
+    // `profile=` says only debug or release, so two runs of "the same commit"
+    // can differ by the whole cost of tracing with nothing in the record to
+    // show it.
+    knobs.record("tracy", &cfg!(feature = "tracy"));
+    record_provenance(knobs, commit_build);
+    // What the frames are presented through. On the Deck this is the single
+    // largest lever there is -- the same binary measured 181 fps nested in
+    // gamescope, 719 with gamescope's own compositing off and 2645 headless
+    // (`tools/deck/bench.sh`) -- and it is set by an environment variable on
+    // the far side of an ssh, which no reader of a result could ever check.
+    // The launcher names what it used; a bare desktop run says so.
+    knobs.env("present", "TARASAUR_PRESENT");
+}
+
 /// Exits with an error if setup fails or any check fails.
 fn main() -> AppExit {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -869,21 +939,11 @@ fn main() -> AppExit {
         return AppExit::error();
     };
     let knobs = &out.knobs;
-    // Not flags, but they change the numbers as much as any flag does.
-    //
-    // `tracy` recompiles the bench with Bevy's instrumentation in it, and
-    // `profile=` says only debug or release, so two runs of "the same commit"
-    // can differ by the whole cost of tracing with nothing in the record to
-    // show it.
-    knobs.record("tracy", &cfg!(feature = "tracy"));
-    record_provenance(knobs, &out.commit_build);
-    // What the frames are presented through. On the Deck this is the single
-    // largest lever there is -- the same binary measured 181 fps nested in
-    // gamescope, 719 with gamescope's own compositing off and 2645 headless
-    // (`tools/deck/bench.sh`) -- and it is set by an environment variable on
-    // the far side of an ssh, which no reader of a result could ever check.
-    // The launcher names what it used; a bare desktop run says so.
-    knobs.env("present", "TARASAUR_PRESENT");
+    record_unflagged(knobs, &out.commit_build);
+    SCULPT_OFFSET.store(
+        (u64::from(out.sculpt_offset.x.to_bits()) << 32) | u64::from(out.sculpt_offset.y.to_bits()),
+        Ordering::Relaxed,
+    );
     // Recorded as what was asked for, then overwritten in `write_results` by
     // the pool's actual size -- the asking is not the getting, which is the
     // whole reason this is in the header.
@@ -895,7 +955,8 @@ fn main() -> AppExit {
     let _ = std::fs::remove_dir_all(&world_dir);
 
     let mut app = App::new();
-    add_default_plugins(&mut app, knobs.switch("--renderdoc"), compute_pool);
+    let renderdoc = knobs.switch("--renderdoc");
+    add_default_plugins(&mut app, renderdoc, compute_pool);
     app.add_plugins((
         TarasaurPlugin {
             save_dir: world_dir,
@@ -928,7 +989,7 @@ fn main() -> AppExit {
         return AppExit::error();
     };
     app.insert_resource(BenchMsaa(msaa));
-    if args.iter().any(|a| a == "--renderdoc") {
+    if renderdoc {
         let Some(capture) = FrameCapture::attach(&out) else {
             return AppExit::error();
         };
@@ -936,7 +997,7 @@ fn main() -> AppExit {
             .add_systems(Update, trigger_frame_capture);
     }
 
-    add_checked_phases(&mut app, out.small_arenas);
+    add_checked_phases(&mut app, knobs, out.small_arenas);
     app.insert_resource(CursorBrush {
         enabled: false,
         ..default()
@@ -1047,7 +1108,7 @@ struct SmallArenas(bool);
 
 /// The `box`, `query` and `reslot` phases: their drivers, checks, and the
 /// render-world readbacks.
-fn add_checked_phases(app: &mut App, small_arenas: bool) {
+fn add_checked_phases(app: &mut App, knobs: &Knobs, small_arenas: bool) {
     let probe = SlotProbe::default();
     let mesh_probe = MeshProbe::default();
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -1293,7 +1354,8 @@ fn surface(x: f32, z: f32) -> Vec3 {
 /// of the camera's view, as `box`'s is, so the phase measures the edit path
 /// and not the raster of its result.
 fn sculpt_target() -> Vec3 {
-    surface(fly_end().x - 10.0, START.z + 25.0)
+    let off = sculpt_offset();
+    surface(fly_end().x - 10.0 + off.x, START.z + 25.0 + off.y)
 }
 
 /// A point on a ring of `radius` around the target, `frame` of `period` of
