@@ -4214,7 +4214,13 @@ mod seam_gpu {
         vertex: Vec3,
         /// The port's distance off the terrain at `vertex`, in `own` voxels.
         off: f32,
+        /// Offsets in the block left unspawned (absent, not merely meshless).
+        absent: &'static [IVec3],
     }
+
+    /// The sites a run spawns.
+    #[derive(Resource, Clone, Copy)]
+    struct Sites(&'static [GpuSite]);
 
     const SITES: [GpuSite; 3] = [
         GpuSite {
@@ -4224,6 +4230,7 @@ mod seam_gpu {
             others: &[(IVec3::new(0, 0, 1), LOD::Low)],
             vertex: Vec3::new(82.5, 0.0, 50.0),
             off: 2.320,
+            absent: &[],
         },
         GpuSite {
             name: "fly [8,0,11] Medium (32,0,16)",
@@ -4242,6 +4249,7 @@ mod seam_gpu {
             ],
             vertex: Vec3::new(90.0, 0.0, 115.0),
             off: 2.074,
+            absent: &[],
         },
         GpuSite {
             name: "hold [4,-1,4] High (64,64,0)",
@@ -4256,8 +4264,46 @@ mod seam_gpu {
             ],
             vertex: Vec3::new(50.0, 0.0, 40.0),
             off: 1.477,
+            absent: &[],
         },
     ];
+
+    /// The hold site again, with the 13 neighbours the hold log listed as
+    /// `none` (no mesh) left out entirely, instead of present at the
+    /// meshing chunk's LOD: the one difference from `SITES[2]` that could
+    /// move its normal. Two of them, (0,1,1) and (1,1,1), are +side
+    /// neighbours its apron reads; absent, the apron extends its own edge.
+    /// The ranks don't change: an absent neighbour counts at this chunk's
+    /// LOD, which is what the port already assumes for them.
+    const HOLD_NONE_ABSENT: [GpuSite; 1] = [GpuSite {
+        name: "hold [4,-1,4] High, logged `none` neighbours absent",
+        chunk: IVec3::new(4, -1, 4),
+        own: LOD::High,
+        others: &[
+            (IVec3::new(1, 0, -1), LOD::Medium),
+            (IVec3::new(1, 1, -1), LOD::Medium),
+            (IVec3::new(1, 0, 0), LOD::Medium),
+            (IVec3::new(1, 1, 0), LOD::Medium),
+            (IVec3::new(1, 0, 1), LOD::Medium),
+        ],
+        vertex: Vec3::new(50.0, 0.0, 40.0),
+        off: 1.477,
+        absent: &[
+            IVec3::new(-1, -1, -1),
+            IVec3::new(0, -1, -1),
+            IVec3::new(1, -1, -1),
+            IVec3::new(-1, -1, 0),
+            IVec3::new(0, -1, 0),
+            IVec3::new(1, -1, 0),
+            IVec3::new(-1, 1, 0),
+            IVec3::new(-1, -1, 1),
+            IVec3::new(0, -1, 1),
+            IVec3::new(1, -1, 1),
+            IVec3::new(-1, 1, 1),
+            IVec3::new(0, 1, 1),
+            IVec3::new(1, 1, 1),
+        ],
+    }];
 
     impl GpuSite {
         fn lod_at(&self, offset: IVec3) -> LOD {
@@ -4290,7 +4336,7 @@ mod seam_gpu {
     /// A camera, so the render world runs as in a bench, with no
     /// `ChunkLoader`: the test spawns every chunk itself, and with no loader
     /// nothing replans, retargets or despawns them.
-    fn seam_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    fn seam_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>, sites: Res<Sites>) {
         let mut image = Image::new_target_texture(
             RESOLUTION.x,
             RESOLUTION.y,
@@ -4308,8 +4354,8 @@ mod seam_gpu {
                 scale_factor: 1.0,
             }),
         ));
-        for site in &SITES {
-            for offset in offsets() {
+        for site in sites.0 {
+            for offset in offsets().filter(|o| !site.absent.contains(o)) {
                 commands.spawn((
                     Chunk,
                     ChunkPosition(site.chunk.saturating_add(offset)),
@@ -4319,8 +4365,8 @@ mod seam_gpu {
         }
     }
 
-    /// Meshes the three sites on a device and returns the probe's report.
-    fn mesh_sites() -> MeshReport {
+    /// Meshes `sites` on a device and returns the probe's report.
+    fn mesh_sites(sites: &'static [GpuSite]) -> MeshReport {
         let dir = std::env::temp_dir().join(format!("tarasaur-seam-gpu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut app = App::new();
@@ -4342,11 +4388,15 @@ mod seam_gpu {
                 .add_systems(Render, read_back_meshes.in_set(RenderSystems::Cleanup));
         }
         app.insert_resource(probe.clone())
+            .insert_resource(Sites(sites))
             .add_systems(Startup, (seam_camera, setup_terrain_palette));
         app.finish();
         app.cleanup();
 
-        let blocks = SITES.len().saturating_mul(27);
+        let blocks: usize = sites
+            .iter()
+            .map(|s| 27usize.saturating_sub(s.absent.len()))
+            .sum();
         let mut settled = 0u32;
         let mut meshed_any = false;
         let mut asked = false;
@@ -4397,7 +4447,7 @@ mod seam_gpu {
                 if let Ok(mut s) = probe.0.lock() {
                     s.requested = Some(Phase::Hold);
                     s.loaded = chunks.iter().map(|c| c.0).collect();
-                    s.watch = SITES.iter().map(|site| site.vertex).collect();
+                    s.watch = sites.iter().map(|site| site.vertex).collect();
                 }
                 asked = true;
             }
@@ -4421,7 +4471,7 @@ mod seam_gpu {
     #[test]
     #[ignore = "wants a device: run it by name"]
     fn shipped_shader_pins_the_logged_sites_where_the_port_says() {
-        let report = mesh_sites();
+        let report = mesh_sites(&SITES);
         let mut wrong = Vec::new();
         for site in &SITES {
             // The ranks the meshing chunk was meshed with, from its ChunkMeta.
@@ -4493,6 +4543,44 @@ mod seam_gpu {
             wrong.join("\n"),
             report.chunks,
             report.vertices,
+            report.near.len()
+        );
+    }
+
+    /// Wave 2 found the hold site's vertex where the logs put it, but its
+    /// normal 12.7 degrees off where the log had 34.97. This meshes the
+    /// site with the logged `none` neighbours absent, and prints the
+    /// normal of every vertex at the pinned corner, to see whether that is
+    /// what moves it. It checks only that the vertex is still pinned there.
+    ///
+    ///     cargo test --release --example bench seam_gpu::hold_normal -- --ignored --nocapture
+    ///
+    /// Read the result line, not the exit code (see the test above).
+    #[test]
+    #[ignore = "wants a device: run it by name"]
+    fn hold_normal_with_the_logged_none_absent() {
+        let report = mesh_sites(&HOLD_NONE_ABSENT);
+        let [site] = &HOLD_NONE_ABSENT;
+        let at: Vec<&NearVertex> = report
+            .near
+            .iter()
+            .filter(|v| v.world.distance(site.vertex) < 1e-3)
+            .collect();
+        for v in &at {
+            println!(
+                "    chunk {} {:?} at the corner: off {:.3}, normal {:.1} deg (logged: [4,-1,4] High 34.97){}",
+                v.pos,
+                v.lod,
+                v.off,
+                v.normal_deg,
+                if v.pinned { ", pinned" } else { "" }
+            );
+        }
+        assert!(
+            at.iter().any(|v| v.pos == site.chunk && v.pinned),
+            "no pinned vertex of {} at {} ({} vertices near it)",
+            site.chunk,
+            site.vertex,
             report.near.len()
         );
     }
