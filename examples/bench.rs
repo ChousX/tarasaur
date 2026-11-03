@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--gap-probes] [--quick]
-//!   [--compute-threads bevy|N]
+//!   [--compute-threads bevy|N] [--settle-stream]
 //! ```
 //!
 //! `--out DIR` puts the results somewhere else, and `--world-dir DIR` the
@@ -141,6 +141,12 @@ const LOOK_AT: Vec3 = Vec3::new(0.0, 8.0, 0.0);
 
 /// Frames everything must stay idle before `load` counts as done.
 const SETTLE_FRAMES: u32 = 30;
+/// How long `--settle-stream` waits for chunk streaming to drain before it
+/// gives up, warns, and measures anyway. Generous: the backlog `edit` and
+/// `sculpt` inherit takes ~4 s of their own frames to clear when it clears at
+/// all, and giving up silently would reintroduce exactly the contamination
+/// the flag exists to remove.
+const SETTLE_STREAM_TIMEOUT_SECS: f32 = 20.0;
 /// Give up on `load` after this long (recorded as a timeout).
 const LOAD_TIMEOUT_SECS: f32 = 180.0;
 const HOLD_FRAMES: u32 = 600;
@@ -426,6 +432,10 @@ struct Bench {
     /// first edits can wait for `MaxEditLod`.
     sculpt_start: Option<SculptMetrics>,
     sculpt_mid: Option<SculptMetrics>,
+    /// `--settle-stream`: this phase's measured frames have not started yet,
+    /// because chunk streaming from an earlier phase is still draining. The
+    /// drivers and checks are held off while it is set.
+    settling: bool,
     out: Output,
 }
 
@@ -442,6 +452,17 @@ struct Output {
     /// `DIG_RADIUS`. Only vary it to find out what the phase's cost scales
     /// with -- a run with another radius is not comparable to a baseline.
     dig_radius: f32,
+    /// `--settle-stream`: hold each fixed-length phase before its measured
+    /// frames begin until chunk streaming has drained
+    /// (`loads_in_flight == 0 && lod_pending == 0`).
+    ///
+    /// `fly` and `edit` point the camera 12 units past where the fly stopped,
+    /// which saturates the load queue; the backlog then drains *through*
+    /// `sculpt`, whose frames are 21% slower while it is live at identical
+    /// draw count, and where it runs out sets the phase mean. That is the
+    /// `sculpt` bimodality of `deck-overnight-ab.md` finding 17. Off by
+    /// default so runs stay comparable with every result already on disk.
+    settle_stream: SettleStream,
     /// Seconds since the epoch at startup, in the result file names.
     stamp: u64,
     /// Short hash of the commit the **binary was built from**, from
@@ -450,6 +471,48 @@ struct Output {
     commit_build: String,
     /// The command line and every knob read off it, for the header.
     knobs: Knobs,
+}
+
+/// `--settle-stream`: whether a phase may begin measuring while chunk
+/// streaming from an earlier phase is still draining.
+///
+/// A two-variant enum rather than a fourth `bool` on `Output`:
+/// `clippy::struct_excessive_bools` fires at four, and its own advice is to
+/// refactor into two-variant enums. It also makes the header line say which
+/// mode a run used rather than `true`/`false`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettleStream {
+    /// Start measuring at once. The default, so a run stays comparable with
+    /// every result already on disk.
+    Off,
+    /// Hold each fixed-length phase until `loads_in_flight == 0 &&
+    /// lod_pending == 0`, or `SETTLE_STREAM_TIMEOUT_SECS` elapses.
+    WaitForDrain,
+}
+
+impl SettleStream {
+    /// Reads `--settle-stream` through [`Knobs`], so the header carries it
+    /// because the parser recorded it rather than because `write_results`
+    /// names it -- and records the mode's own word rather than a bare
+    /// `true`/`false`. The second `record` replaces the `switch`'s bool,
+    /// since a later word for the same key wins.
+    fn from_args(knobs: &Knobs) -> Self {
+        let mode = if knobs.switch("--settle-stream") {
+            Self::WaitForDrain
+        } else {
+            Self::Off
+        };
+        knobs.record("--settle-stream", &mode.tag());
+        mode
+    }
+
+    /// What the result header records, so a flag A/B can verify it took.
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::WaitForDrain => "wait",
+        }
+    }
 }
 
 #[derive(Component)]
@@ -713,6 +776,12 @@ fn bench_paths(knobs: Knobs) -> Option<(Output, PathBuf)> {
         depth_prepass: knobs.switch("--depth-prepass"),
         small_arenas: knobs.switch("--small-arenas"),
         quick: knobs.switch("--quick"),
+        // Through `Knobs` like every other knob, so the header carries it
+        // because the parser recorded it rather than because `write_results`
+        // names it. 1ddd619 added it to the header by hand -- correctly, for
+        // the right reason, and against the version of the header that
+        // predates this -- and routing it here is what makes it stay there.
+        settle_stream: SettleStream::from_args(&knobs),
         dig_radius,
         commit_build: flag("--commit").unwrap_or_default(),
         stamp: SystemTime::now()
@@ -875,6 +944,7 @@ fn main() -> AppExit {
         checks: Checks::default(),
         sculpt_start: None,
         sculpt_mid: None,
+        settling: false,
     })
     .add_systems(Startup, (spawn_camera, setup_terrain_palette))
     .add_systems(
@@ -882,7 +952,7 @@ fn main() -> AppExit {
         (
             drive_camera,
             take_shots,
-            drive_edits,
+            drive_edits.run_if(not_settling),
             ignore_cursor
                 .after(resolve_cursor_hit)
                 .before(update_cursor_focus),
@@ -890,6 +960,16 @@ fn main() -> AppExit {
     )
     .add_systems(Last, record_frame)
     .run()
+}
+
+/// `--settle-stream` is not holding this phase's measured frames back.
+///
+/// The drivers and checks run only when this is true, so a settling phase
+/// streams and renders but is not yet sculpting, digging or being checked --
+/// otherwise the gate would hold `frame_in_phase` at 0 while `drive_sculpt`
+/// poked the same spot for the whole wait.
+fn not_settling(bench: Res<Bench>) -> bool {
+    !bench.settling
 }
 
 /// Whether the run uses `BENCH_ARENAS` (`--small-arenas`).
@@ -939,7 +1019,8 @@ fn add_checked_phases(app: &mut App, knobs: &Knobs, small_arenas: bool) {
                 check_visibility,
                 check_dig,
                 check_meshes,
-            ),
+            )
+                .run_if(not_settling),
         );
 }
 
@@ -3527,6 +3608,37 @@ fn record_frame(
         values,
     };
     let idle = is_idle(&row);
+
+    // `--settle-stream`: don't start a phase's measured frames while chunk
+    // streaming from an earlier phase is still draining. Deliberately not
+    // `is_idle`, which also demands `meshed_chunks == 0` -- a sculpting phase
+    // never reaches that, so `is_idle` can't gate one. Only the streaming
+    // pair is tested. `load` is exempt (`frames()` is `None`): it *is* the
+    // phase that does the streaming.
+    if bench.out.settle_stream == SettleStream::WaitForDrain
+        && bench.frame_in_phase == 0
+        && bench.phase.frames().is_some()
+    {
+        let clear = |name| row.get(name).is_some_and(|v| v == 0.0);
+        let drained = clear("loads_in_flight") && clear("lod_pending");
+        let timed_out = bench.phase_started.elapsed().as_secs_f32() > SETTLE_STREAM_TIMEOUT_SECS;
+        if !drained && !timed_out {
+            // Not recorded and `frame_in_phase` not advanced, so the phase
+            // still runs exactly the number of measured frames it declares
+            // and the result tables are unchanged in shape.
+            bench.settling = true;
+            return;
+        }
+        if timed_out && !drained {
+            warn!(
+                "[bench] {}: --settle-stream gave up after {SETTLE_STREAM_TIMEOUT_SECS}s; \
+                 streaming still busy, this phase is contaminated",
+                bench.phase.name()
+            );
+        }
+        bench.settling = false;
+    }
+
     bench.rows.push(row);
     bench.frame_in_phase = bench.frame_in_phase.saturating_add(1);
 
