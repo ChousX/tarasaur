@@ -611,7 +611,19 @@ pub trait FieldSphereOps<T: Copy + Default>: Field<T> {
         let mut out = Vec::new();
         for z in min.z..=max.z {
             for y in min.y..=max.y {
-                for x in min.x..=max.x {
+                // Only the part of the row the brush reaches, as f15007e gave
+                // `apply_sphere_at`. The voxels this stops visiting are
+                // exactly the ones the `dist > radius` test below already
+                // rejected, so the written set is unchanged; `x_span` is never
+                // narrower than the truth (`span_never_drops_a_voxel_in_reach`)
+                // and exact for a sphere.
+                let Some((from_x, to_x)) = at.x_span(radius, f32_from_u32(y), f32_from_u32(z))
+                else {
+                    continue;
+                };
+                let first = min.x.max(u32_from_f32(from_x.ceil()));
+                let last = max.x.min(u32_from_f32(to_x.floor()));
+                for x in first..=last {
                     let dist = at.distance(UVec3::new(x, y, z).as_vec3());
                     if dist > radius {
                         continue;
@@ -836,7 +848,9 @@ impl SignedDistance for f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sphere, Sweep, UVec3, Vec3};
+    use super::{
+        Cuboid, FieldBoxOps, FieldSphereOps, PlaneMode, Sphere, Sweep, UVec3, Vec3, brush_falloff,
+    };
     use crate::{
         field::Field,
         field::{LOD, SDF, VisibilityField},
@@ -914,6 +928,65 @@ mod tests {
                                 "r{radius} at {center:?}: voxel ({x}, {y}, {z}) \
                                  distance {} filled={filled} wanted={want_filled}",
                                 center.distance(p)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `smooth_sphere` got the row bound after `apply_sphere_at` did, and it
+    /// writes voxels, so the same off-by-one would quietly stop a brush at its
+    /// own edge. Smooths a field of known curvature and checks the voxels that
+    /// moved are exactly the voxels that should have.
+    ///
+    /// `f = x*x` has curvature only along x, so for an interior voxel the
+    /// upwind sum is `6x^2 + 2` and `sum/6 - c` is exactly `1/3`. At `x = 0`
+    /// or `x = n-1` the x pair falls back to `2c` (a linear continuation adds
+    /// no curvature), so the sum is `6x^2` and nothing moves. The y and z
+    /// faces behave as interior voxels because `f` does not vary along them.
+    /// On a 4-voxel grid at these radii the `range` box covers everything, so
+    /// the bound really decides.
+    ///
+    /// The strength is `brush_falloff`, which is `(1 - (d/r)^2)^2` and so is
+    /// exactly **zero at `d == r`**: a voxel sitting precisely on the brush
+    /// edge is visited and then written back unchanged. The predicate uses
+    /// `brush_falloff` rather than `d <= r` for that reason -- asserting
+    /// "in reach implies moved" fails on the edge case for a correct bound,
+    /// which is how the first version of this test failed.
+    ///
+    /// The half that actually guards the bound is the other one: a voxel the
+    /// brush reaches must not be *skipped*, which a span one step too narrow
+    /// would do silently.
+    #[test]
+    fn a_smooth_touches_exactly_the_voxels_in_range() {
+        for &radius in &[0.4_f32, 1.0, 1.5, 2.0] {
+            for center in [
+                Vec3::splat(1.5),
+                Vec3::splat(2.0),
+                Vec3::new(0.0, 1.0, 3.0),
+                Vec3::new(3.0, 3.0, 3.0),
+            ] {
+                let before = sdf_from(|x, _, _| x * x);
+                let mut sdf = sdf_from(|x, _, _| x * x);
+                sdf.smooth_sphere(center, radius, 1.0);
+                let n = sdf.size().x;
+                for z in 0..n {
+                    for y in 0..n {
+                        for x in 0..n {
+                            let p = Vec3::new(f32_from_u32(x), f32_from_u32(y), f32_from_u32(z));
+                            let d = center.distance(p);
+                            let has_strength = d <= radius && brush_falloff(d, radius) > 0.0;
+                            let has_curvature = x > 0 && x < n.saturating_sub(1);
+                            let want_moved = has_strength && has_curvature;
+                            let moved = (sdf.get(x, y, z) - before.get(x, y, z)).abs() > 1e-6;
+                            assert_eq!(
+                                moved,
+                                want_moved,
+                                "r{radius} at {center:?}: voxel ({x}, {y}, {z}) \
+                                 distance {d} falloff {} moved={moved} wanted={want_moved}",
+                                brush_falloff(d, radius)
                             );
                         }
                     }
