@@ -5,6 +5,20 @@
 //!
 //! ```text
 //! cargo run --release --example bench -- --label baseline [--msaa 1|2|4|8] [--max-loads N] [--depth-prepass] [--small-arenas] [--layer] [--gap-probes] [--quick]
+//! ```
+//!
+//! `--out DIR` puts the results somewhere else, and `--world-dir DIR` the
+//! scratch world. Both default under the checkout the binary was built from,
+//! so a run on another machine (see `tools/bench-deck.sh`) needs them, along
+//! with `--commit <sha>` for the result header.
+//!
+//! `--dig-radius R` changes the `dig` brush's radius (default `DIG_RADIUS`).
+//! It is a diagnostic, not a setting: `dig`'s CSG cost should scale with the
+//! number of chunks the brush's bounding box spans rather than with the
+//! brush's volume, because the scan clamps to whole chunks. Runs at
+//! different radii are comparable only with each other.
+//!
+//! ```text
 //! cargo run --release --example bench -- --compare bench_results/A.summary.csv bench_results/B.summary.csv
 //! cargo run --release --example bench -- --diff A.png B.png [heatmap.png]
 //! ```
@@ -379,6 +393,10 @@ struct Output {
     layer: bool,
     /// `--quick`: see `QUICK`.
     quick: bool,
+    /// `--dig-radius`: the `dig` brush's radius in world units, normally
+    /// `DIG_RADIUS`. Only vary it to find out what the phase's cost scales
+    /// with -- a run with another radius is not comparable to a baseline.
+    dig_radius: f32,
     /// Seconds since the epoch at startup, in the result file names.
     stamp: u64,
     /// Short hash of the checked-out commit.
@@ -387,6 +405,73 @@ struct Output {
 
 #[derive(Component)]
 struct BenchCamera;
+
+/// The value after `name` in `args`, if it's there.
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i.saturating_add(1)))
+        .cloned()
+}
+
+/// Where this run's results and scratch world go, and how it labels itself.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at build time, so off the build host it
+/// names a path that isn't there: the defaults fall back to the working
+/// directory, and `--out`, `--world-dir` and `--commit` say what to use
+/// instead (see `tools/bench-deck.sh`).
+///
+/// `None` if a flag's value doesn't parse, having said which.
+fn bench_paths(args: &[String]) -> Option<(Output, PathBuf)> {
+    let flag = |name: &str| arg_value(args, name);
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let manifest = Path::new(manifest_dir);
+    let base = if manifest.is_dir() {
+        manifest.to_path_buf()
+    } else {
+        PathBuf::from(".")
+    };
+    let dig_radius = match flag("--dig-radius") {
+        None => DIG_RADIUS,
+        Some(v) => match v.parse::<f32>() {
+            Ok(r) if r.is_finite() && r > 0.0 => r,
+            _ => {
+                eprintln!("--dig-radius wants a positive number of world units, got {v:?}");
+                return None;
+            }
+        },
+    };
+    let out = Output {
+        dir: flag("--out").map_or_else(|| base.join("bench_results"), PathBuf::from),
+        label: flag("--label").unwrap_or_else(|| "run".into()),
+        depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
+        small_arenas: args.iter().any(|a| a == "--small-arenas"),
+        layer: args.iter().any(|a| a == "--layer"),
+        quick: args.iter().any(|a| a == "--quick"),
+        dig_radius,
+        commit: flag("--commit").unwrap_or_else(|| {
+            std::process::Command::new("git")
+                .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .filter(|s| !s.trim().is_empty())
+                .map_or_else(|| "unknown".into(), |s| s.trim().to_string())
+        }),
+        stamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    };
+    let out = Output {
+        dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
+        ..out
+    };
+    // An empty scratch save directory, so every run generates the same
+    // terrain from scratch and your saves are never read or written.
+    let world_dir =
+        flag("--world-dir").map_or_else(|| base.join("target").join("bench-world"), PathBuf::from);
+    Some((out, world_dir))
+}
 
 /// Render resolution: Steam Deck's native one.
 const RESOLUTION: UVec2 = UVec2::new(1280, 800);
@@ -434,12 +519,6 @@ fn main() -> AppExit {
     if let Some(i) = args.iter().position(|a| a == "--compare") {
         return compare_args(args.get(i.saturating_add(1)), args.get(i.saturating_add(2)));
     }
-    let flag = |name: &str| {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i.saturating_add(1)))
-            .cloned()
-    };
     if let Some(i) = args.iter().position(|a| a == "--diff") {
         return diff_args(
             args.get(i.saturating_add(1)),
@@ -447,34 +526,11 @@ fn main() -> AppExit {
             args.get(i.saturating_add(3)),
         );
     }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let manifest = Path::new(manifest_dir);
-    let out = Output {
-        dir: flag("--out").map_or_else(|| manifest.join("bench_results"), PathBuf::from),
-        label: flag("--label").unwrap_or_else(|| "run".into()),
-        depth_prepass: args.iter().any(|a| a == "--depth-prepass"),
-        small_arenas: args.iter().any(|a| a == "--small-arenas"),
-        layer: args.iter().any(|a| a == "--layer"),
-        quick: args.iter().any(|a| a == "--quick"),
-        commit: std::process::Command::new("git")
-            .args(["-C", manifest_dir, "rev-parse", "--short", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map_or_else(|| "unknown".into(), |s| s.trim().to_string()),
-        stamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs()),
-    };
-    let out = Output {
-        dir: std::path::absolute(&out.dir).unwrap_or(out.dir),
-        ..out
+    let flag = |name: &str| arg_value(&args, name);
+    let Some((out, world_dir)) = bench_paths(&args) else {
+        return AppExit::error();
     };
     QUICK.store(out.quick, Ordering::Relaxed);
-
-    // An empty scratch save directory, so every run generates the same
-    // terrain from scratch and your saves are never read or written.
-    let world_dir = manifest.join("target").join("bench-world");
     let _ = std::fs::remove_dir_all(&world_dir);
 
     let mut app = App::new();
@@ -3090,7 +3146,7 @@ fn drive_dig(bench: Res<Bench>, terrain: TerrainRay, mut csg: MessageWriter<SdfC
     };
     csg.write(SdfCsgSphere {
         center: hit.pos,
-        radius: DIG_RADIUS,
+        radius: bench.out.dig_radius,
         sweep_from: None,
         subtract: true,
         max_step: Some(DIG_STEP),
@@ -3173,7 +3229,7 @@ fn check_dig(
     // the ray it re-centered along.
     let (mut weak, mut total, mut checked) = (0usize, 0usize, 0usize);
     let mid = (dig_target() + hit.pos) * 0.5;
-    let half = Vec3::splat(DIG_RADIUS + 1.0) + (hit.pos - dig_target()).abs() * 0.5;
+    let half = Vec3::splat(bench.out.dig_radius + 1.0) + (hit.pos - dig_target()).abs() * 0.5;
     for pos in overlapping_chunks(mid, half) {
         let Some(sdf) = chunks.get_chunk(&pos).and_then(|e| sdfs.get(e).ok()) else {
             continue;
@@ -3380,13 +3436,14 @@ fn summarize(phase: Phase, rows: &[&FrameRow], load_timed_out: bool) -> Vec<(Str
 
 /// Writes the frames and summary so far; `print`s the tables too at the end.
 fn write_results(bench: &Bench, adapter: &str, print: bool) {
-    let base = bench
-        .out
-        .dir
-        .join(format!("{}-{}", bench.out.label, bench.out.stamp));
+    // Built by name, not `with_extension`: that replaces everything after the
+    // last dot, so a label with a dot in it (`--dig-radius 7.5`) lost both its
+    // tail and the stamp, silently overwriting the previous run and leaving
+    // `ab.sh`'s `<label>-*` glob with nothing to match.
+    let stem = format!("{}-{}", bench.out.label, bench.out.stamp);
     let commit = &bench.out.commit;
     let header = format!(
-        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} layer={} quick={}\n",
+        "# label={} commit={commit} adapter={adapter} profile={} depth_prepass={} small_arenas={} layer={} quick={} dig_radius={}\n",
         bench.out.label,
         if cfg!(debug_assertions) {
             "debug"
@@ -3397,6 +3454,7 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         bench.out.small_arenas,
         bench.out.layer,
         bench.out.quick,
+        bench.out.dig_radius,
     );
 
     let mut frames = header.clone();
@@ -3455,8 +3513,8 @@ fn write_results(bench: &Bench, adapter: &str, print: bool) {
         );
     }
 
-    let frames_path = base.with_extension("frames.csv");
-    let summary_path = base.with_extension("summary.csv");
+    let frames_path = bench.out.dir.join(format!("{stem}.frames.csv"));
+    let summary_path = bench.out.dir.join(format!("{stem}.summary.csv"));
     let written = std::fs::create_dir_all(&bench.out.dir)
         .and_then(|()| std::fs::write(&frames_path, frames))
         .and_then(|()| std::fs::write(&summary_path, summary));
