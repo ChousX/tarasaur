@@ -2164,6 +2164,9 @@ struct MeshProbeState {
     apron_started: bool,
     apron_pending: usize,
     apron: HashMap<String, ApronClass>,
+    /// Why each normal-flagged vertex of `hold` got its normal, from the
+    /// chunk's own padded SDF read back (see `ApronChunk::normal_report`).
+    normal_dump: Vec<String>,
 }
 
 /// Apron texels of one kind (region and source LOD): how far their SDF is
@@ -2471,37 +2474,60 @@ fn read_back_meshes(
 /// Once `hold`'s mesh report is in, reads back the padded SDF and seam ranks
 /// of the chunks it flagged, and compares every texel with the heightfield
 /// at the position, and in the units, pass3 reads it at.
+/// The chunks `audit_aprons` reads back once `hold`'s mesh report is in,
+/// with the normal flags each one has to explain. Empty if the audit has
+/// already started or the report is not in yet; marks it started.
+fn apron_audit_chunks(probe: &MeshProbe) -> Vec<(IVec3, Vec<MeshFlag>)> {
+    let Ok(mut s) = probe.0.lock() else {
+        return Vec::new();
+    };
+    if s.apron_started {
+        return Vec::new();
+    }
+    let Some((_, r)) = s.done.iter().find(|(p, _)| *p == Phase::Hold) else {
+        return Vec::new();
+    };
+    // Every normal flag, pinned or not, carries its own explanation
+    // (`normal_report`); the others only feed the apron classes.
+    let normals: Vec<MeshFlag> = r
+        .bad_normals
+        .iter()
+        .chain(&r.pinned_normals)
+        .copied()
+        .collect();
+    let mut chunks: Vec<IVec3> = normals
+        .iter()
+        .map(|f| f.pos)
+        .chain(r.folds.iter().map(|f| f.pos))
+        .collect();
+    chunks.sort_by_key(IVec3::to_array);
+    chunks.dedup();
+    chunks.truncate(APRON_AUDIT_CHUNKS);
+    let dump = normal_rank_lines(r);
+    s.apron_started = true;
+    s.apron_pending = chunks.len();
+    s.normal_dump = dump;
+    chunks
+        .into_iter()
+        .map(|pos| {
+            let flags: Vec<MeshFlag> = normals.iter().filter(|f| f.pos == pos).copied().collect();
+            (pos, flags)
+        })
+        .collect()
+}
+
 fn audit_aprons(
     probe: &MeshProbe,
     arenas: &ArenaInspector,
     device: &RenderDevice,
     queue: &RenderQueue,
 ) {
-    let chunks: Vec<IVec3> = {
-        let Ok(mut s) = probe.0.lock() else {
-            return;
-        };
-        if s.apron_started {
-            return;
-        }
-        let Some((_, r)) = s.done.iter().find(|(p, _)| *p == Phase::Hold) else {
-            return;
-        };
-        let mut chunks: Vec<IVec3> = r
-            .bad_normals
-            .iter()
-            .chain(&r.folds)
-            .map(|f| f.pos)
-            .collect();
-        chunks.sort_by_key(IVec3::to_array);
-        chunks.dedup();
-        chunks.truncate(APRON_AUDIT_CHUNKS);
-        s.apron_started = true;
-        s.apron_pending = chunks.len();
-        chunks
-    };
+    let chunks = apron_audit_chunks(probe);
+    if chunks.is_empty() {
+        return;
+    }
     let mesh_arenas = arenas.mesh_arenas();
-    for pos in chunks {
+    for (pos, flags) in chunks {
         let found = mesh_arenas.iter().find_map(|a| {
             a.slots
                 .iter()
@@ -2549,6 +2575,7 @@ fn audit_aprons(
             .slice(..)
             .map_async(MapMode::Read, move |result| {
                 let mut classes = HashMap::new();
+                let mut dump = Vec::new();
                 if result.is_ok() {
                     if let Ok(bytes) = readback.slice(..).get_mapped_range() {
                         let split = usize::try_from(sdf_bytes).unwrap_or(usize::MAX);
@@ -2557,11 +2584,15 @@ fn audit_aprons(
                         if let [Some(r0), Some(r1)] = ranks {
                             let chunk = ApronChunk::new(pos, lod, padded, [r0, r1]);
                             chunk.audit(sdf, &mut classes);
+                            for flag in &flags {
+                                dump.extend(chunk.normal_report(sdf, flag));
+                            }
                         }
                     }
                     readback.unmap();
                 }
                 if let Ok(mut s) = state.lock() {
+                    s.normal_dump.extend(dump);
                     for (key, c) in classes {
                         let into: &mut ApronClass = s.apron.entry(key).or_default();
                         into.texels = into.texels.saturating_add(c.texels);
@@ -2578,6 +2609,21 @@ fn audit_aprons(
 }
 
 /// A chunk's padded volume as pass3 reads it.
+/// One texel a normal's central difference read.
+struct TexelRead {
+    texel: UVec3,
+    /// In the meshing chunk's voxels (an apron texel rescaled to them).
+    value: f32,
+    apron: bool,
+    /// The LOD rank the apron texel came from.
+    source: u32,
+}
+
+/// `mix` in WESL: `a` to `b` by `t`.
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    (b - a).mul_add(t, a)
+}
+
 struct ApronChunk {
     pos: IVec3,
     lod: LOD,
@@ -2688,6 +2734,153 @@ impl ApronChunk {
                 }
             }
         }
+    }
+
+    /// pass3's `texel_coord`: a continuous position in this chunk's voxels,
+    /// in texel space (an apron texel sits one neighbour-voxel step past the
+    /// boundary, not one of ours).
+    fn texel_coord(&self, p: Vec3, face: [i32; 3]) -> Vec3 {
+        let n = f32_from_u32(self.padded.saturating_sub(2));
+        let step = Vec3::from_array(face.map(|f| 2f32.powi(f.wrapping_neg())));
+        Vec3::select(
+            p.cmpgt(Vec3::splat(n)),
+            (p - Vec3::splat(n)) * step + Vec3::splat(n),
+            p,
+        )
+    }
+
+    /// pass3's `sample_sdf` + `sdf_at`: texel `t`, clamped into the padded
+    /// volume and rescaled to this chunk's voxels. Records what it read.
+    fn sample(&self, sdf: &[u8], t: IVec3, own: i32, seen: &mut Vec<TexelRead>) -> f32 {
+        let max = i32::try_from(self.padded.saturating_sub(1)).unwrap_or(0);
+        let texel = t.clamp(IVec3::ZERO, IVec3::splat(max)).as_uvec3();
+        let edge = self.padded.saturating_sub(2);
+        let apron = texel.cmpge(UVec3::splat(edge));
+        let source = self.rank(IVec3::select(apron, IVec3::ONE, IVec3::ZERO));
+        let shift = if apron.any() {
+            own.saturating_sub(Self::log2_size(source))
+        } else {
+            0
+        };
+        let raw = Self::decode(sdf, flatten_cube(texel.x, texel.y, texel.z, self.padded))
+            .unwrap_or_default();
+        let value = raw * 2f32.powi(shift);
+        if !seen.iter().any(|s| s.texel == texel) {
+            seen.push(TexelRead {
+                texel,
+                value,
+                apron: apron.any(),
+                source,
+            });
+        }
+        value
+    }
+
+    /// pass3's `sample_sdf_trilinear`.
+    fn trilinear(
+        &self,
+        sdf: &[u8],
+        pos: Vec3,
+        own: i32,
+        face: [i32; 3],
+        seen: &mut Vec<TexelRead>,
+    ) -> f32 {
+        let p = self.texel_coord(pos, face);
+        let ip = p.floor();
+        let f = p - ip;
+        let base = ip.as_ivec3();
+        let mut at =
+            |dx, dy, dz| self.sample(sdf, base.saturating_add(IVec3::new(dx, dy, dz)), own, seen);
+        let c000 = at(0, 0, 0);
+        let c100 = at(1, 0, 0);
+        let c010 = at(0, 1, 0);
+        let c110 = at(1, 1, 0);
+        let c001 = at(0, 0, 1);
+        let c101 = at(1, 0, 1);
+        let c011 = at(0, 1, 1);
+        let c111 = at(1, 1, 1);
+        let x0 = lerp(lerp(c000, c100, f.x), lerp(c010, c110, f.x), f.y);
+        let x1 = lerp(lerp(c001, c101, f.x), lerp(c011, c111, f.x), f.y);
+        lerp(x0, x1, f.z)
+    }
+
+    /// pass3's `compute_normal`: a central difference of this chunk's own
+    /// padded SDF at `local`, and every texel it reads.
+    fn normal_at(&self, sdf: &[u8], local: Vec3) -> (Vec3, Vec<TexelRead>) {
+        let own = Self::log2_size(self.rank(IVec3::ZERO));
+        let face = [IVec3::X, IVec3::Y, IVec3::Z]
+            .map(|a| own.saturating_sub(Self::log2_size(self.rank(a))).max(0));
+        let mut seen = Vec::new();
+        let h = 0.1;
+        let d = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| {
+            let up = self.trilinear(sdf, local + axis * h, own, face, &mut seen);
+            let down = self.trilinear(sdf, local - axis * h, own, face, &mut seen);
+            up - down
+        });
+        let norm = Vec3::from_array(d);
+        seen.sort_by_key(|s| (s.texel.z, s.texel.y, s.texel.x));
+        if norm.length() > 0.00001 {
+            (norm.normalize(), seen)
+        } else {
+            (Vec3::Y, seen)
+        }
+    }
+
+    /// Why the vertex at `flag` got the normal it did: the normal this
+    /// chunk's own padded SDF gives there, against the heightfield's, and
+    /// every texel the central difference reads. The GPU computed the same
+    /// difference over the same volume, so a CPU angle matching the flag's
+    /// confirms the readback, and the texels say what produced it.
+    fn normal_report(&self, sdf: &[u8], flag: &MeshFlag) -> Vec<String> {
+        let (normal, seen) = self.normal_at(sdf, flag.local);
+        let voxel = self.lod.voxel_size();
+        let world = self.pos.as_vec3() * CHUNK_SIZE + flag.local * voxel;
+        let want = heightfield_normal(world);
+        let angle = normal.dot(want).clamp(-1.0, 1.0).acos().to_degrees();
+        let mut lines = vec![format!(
+            "    normal {:.2} at chunk {} {:?} local ({:.2}, {:.2}, {:.2}): recomputed {:.2} degrees off; normal ({:.3}, {:.3}, {:.3}) vs heightfield ({:.3}, {:.3}, {:.3})",
+            flag.value,
+            self.pos,
+            self.lod,
+            flag.local.x,
+            flag.local.y,
+            flag.local.z,
+            angle,
+            normal.x,
+            normal.y,
+            normal.z,
+            want.x,
+            want.y,
+            want.z
+        )];
+        let origin = self.pos.as_vec3() * CHUNK_SIZE;
+        let edge = self.padded.saturating_sub(2);
+        let far = f32_from_u32(edge) + 2f32.powi(1);
+        for s in &seen {
+            // Where the texel sits and what the heightfield says there, so a
+            // wrong apron value shows as a value far from `want`.
+            let p = Vec3::select(
+                s.texel.cmpgt(UVec3::splat(edge)),
+                Vec3::splat(far),
+                s.texel.as_vec3(),
+            );
+            let want = heightfield_distance(origin + p * voxel) / voxel;
+            lines.push(format!(
+                "      texel ({:2}, {:2}, {:2}){}: {:+.3} voxels, heightfield {:+.3}{}",
+                s.texel.x,
+                s.texel.y,
+                s.texel.z,
+                if s.apron { " apron" } else { "      " },
+                s.value,
+                want,
+                if s.apron {
+                    format!(", source rank {}", s.source)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        lines
     }
 }
 
@@ -3274,6 +3467,92 @@ fn describe_flag(kind: &str, f: &MeshFlag, lods: &HashMap<IVec3, LOD>) -> String
     )
 }
 
+/// The 27 stored seam ranks of `ranks`, as digits in neighbour order
+/// (x fastest, z slowest), grouped by z: the LOD rank pass3 meshed the
+/// chunk against for each neighbour. 0 Lowest, 1 Low, 2 Medium, 3 High.
+fn rank_digits(ranks: [u32; 2]) -> String {
+    let mut out = String::new();
+    for k in 0u32..27 {
+        if k != 0 && k % 9 == 0 {
+            out.push(' ');
+        }
+        let word = ranks.get(usize_from(k / 16)).copied().unwrap_or(0);
+        let rank = word.wrapping_shr((k % 16).wrapping_mul(2)) & 3;
+        out.push(char::from_digit(rank, 10).unwrap_or('?'));
+    }
+    out
+}
+
+/// Every chunk touching the vertex at `local` of an `n`-voxel chunk at
+/// `pos`: the chunk itself, plus the neighbour across each face the vertex
+/// lies on. All of them emit that vertex, each from its own ranks.
+fn chunks_at_vertex(pos: IVec3, local: Vec3, n: f32) -> Vec<IVec3> {
+    let mut out = vec![pos];
+    for (v, unit) in [
+        (local.x, IVec3::X),
+        (local.y, IVec3::Y),
+        (local.z, IVec3::Z),
+    ] {
+        let side = if v.abs() <= 1e-3 {
+            -1
+        } else if (v - n).abs() <= 1e-3 {
+            1
+        } else {
+            continue;
+        };
+        let step = unit.saturating_mul(IVec3::splat(side));
+        let grown: Vec<IVec3> = out.iter().map(|p| p.saturating_add(step)).collect();
+        out.extend(grown);
+    }
+    out
+}
+
+/// For each normal-flagged vertex, the seam ranks every chunk touching it
+/// was meshed against, and where those disagree with the LODs now resident:
+/// the first thing to know about a normal that fires in one run and not the
+/// next.
+fn normal_rank_lines(r: &MeshReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (kind, flag) in r
+        .bad_normals
+        .iter()
+        .map(|f| ("failed", f))
+        .chain(r.pinned_normals.iter().map(|f| ("pinned", f)))
+    {
+        lines.push(format!(
+            "    {kind} normal {:.2} at chunk {} {:?} local ({:.2}, {:.2}, {:.2}); ranks (0 Lowest .. 3 High, x fastest, by z):",
+            flag.value, flag.pos, flag.lod, flag.local.x, flag.local.y, flag.local.z
+        ));
+        for at in chunks_at_vertex(flag.pos, flag.local, f32_from_u32(flag.lod.size())) {
+            let live = r.lods.get(&at).copied();
+            let stored = r.ranks.get(&at).copied();
+            let stale = stored.is_some_and(|s| {
+                live.is_some_and(|l| {
+                    let own = s.first().copied().unwrap_or(0).wrapping_shr(26) & 3;
+                    own != l.rank()
+                })
+            });
+            lines.push(stored.map_or_else(
+                || {
+                    format!(
+                        "      {at} {}: no stored ranks (no mesh in any arena)",
+                        live.map_or_else(|| "not resident".to_string(), |l| format!("{l:?}"))
+                    )
+                },
+                |s| {
+                    format!(
+                        "      {at} {}: {}{}",
+                        live.map_or_else(|| "no mesh".to_string(), |l| format!("{l:?}")),
+                        rank_digits(s),
+                        if stale { "  STALE own rank" } else { "" }
+                    )
+                },
+            ));
+        }
+    }
+    lines
+}
+
 /// The report's summary, plus its worst flags.
 /// The pinned seam vertices (reported, not failed), and the worst
 /// off-surface vertex per LOD among the rest, with where it is.
@@ -3504,6 +3783,13 @@ fn apron_report_lines(probe: &MeshProbe) -> Vec<String> {
                 "    {e:.2}: chunk {pos} texel {t} value {v:.2} expected {x:.2}"
             ));
         }
+    }
+    if !s.normal_dump.is_empty() {
+        lines.push(format!(
+            "  normal flags, with the ranks they were meshed against and the texels their normal came from ({}):",
+            s.normal_dump.len()
+        ));
+        lines.extend(s.normal_dump.iter().cloned());
     }
     lines
 }
