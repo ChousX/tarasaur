@@ -49,26 +49,35 @@ fn sdf_offset_for(slot: u32) -> u32 {
     return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
 }
 
-// Two bytes per voxel: the palette id, then the distance to the nearest
-// material boundary (see field/material.rs). Element e therefore starts at
-// byte 2e, so two elements share a word.
-fn sample_material(material_base: u32, elem_idx: u32) -> vec2<u32> {
-    let elem = material_base + elem_idx;
-    let word = material_buffer[elem / 2u];
-    let shift = (elem % 2u) * 16u;
-    return vec2<u32>((word >> shift) & 0xFFu, (word >> (shift + 8u)) & 0xFFu);
+// Material bytes are planar within a slot: every id, then, where the
+// arena carries them, every boundary distance (see field/material.rs).
+// So an id word still holds four ids, as it did before distances existed.
+fn material_byte(byte_idx: u32) -> u32 {
+    return (material_buffer[byte_idx / 4u] >> ((byte_idx % 4u) * 8u)) & 0xFFu;
+}
+
+// First byte of `slot`'s material voxels.
+fn material_base_for(slot: u32) -> u32 {
+    return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size
+        * uniforms.material_stride;
 }
 
 fn sample_material_id(material_base: u32, elem_idx: u32) -> u32 {
-    return sample_material(material_base, elem_idx).x;
+    return material_byte(material_base + elem_idx);
 }
 
 // The boundary distance at texel `t`, in world units. Unlike the SDF this
 // needs no seam-rank rescale: it is stored in world units everywhere, so an
-// apron texel from another LOD already means the same thing.
+// apron texel from another LOD already means the same thing. An arena that
+// carries no distances reads as "no boundary near", which makes the blend
+// below fall back to weighting the corners, as it did before.
 fn material_distance_at(material_base: u32, t: vec3<u32>) -> f32 {
-    let m = sample_material(material_base, flatten_sdf_idx(t, uniforms.texture_size));
-    return f32(m.y) / 255.0 * MATERIAL_BAND;
+    if (uniforms.material_stride < 2u) {
+        return MATERIAL_BAND;
+    }
+    let elems = uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
+    let b = material_byte(material_base + elems + flatten_sdf_idx(t, uniforms.texture_size));
+    return f32(b) / 255.0 * MATERIAL_BAND;
 }
 
 fn cell_offset_for(chunk_idx: u32) -> u32 {
@@ -620,6 +629,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cmeta = chunk_meta[real_slot];
     init_seams(cmeta.seam_ranks);
     let sdf_base = sdf_offset_for(real_slot);
+    let material_base = material_base_for(real_slot);
     let vbase = slot_vertex_base[real_slot];
     let idx_base = vbase * 18u;
 
@@ -648,13 +658,13 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let p_lo = texel_pos(lo);
         let span = texel_pos(lo + step) - p_lo; // 0 on flattened axes
         let frac = select(vec3<f32>(0.0), (vert_pos - p_lo) / span, span > vec3<f32>(0.0));
-        let blend = tally_corner_materials(sdf_base, lo, step, frac);
+        let blend = tally_corner_materials(material_base, lo, step, frac);
         // Seam vertices, and vertices next to the last cell row (stretched
         // to a coarser neighbour's spacing), can put their triangles past
         // the neighbourhood uniform_material_near checks.
         let uniform_mat = own_cell && blend.id_a == blend.id_b
             && all(id < vec3<u32>(uniforms.cell_count - 2u))
-            && uniform_material_near(sdf_base, vert_pos, blend.id_a);
+            && uniform_material_near(material_base, vert_pos, blend.id_a);
 
         vertex_buffer[vert_idx] = Vertex(
             vec4<f32>(world_pos, pack_material_a(blend.id_a, blend.weight_u8, uniform_mat, macro_noise(world_pos))),

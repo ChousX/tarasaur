@@ -55,7 +55,7 @@ pub fn pass1_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(3, ShaderStages::COMPUTE, false), // chunk_counts: per-chunk atomics
         storage_buffer_entry(4, ShaderStages::COMPUTE | ShaderStages::VERTEX, false),
         storage_buffer_entry(5, ShaderStages::COMPUTE, false),
-        uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(16)),
+        uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(32)), // BatchUniforms
         storage_buffer_entry(7, ShaderStages::COMPUTE, true),
         storage_buffer_entry(8, ShaderStages::COMPUTE, true),
         storage_buffer_entry(9, ShaderStages::COMPUTE, true),
@@ -75,7 +75,7 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(3, ShaderStages::COMPUTE, false),
         storage_buffer_entry(4, ShaderStages::COMPUTE, false),
         storage_buffer_entry(5, ShaderStages::COMPUTE | ShaderStages::VERTEX, false),
-        uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(16)),
+        uniform_buffer_entry(6, ShaderStages::COMPUTE, NonZeroU64::new(32)), // BatchUniforms
         storage_buffer_entry(7, ShaderStages::COMPUTE, true), // chunk_meta
         storage_buffer_entry(8, ShaderStages::COMPUTE, true), // slot_vertex_base
         storage_buffer_entry(9, ShaderStages::COMPUTE, true), // slot_vertex_count
@@ -106,7 +106,7 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(0, ShaderStages::FRAGMENT, true), // chunk_meta
         storage_buffer_entry(1, ShaderStages::FRAGMENT, true), // visibility_mask_buffer
         storage_buffer_entry(2, ShaderStages::FRAGMENT, true), // chunk_has_mask_buffer
-        uniform_buffer_entry(3, ShaderStages::FRAGMENT, NonZeroU64::new(16)), // BatchUniforms
+        uniform_buffer_entry(3, ShaderStages::FRAGMENT, NonZeroU64::new(32)), // BatchUniforms
         storage_buffer_entry(4, ShaderStages::FRAGMENT, true), // material_buffer (id + distance bytes in u32 words)
         storage_buffer_entry(5, ShaderStages::FRAGMENT, true), // slot_sub_buffer: [slot] -> SubSurface
     ]

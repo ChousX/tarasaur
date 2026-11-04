@@ -45,6 +45,26 @@ use std::marker::PhantomData;
 /// inside what a blend needs.
 pub const MATERIAL_BAND: f32 = 2.5;
 
+/// Whether an arena at `lod` carries material boundary distances.
+///
+/// They buy the least where the voxels are already small. Measured
+/// against the generator, the material error without them is 0.78% of
+/// surface points at `High` but 3.0% at `Low` and 17.1% at `Lowest`, and
+/// `High` is also the arena with the most vertices and the most screen
+/// coverage, so it pays the most for them and gains the least. Dropping
+/// them there returns that arena to exactly its old layout and cost.
+#[must_use]
+pub const fn keeps_material_distance(lod: LOD) -> bool {
+    !matches!(lod, LOD::High)
+}
+
+/// Bytes an arena stores per material voxel: the id, and the boundary
+/// distance where [`keeps_material_distance`] holds.
+#[must_use]
+pub const fn material_elem_bytes(lod: LOD) -> u32 {
+    if keeps_material_distance(lod) { 2 } else { 1 }
+}
+
 /// One voxel: the palette layer in the low byte, and in the high byte the
 /// distance to the nearest material boundary (see [`quantize_material_distance`]).
 pub type MaterialVoxel = u16;
@@ -158,6 +178,20 @@ impl<M: VoxelMaterial> VoxelField for MaterialField<M> {
     type Value = M;
     type Elem = MaterialVoxel;
     const GPU: GpuChannel = GpuChannel::Material;
+
+    /// Planar within a chunk: every id, then every distance. Interleaved,
+    /// one word would hold two voxels; planar it holds four ids, which is
+    /// the density the ids had before they carried a distance at all, and
+    /// the distances get their own four-per-word runs. Almost every cell
+    /// is one material and reads only ids, so that is the fetch to keep
+    /// dense. An arena that carries no distances uploads the first half
+    /// alone (see [`keeps_material_distance`]).
+    fn gpu_bytes(vol: &[Self::Elem]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(vol.len().saturating_mul(2));
+        out.extend(vol.iter().copied().map(material_id));
+        out.extend(vol.iter().copied().map(material_distance_byte));
+        out
+    }
 
     /// The id is categorical, so it takes the nearest voxel's; the distance
     /// is a smooth quantity and interpolates, which is the whole point of

@@ -131,7 +131,7 @@ use tarasaur::{
     },
     field::{
         Field, LOD, MaterialField, MaterialVoxel, SDF, SDF_BAND, VisibilityField, VoxelField,
-        VoxelMaterial, material_id,
+        VoxelMaterial, material_id, pack_material,
         editor::{
             SdfCsgSphere, SdfSculptOp, SdfSculptSphere, VisibilityCsgBox, VisibilityCsgSphere,
             WorldEditor,
@@ -2030,8 +2030,9 @@ fn read_back_slots(
             continue;
         };
         let padded = slot.padded_size;
-        // Two bytes per voxel: the palette id, then its boundary distance.
-        let bytes = u64::from(padded).pow(3).saturating_mul(2);
+        let stride = slot.stride;
+        // Planar per slot: every id, then every distance where it has them.
+        let bytes = u64::from(padded).pow(3).saturating_mul(u64::from(stride));
         let readback = device.create_buffer(&BufferDescriptor {
             label: Some("bench_material_readback"),
             size: bytes,
@@ -2058,12 +2059,28 @@ fn read_back_slots(
                         for z in 0..n {
                             for y in 0..n {
                                 for x in 0..n {
-                                    let at = flatten_cube(x, y, z, padded).saturating_mul(2);
-                                    let got = gpu
-                                        .get(at..at.saturating_add(2))
-                                        .and_then(|b| b.try_into().ok())
-                                        .map(u16::from_le_bytes);
-                                    let want = req.expected.get(flatten_cube(x, y, z, n)).copied();
+                                    let at = flatten_cube(x, y, z, padded);
+                                    let elems = usize_from(padded).pow(3);
+                                    let id = gpu.get(at).copied();
+                                    let dist = if stride < 2 {
+                                        Some(u8::MAX)
+                                    } else {
+                                        gpu.get(at.saturating_add(elems)).copied()
+                                    };
+                                    let got = id.zip(dist).map(|(i, d)| pack_material(i, d));
+                                    // An arena without distances keeps only
+                                    // the ids, so compare only those.
+                                    let want = req
+                                        .expected
+                                        .get(flatten_cube(x, y, z, n))
+                                        .copied()
+                                        .map(|v| {
+                                            if stride < 2 {
+                                                pack_material(material_id(v), u8::MAX)
+                                            } else {
+                                                v
+                                            }
+                                        });
                                     if got != want {
                                         wrong = wrong.saturating_add(1);
                                     }

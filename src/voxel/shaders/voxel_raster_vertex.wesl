@@ -84,27 +84,37 @@ fn voxel_vertex(input: VertexInput) -> VertexOutput {
 
 // --- Material ids ---
 
-// Two bytes per voxel: the palette id, then the distance to the nearest
-// material boundary (see field/material.rs).
-fn sample_material(slot: u32, coord: vec3<i32>) -> vec2<u32> {
+// Material bytes are planar within a slot: every id, then, where the arena
+// carries them, every boundary distance (see field/material.rs). An id word
+// still holds four ids, as it did before distances existed.
+fn material_elem(slot: u32, coord: vec3<i32>) -> vec2<u32> {
     let ts = vis_uniforms.texture_size;
     let c = vec3<u32>(clamp(coord, vec3<i32>(0), vec3<i32>(i32(ts) - 1)));
-    let elem = slot * ts * ts * ts + flatten_sdf_idx(c, ts);
-    let word = material_buffer[elem / 2u];
-    let shift = (elem % 2u) * 16u;
-    return vec2<u32>((word >> shift) & 0xFFu, (word >> (shift + 8u)) & 0xFFu);
+    let elems = ts * ts * ts;
+    return vec2<u32>(slot * elems * vis_uniforms.material_stride, flatten_sdf_idx(c, ts));
+}
+
+fn material_byte(byte_idx: u32) -> u32 {
+    return (material_buffer[byte_idx / 4u] >> ((byte_idx % 4u) * 8u)) & 0xFFu;
 }
 
 fn sample_material_id(slot: u32, coord: vec3<i32>) -> u32 {
-    return sample_material(slot, coord).x;
+    let e = material_elem(slot, coord);
+    return material_byte(e.x + e.y);
 }
 
 // The boundary distance at `coord`, in world units. Stored in world units
 // precisely so this stage needs nothing it does not have: there are no seam
 // ranks in group 3, so a voxel-unit distance could not be read across an
-// LOD seam here at all.
+// LOD seam here at all. An arena that carries none reads as "no boundary
+// near", which makes the blend fall back to weighting the corners.
 fn sample_material_distance(slot: u32, coord: vec3<i32>) -> f32 {
-    return f32(sample_material(slot, coord).y) / 255.0 * MATERIAL_BAND;
+    if (vis_uniforms.material_stride < 2u) {
+        return MATERIAL_BAND;
+    }
+    let ts = vis_uniforms.texture_size;
+    let e = material_elem(slot, coord);
+    return f32(material_byte(e.x + ts * ts * ts + e.y)) / 255.0 * MATERIAL_BAND;
 }
 
 struct FragBlend {

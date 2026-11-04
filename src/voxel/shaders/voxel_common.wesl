@@ -19,10 +19,15 @@ fn flatten_sdf_idx(coord: vec3<u32>, texture_size: u32) -> u32 {
 
 // One arena's sizes (see make_batch_uniform_buffer in voxel/util.rs).
 struct BatchUniforms {
-    cell_count: u32,     // cells per chunk edge: voxels + 1
-    texture_size: u32,   // padded voxels per edge: voxels + 2
-    wg_per_chunk_z: u32, // pass1's z workgroups per chunk
-    voxel_size: f32,     // world units, constant within an arena (one LOD)
+    cell_count: u32,       // cells per chunk edge: voxels + 1
+    texture_size: u32,     // padded voxels per edge: voxels + 2
+    wg_per_chunk_z: u32,   // pass1's z workgroups per chunk
+    voxel_size: f32,       // world units, constant within an arena (one LOD)
+    material_stride: u32,  // material bytes per voxel: 2 with distances, else 1
+    // Scalars, not a vec3: a vec3 would align to 16 and make the struct 48.
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 // Per slot (see ChunkMeta in voxel/arena.rs).

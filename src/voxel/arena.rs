@@ -93,6 +93,7 @@ fn max_chunks(
     total_cells: u32,
     sdf_elems_per_chunk: u32,
     budget_cells_per_chunk: u32,
+    material_stride: u32,
 ) -> u32 {
     let limits = render_device.limits();
     let limit = limits
@@ -103,7 +104,8 @@ fn max_chunks(
         / 10;
 
     let sdf_bytes = u64::from(sdf_elems_per_chunk).saturating_mul(2); // snorm16
-    let material_bytes = u64::from(sdf_elems_per_chunk).saturating_mul(2); // id + distance
+    // Ids, and distances after them where this arena carries them.
+    let material_bytes = u64::from(sdf_elems_per_chunk).saturating_mul(u64::from(material_stride));
     let vertex_bytes = u64::from(budget_cells_per_chunk).saturating_mul(VERTEX_BYTES);
     let index_bytes = u64::from(budget_cells_per_chunk)
         .saturating_mul(u64::from(INDICES_PER_CELL))
@@ -217,6 +219,8 @@ pub struct VoxelChunkArena {
     pub texture_size: u32,        // padded SDF size, fixed for this LOD bucket
     pub total_cells: u32,         // cell_count^3
     pub sdf_elems_per_chunk: u32, // texture_size^3
+    /// Material bytes per voxel here, 1 or 2 (`material_elem_bytes`).
+    pub material_stride: u32,
     pub budget_cells_per_chunk: u32, // average vertex/index budget per chunk (ACTIVE_FRACTION_ESTIMATE * total_cells)
 
     pub sdf_buffer: Buffer,
@@ -288,6 +292,8 @@ struct ArenaSizes {
     budget_cells_per_chunk: u32,
     max_chunks: u32,
     scratch_chunks: u32,
+    /// Material bytes per voxel here, 1 or 2 (`material_elem_bytes`).
+    material_stride: u32,
 }
 
 impl ArenaSizes {
@@ -296,6 +302,7 @@ impl ArenaSizes {
         max_buffer_bytes: u64,
         cell_count: u32,
         texture_size: u32,
+        material_stride: u32,
     ) -> Self {
         let total_cells = cell_count.saturating_pow(3);
         let sdf_elems_per_chunk = texture_size.saturating_pow(3);
@@ -309,6 +316,7 @@ impl ArenaSizes {
             total_cells,
             sdf_elems_per_chunk,
             budget_cells_per_chunk,
+            material_stride,
         );
         // Per-dispatch scratch, indexed by position in the dispatch, not slot:
         // only chunks re-meshed this frame need flags and offsets. A dispatch
@@ -332,6 +340,7 @@ impl ArenaSizes {
             budget_cells_per_chunk,
             max_chunks,
             scratch_chunks,
+            material_stride,
         }
     }
 }
@@ -391,7 +400,7 @@ impl ArenaBuffers {
             ),
             material: dev.storage(
                 "arena_material_buffer",
-                per_chunk(sdf_elems.saturating_mul(2)), // id byte + distance byte
+                per_chunk(sdf_elems.saturating_mul(u64::from(sizes.material_stride))),
 
                 STORAGE_DST | BufferUsages::COPY_SRC,
             ),
@@ -519,6 +528,7 @@ fn batch_uniform_buffer(
         sizes.texture_size,
         wg_size,
         voxel_size,
+        sizes.material_stride,
     )
 }
 
@@ -588,8 +598,15 @@ impl VoxelChunkArena {
         max_buffer_bytes: u64,
         cell_count: u32,
         texture_size: u32,
+        material_stride: u32,
     ) -> Self {
-        let sizes = ArenaSizes::new(render_device, max_buffer_bytes, cell_count, texture_size);
+        let sizes = ArenaSizes::new(
+            render_device,
+            max_buffer_bytes,
+            cell_count,
+            texture_size,
+            material_stride,
+        );
         let buffers = ArenaBuffers::new(render_device, &sizes);
         let [pass1_bind_group, pass3_bind_group, raster_chunk_bind_group] =
             arena_bind_groups(render_device, layouts, &buffers);
@@ -623,6 +640,7 @@ impl VoxelChunkArena {
             texture_size,
             total_cells: sizes.total_cells,
             sdf_elems_per_chunk: sizes.sdf_elems_per_chunk,
+            material_stride: sizes.material_stride,
             budget_cells_per_chunk: sizes.budget_cells_per_chunk,
             sdf_buffer: sdf,
             active_cells_buffer: active_cells,

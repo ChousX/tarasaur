@@ -18,13 +18,16 @@ use crate::{
 
 /// Where a resident chunk's materials live on the GPU.
 pub struct MaterialSlot {
-    /// The arena's material buffer: per voxel a `u8` palette id, then a
-    /// `u8` distance to the nearest material boundary (`COPY_SRC`).
+    /// The arena's material buffer. Planar within the slot: every voxel's
+    /// `u8` palette id, then, where `stride` is 2, every voxel's `u8`
+    /// distance to the nearest material boundary (`COPY_SRC`).
     pub buffer: Buffer,
-    /// Byte offset of the chunk's padded volume in `buffer`.
+    /// Byte offset of the chunk's material bytes in `buffer`.
     pub offset: u64,
     /// Edge of the padded volume: the chunk's voxels plus the apron.
     pub padded_size: u32,
+    /// Material bytes per voxel here, 1 or 2 (`material_elem_bytes`).
+    pub stride: u32,
 }
 
 /// One arena's mesh output, and where each of its chunks' meshes lie in it.
@@ -163,12 +166,13 @@ impl ArenaInspector<'_> {
             .arenas
             .get(VoxelChunkArenaSet::lod_index(lod))?
             .get(found.arena_idx)?;
-        // Two bytes per voxel: the palette id, then its boundary distance.
-        let bytes = u64::from(arena.sdf_elems_per_chunk).saturating_mul(2);
+        let bytes =
+            u64::from(arena.sdf_elems_per_chunk).saturating_mul(u64::from(arena.material_stride));
         Some(MaterialSlot {
             buffer: arena.material_buffer.clone(),
             offset: u64::from(found.slot).saturating_mul(bytes),
             padded_size: arena.texture_size,
+            stride: arena.material_stride,
         })
     }
 

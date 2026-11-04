@@ -24,7 +24,7 @@ use bevy::{
 
 use crate::{
     chunk::CHUNK_SIZE,
-    field::{LOD, VoxelField},
+    field::{LOD, VoxelField, material_elem_bytes},
     voxel::extract::ExtractedChunkField,
     voxel::{
         arena::{
@@ -523,6 +523,7 @@ pub fn prepare_shape_upload<F: VoxelField>(
                 max_buffer_bytes,
                 cell_count,
                 size,
+                material_elem_bytes(lod),
             )
         }) else {
             arena_set.deferred.insert(key);
@@ -795,11 +796,17 @@ pub fn prepare_material_upload<F: VoxelField>(
         if !arena.can_mark_dirty(slot) {
             continue; // no scratch left this frame; retried next frame
         }
-        // Two bytes per voxel: the palette id, then its boundary distance.
+        // Planar per slot: every id, then every distance. An arena without
+        // distances takes the ids alone and leaves the rest of `up.data`.
+        let elems = usize_from(arena.sdf_elems_per_chunk);
+        let stride = usize_from(arena.material_stride);
         let offset = u64::from(slot)
             .wrapping_mul(u64::from(arena.sdf_elems_per_chunk))
-            .wrapping_mul(2);
-        render_queue.write_buffer(&arena.material_buffer, offset, &up.data);
+            .wrapping_mul(u64::from(arena.material_stride));
+        let Some(data) = up.data.get(..elems.saturating_mul(stride)) else {
+            continue;
+        };
+        render_queue.write_buffer(&arena.material_buffer, offset, data);
         arena.mark_dirty(slot); // pass3 bakes materials into vertices
         if let Some(e) = up.extracted {
             commands.entity(e).despawn();

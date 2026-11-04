@@ -26,8 +26,9 @@ pub(crate) mod systems;
 mod visibility;
 pub use lod::{LOD, MaxEditLod, TargetLOD};
 pub use material::{
-    MATERIAL_BAND, MaterialField, MaterialVoxel, VoxelMaterial, material_distance,
-    material_distance_byte, material_id, pack_material, quantize_material_distance,
+    MATERIAL_BAND, MaterialField, MaterialVoxel, VoxelMaterial, keeps_material_distance,
+    material_distance, material_distance_byte, material_elem_bytes, material_id, pack_material,
+    quantize_material_distance,
 };
 pub(crate) use plugin::register_edits;
 pub use plugin::{FieldSet, FieldsPlugin};

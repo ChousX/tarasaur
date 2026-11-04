@@ -28,6 +28,11 @@ struct BatchUniforms {
     texture_size: u32,
     wg_per_chunk_z: u32,
     voxel_size: f32,
+    /// Bytes per material voxel in this arena, 1 or 2: 2 where the arena
+    /// carries boundary distances after its ids (see `material_elem_bytes`).
+    material_stride: u32,
+    /// A uniform struct rounds up to its 16-byte alignment.
+    _pad: [u32; 3],
 }
 
 #[must_use]
@@ -38,6 +43,7 @@ pub fn make_batch_uniform_buffer(
     texture_size: u32,
     wg_size: u32,
     voxel_size: f32,
+    material_stride: u32,
 ) -> Buffer {
     render_device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some(label),
@@ -46,6 +52,8 @@ pub fn make_batch_uniform_buffer(
             texture_size,
             wg_per_chunk_z: cell_count.div_ceil(wg_size),
             voxel_size,
+            material_stride,
+            _pad: [0; 3],
         }),
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
     })
