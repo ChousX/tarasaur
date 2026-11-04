@@ -199,14 +199,13 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
         vec3<u32>(0u, 1u, 1u), vec3<u32>(1u, 1u, 1u)
     );
 
+    // Ids first, and stop there if they agree: almost every cell is one
+    // material throughout, and that case needs no distances at all.
     var corner_id: array<u32, 8>;
-    var corner_d: array<f32, 8>;
     var uniq_ids: array<u32, 8>;
     var uniq_count = 0u;
     for (var i = 0u; i < 8u; i++) {
-        let t = lo + corners[i] * step;
-        corner_id[i] = sample_material_id(material_base, flatten_sdf_idx(t, uniforms.texture_size));
-        corner_d[i] = material_distance_at(material_base, t);
+        corner_id[i] = sample_material_id(material_base, flatten_sdf_idx(lo + corners[i] * step, uniforms.texture_size));
         var found = false;
         for (var j = 0u; j < uniq_count; j++) {
             found = found || (uniq_ids[j] == corner_id[i]);
@@ -218,6 +217,11 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
     }
     if (uniq_count == 1u) {
         return MaterialBlend(corner_id[0], corner_id[0], 255u);
+    }
+
+    var corner_d: array<f32, 8>;
+    for (var i = 0u; i < 8u; i++) {
+        corner_d[i] = material_distance_at(material_base, lo + corners[i] * step);
     }
 
     // Every voxel carries the distance to the nearest material boundary, so
