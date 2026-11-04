@@ -202,31 +202,6 @@ impl<M: VoxelMaterial> VoxelField for MaterialField<M> {
         vol.iter().copied().map(material_id).collect()
     }
 
-    /// The id is categorical, so it takes the nearest voxel's; the distance
-    /// is a smooth quantity and interpolates, which is the whole point of
-    /// keeping it. Interpolating it across a boundary is sound: it is a
-    /// magnitude, continuous through zero whichever ids sit either side.
-    fn sample_apron(data: &[Self::Elem], size: u32, x: f32, y: f32, z: f32) -> Self::Elem {
-        let nearest = crate::field::nearest_neighbor_sample(data, size, x, y, z);
-        let at = |x: f32, y: f32, z: f32| {
-            f32::from(material_distance_byte(
-                crate::field::nearest_neighbor_sample(data, size, x, y, z),
-            ))
-        };
-        let (fx, fy, fz) = (x.floor(), y.floor(), z.floor());
-        let (tx, ty, tz) = (x - fx, y - fy, z - fz);
-        let lerp = |a: f32, b: f32, t: f32| (b - a).mul_add(t, a);
-        let edge = |z: f32| {
-            let y0 = lerp(at(fx, fy, z), at(fx + 1.0, fy, z), tx);
-            let y1 = lerp(at(fx, fy + 1.0, z), at(fx + 1.0, fy + 1.0, z), tx);
-            lerp(y0, y1, ty)
-        };
-        let d = lerp(edge(fz), edge(fz + 1.0), tz).round().clamp(0.0, 255.0);
-        pack_material(
-            material_id(nearest),
-            u8::try_from(u32_from_f32(d)).unwrap_or(u8::MAX),
-        )
-    }
 
     fn new_for_lod(lod: LOD) -> Self {
         Self::new(lod)
