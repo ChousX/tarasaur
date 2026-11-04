@@ -119,8 +119,8 @@ use bevy::{
     winit::WinitPlugin,
 };
 use common::{
-    TerrainMaterial, register_terrain, render_plugin, setup_terrain_palette, terrain_height,
-    terrain_materials,
+    TerrainMaterial, determine_material, register_terrain, render_plugin, setup_terrain_palette,
+    terrain_height, terrain_materials,
 };
 use renderdoc::{RenderDoc, V141};
 use tarasaur::{
@@ -2243,10 +2243,76 @@ struct MeshReport {
     ranks: HashMap<IVec3, [u32; 2]>,
     /// Vertices within `WATCH_RADIUS` of a `MeshProbeState::watch` point.
     near: Vec<NearVertex>,
+    /// See `MaterialTally`.
+    material: MaterialTally,
 }
 
 /// How close to a watched point a vertex is recorded, in world units.
 const WATCH_RADIUS: f32 = 1.0;
+
+/// Where a vertex sits relative to its chunk's faces, in its own voxels:
+/// the apron only reaches the first rows, so a seam defect shows there.
+const MATERIAL_BUCKETS: [(&str, f32); 3] = [
+    ("on the chunk face (<=1 voxel)", 1.0),
+    ("near it (<=2 voxels)", 2.0),
+    ("interior (>2 voxels)", f32::INFINITY),
+];
+
+/// Vertices compared against the generator's material, and how many differ.
+#[derive(Default, Clone, Copy)]
+struct MatCount {
+    compared: usize,
+    wrong: usize,
+}
+
+impl MatCount {
+    const fn add(&mut self, other: Self) {
+        self.compared = self.compared.saturating_add(other.compared);
+        self.wrong = self.wrong.saturating_add(other.wrong);
+    }
+
+    fn pct(self) -> f32 {
+        if self.compared == 0 {
+            return 0.0;
+        }
+        100.0 * f32_from_usize(self.wrong) / f32_from_usize(self.compared)
+    }
+}
+
+/// Material mismatch by LOD, by whether the chunk touches a LOD seam, and
+/// by distance to the chunk's faces (`MATERIAL_BUCKETS`).
+#[derive(Default, Clone)]
+struct MaterialTally {
+    cells: [[[MatCount; 3]; 2]; LOD::COUNT],
+}
+
+impl MaterialTally {
+    fn at(&mut self, lod: LOD, seam: bool, bucket: usize) -> Option<&mut MatCount> {
+        self.cells
+            .get_mut(usize_from(lod.rank()))?
+            .get_mut(usize::from(seam))?
+            .get_mut(bucket)
+    }
+
+    fn get(&self, lod: LOD, seam: bool, bucket: usize) -> MatCount {
+        self.cells
+            .get(usize_from(lod.rank()))
+            .and_then(|s| s.get(usize::from(seam)))
+            .and_then(|b| b.get(bucket))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.cells.iter_mut().zip(&other.cells) {
+            for (mine, theirs) in mine.iter_mut().zip(theirs) {
+                for (mine, theirs) in mine.iter_mut().zip(theirs) {
+                    mine.add(*theirs);
+                }
+            }
+        }
+    }
+}
 
 /// A vertex near a watched point, as the GPU meshed it.
 #[derive(Clone, Copy, Debug)]
@@ -2313,6 +2379,7 @@ impl MeshReport {
         self.world_triangles.extend(part.world_triangles);
         self.ranks.extend(part.ranks);
         self.near.extend(part.near);
+        self.material.merge(&part.material);
         for (m, p) in self.max_off.iter_mut().zip(part.max_off) {
             *m = m.max(p);
         }
@@ -2954,6 +3021,18 @@ impl ArenaBytes<'_> {
                 .checked_add(16)?,
         )
     }
+
+    /// The vertex's material pair, as `pack_material_a`/`pack_material_b`
+    /// wrote it: the two ids and the weight of `id_a`, 0-255. The pair is in
+    /// canonical order (lower id first), so the id actually shown is `id_a`
+    /// when its weight is at least half.
+    fn material(&self, vertex: u32) -> Option<(u8, u8, u8)> {
+        let word = u64::from(vertex).checked_mul(MESH_VERTEX_BYTES)? / 4;
+        let a = read_u32(self.vertices, word.checked_add(3)?)?;
+        let b = read_u32(self.vertices, word.checked_add(7)?)?;
+        let byte = |v: u32, shift: u32| u8::try_from(v.wrapping_shr(shift) & 0xFF).ok();
+        Some((byte(a, 0)?, byte(b, 0)?, byte(a, 8)?))
+    }
 }
 
 /// The `u32` at word `index`.
@@ -3038,6 +3117,70 @@ impl ChunkMesh {
     }
 }
 
+/// Whether any of the 26 stored ranks differs from the chunk's own: the
+/// mesher's own test for "this chunk touches a LOD seam".
+fn touches_seam(ranks: [u32; 2]) -> bool {
+    let own = rank_at(ranks, IVec3::ZERO);
+    (0..27).any(|k| {
+        let d = IVec3::new(k % 3, (k / 3) % 3, k / 9).saturating_sub(IVec3::ONE);
+        d != IVec3::ZERO && rank_at(ranks, d) != own
+    })
+}
+
+/// The rank `ranks` holds for the neighbour at `offset`.
+fn rank_at(ranks: [u32; 2], offset: IVec3) -> u32 {
+    let k = offset
+        .saturating_add(IVec3::ONE)
+        .dot(IVec3::new(1, 3, 9))
+        .unsigned_abs();
+    ranks
+        .get(usize_from(k / 16))
+        .copied()
+        .unwrap_or(0)
+        .wrapping_shr((k % 16).wrapping_mul(2))
+        & 3
+}
+
+/// Compares the material the mesher gave this vertex against the one the
+/// generator defines at that point, and files it by LOD, by whether the
+/// chunk touches a LOD seam, and by how close the vertex is to a chunk
+/// face. Quantising a material boundary onto the voxel grid is expected
+/// and does not depend on where the vertex sits in its chunk, so a bucket
+/// that is worse than the chunk's interior is a seam defect, not sampling.
+fn tally_material(
+    chunk: &ChunkMesh,
+    mesh: &ArenaBytes,
+    vertex: u32,
+    local: Vec3,
+    ranks: Option<[u32; 2]>,
+    report: &mut MeshReport,
+) {
+    let Some((id_a, id_b, weight_a)) = mesh.material(vertex) else {
+        return;
+    };
+    let Some(ranks) = ranks else {
+        return;
+    };
+    let shown = if weight_a >= 128 { id_a } else { id_b };
+    let p = chunk.pos.as_vec3() * CHUNK_SIZE + local * chunk.lod.voxel_size();
+    let truth = determine_material(terrain_height(p.x, p.z), p.y).to_id();
+    let n = f32_from_u32(chunk.lod.size());
+    let to_face = [local.x, local.y, local.z]
+        .into_iter()
+        .map(|c| c.min(n - c))
+        .fold(f32::INFINITY, f32::min);
+    let bucket = MATERIAL_BUCKETS
+        .iter()
+        .position(|&(_, limit)| to_face <= limit)
+        .unwrap_or(2);
+    if let Some(cell) = report.material.at(chunk.lod, touches_seam(ranks), bucket) {
+        cell.compared = cell.compared.saturating_add(1);
+        if shown != truth {
+            cell.wrong = cell.wrong.saturating_add(1);
+        }
+    }
+}
+
 /// `ranks`: the chunk's seam ranks as meshed, to classify pinned vertices.
 fn check_vertices(
     chunk: &ChunkMesh,
@@ -3054,6 +3197,7 @@ fn check_vertices(
         let d = heightfield_distance(p).abs() / voxel;
         let local = (p - chunk.pos.as_vec3() * CHUNK_SIZE) / voxel;
         let pinned = ranks.is_some_and(|r| seam::pinned_cell(r, local).is_some());
+        tally_material(chunk, mesh, v, local, ranks, report);
         if watch.iter().any(|w| w.distance(p) <= WATCH_RADIUS) {
             let normal_deg = mesh.normal(v).map_or(f32::NAN, |n| {
                 n.normalize_or_zero()
@@ -3514,6 +3658,38 @@ fn chunks_at_vertex(pos: IVec3, local: Vec3, n: f32) -> Vec<IVec3> {
     out
 }
 
+/// The vertex materials that disagree with the generator, by LOD and by
+/// where the vertex sits. Boundary quantisation is independent of where a
+/// vertex sits in its chunk, so the chunk-face rows against the interior
+/// row say whether the seam path costs material correctness on top of it.
+fn material_lines(r: &MeshReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    for &lod in &LOD::ALL {
+        let total: usize = (0..2)
+            .flat_map(|s| (0..3).map(move |b| (s == 1, b)))
+            .map(|(seam, b)| r.material.get(lod, seam, b).compared)
+            .sum();
+        if total == 0 {
+            continue;
+        }
+        lines.push(format!(
+            "  material vs the generator, {lod:?} ({total} vertices):"
+        ));
+        for (seam, label) in [(true, "seam chunks"), (false, "no seam    ")] {
+            let row: Vec<String> = MATERIAL_BUCKETS
+                .iter()
+                .enumerate()
+                .map(|(b, (name, _))| {
+                    let c = r.material.get(lod, seam, b);
+                    format!("{name}: {:.2}% of {}", c.pct(), c.compared)
+                })
+                .collect();
+            lines.push(format!("    {label}  {}", row.join("; ")));
+        }
+    }
+    lines
+}
+
 /// Chunks holding a seam rank that disagrees with the LOD a neighbour is
 /// actually meshed at. The mesher rescales that neighbour's apron values by
 /// the rank it stored, so a disagreement means a whole apron region is read
@@ -3659,6 +3835,7 @@ fn pinned_report_lines(r: &MeshReport) -> Vec<String> {
         per_lod(r.max_off_unpinned)
     ));
     lines.extend(stale_rank_lines(r));
+    lines.extend(material_lines(r));
     for f in r.worst_unpinned.iter().flatten() {
         // Which of the stitch's cells, if any, holds it: the first thing
         // to know about a near-threshold vertex that is not pinned.
