@@ -59,13 +59,18 @@ const MATERIAL_BAND: f32 = 2.5;
 const MATERIAL_BLEND_WORLD: f32 = 0.25;
 
 // Trilinear interpolation of 8 cell corners, corner i being (i&1, i>>1&1,
-// i>>2&1), at `f` within the cell.
-fn trilinear8(v: array<f32, 8>, f: vec3<f32>) -> f32 {
-    var c = v;
-    let x00 = mix(c[0], c[1], f.x);
-    let x10 = mix(c[2], c[3], f.x);
-    let x01 = mix(c[4], c[5], f.x);
-    let x11 = mix(c[6], c[7], f.x);
+// i>>2&1), at `f` within the cell. Eight scalars rather than an array: an
+// array parameter is passed by value and wants a mutable copy to index,
+// which puts it in scratch memory, and this is per pixel.
+fn trilinear8(
+    c0: f32, c1: f32, c2: f32, c3: f32,
+    c4: f32, c5: f32, c6: f32, c7: f32,
+    f: vec3<f32>,
+) -> f32 {
+    let x00 = mix(c0, c1, f.x);
+    let x10 = mix(c2, c3, f.x);
+    let x01 = mix(c4, c5, f.x);
+    let x11 = mix(c6, c7, f.x);
     return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 

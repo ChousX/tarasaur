@@ -244,11 +244,18 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
     // Two labels is the overwhelming case, and there the second field is
     // the negation of the first, so one interpolation answers both.
     if (uniq_count == 2u) {
-        var phi: array<f32, 8>;
-        for (var i = 0u; i < 8u; i++) {
-            phi[i] = select(-corner_d[i], corner_d[i], corner_id[i] == uniq_ids[0]);
-        }
-        let v = trilinear8(phi, frac);
+        let a0 = uniq_ids[0];
+        let v = trilinear8(
+            select(-corner_d[0], corner_d[0], corner_id[0] == a0),
+            select(-corner_d[1], corner_d[1], corner_id[1] == a0),
+            select(-corner_d[2], corner_d[2], corner_id[2] == a0),
+            select(-corner_d[3], corner_d[3], corner_id[3] == a0),
+            select(-corner_d[4], corner_d[4], corner_id[4] == a0),
+            select(-corner_d[5], corner_d[5], corner_id[5] == a0),
+            select(-corner_d[6], corner_d[6], corner_id[6] == a0),
+            select(-corner_d[7], corner_d[7], corner_id[7] == a0),
+            frac,
+        );
         let w = u32(clamp(material_blend_weight(v, -v) * 255.0, 0.0, 255.0));
         if (uniq_ids[1] < uniq_ids[0]) {
             return MaterialBlend(uniq_ids[1], uniq_ids[0], 255u - w);
@@ -261,11 +268,18 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
     var second = 0u;
     var second_phi = -1.0e30;
     for (var j = 0u; j < uniq_count; j++) {
-        var phi: array<f32, 8>;
-        for (var i = 0u; i < 8u; i++) {
-            phi[i] = select(-corner_d[i], corner_d[i], corner_id[i] == uniq_ids[j]);
-        }
-        let v = trilinear8(phi, frac);
+        let l = uniq_ids[j];
+        let v = trilinear8(
+            select(-corner_d[0], corner_d[0], corner_id[0] == l),
+            select(-corner_d[1], corner_d[1], corner_id[1] == l),
+            select(-corner_d[2], corner_d[2], corner_id[2] == l),
+            select(-corner_d[3], corner_d[3], corner_id[3] == l),
+            select(-corner_d[4], corner_d[4], corner_id[4] == l),
+            select(-corner_d[5], corner_d[5], corner_id[5] == l),
+            select(-corner_d[6], corner_d[6], corner_id[6] == l),
+            select(-corner_d[7], corner_d[7], corner_id[7] == l),
+            frac,
+        );
         if (v > best_phi) {
             second_phi = best_phi;
             second = best;

@@ -131,66 +131,93 @@ fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
     let base = floor(local);
     let ib = vec3<i32>(base);
 
-    // Pass 1: fetch the 8 corner ids only. No float math yet.
-    var corner_ids: array<u32, 8>;
-    for (var i = 0u; i < 8u; i++) {
-        let o = vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
-        corner_ids[i] = sample_material_id(slot, ib + o);
+    // The 8 corner ids. Scalars rather than an array: this runs per pixel,
+    // and an indexable local array sits in scratch memory.
+    let i0 = sample_material_id(slot, ib + vec3<i32>(0, 0, 0));
+    let i1 = sample_material_id(slot, ib + vec3<i32>(1, 0, 0));
+    let i2 = sample_material_id(slot, ib + vec3<i32>(0, 1, 0));
+    let i3 = sample_material_id(slot, ib + vec3<i32>(1, 1, 0));
+    let i4 = sample_material_id(slot, ib + vec3<i32>(0, 0, 1));
+    let i5 = sample_material_id(slot, ib + vec3<i32>(1, 0, 1));
+    let i6 = sample_material_id(slot, ib + vec3<i32>(0, 1, 1));
+    let i7 = sample_material_id(slot, ib + vec3<i32>(1, 1, 1));
+
+    // Early out: all 8 agree, which is true for almost every pixel away
+    // from a material border.
+    if (i0 == i1 && i0 == i2 && i0 == i3 && i0 == i4 && i0 == i5 && i0 == i6 && i0 == i7) {
+        return FragBlend(i0, i0, 1.0);
     }
 
-    // Early out: all 8 corners agree, which is true for almost every pixel
-    // away from a material border. Skips weights, dedupe and both ranking loops.
-    let first = corner_ids[0];
-    var all_same = true;
-    for (var i = 1u; i < 8u; i++) {
-        all_same = all_same && (corner_ids[i] == first);
-    }
-    if (all_same) {
-        return FragBlend(first, first, 1.0);
-    }
-
-    // Pass 2: mixed cell. Each voxel carries the distance to the nearest
-    // material boundary, so give every label present its own signed field
-    // over the cell (+d where the corner holds that label, -d elsewhere),
-    // interpolate those, and take the largest. That is the multiphase
-    // level-set rule: it puts the boundary back inside the voxel instead of
-    // on the grid, and stays well defined where three materials meet.
+    // A mixed cell. Each voxel carries the distance to the nearest material
+    // boundary, so give every label present its own signed field over the
+    // cell (+d where a corner holds that label, -d elsewhere), interpolate,
+    // and take the largest: the multiphase level-set rule, which puts the
+    // boundary back inside the voxel and stays defined where three meet.
     let f = local - base;
+    let d0 = sample_material_distance(slot, ib + vec3<i32>(0, 0, 0));
+    let d1 = sample_material_distance(slot, ib + vec3<i32>(1, 0, 0));
+    let d2 = sample_material_distance(slot, ib + vec3<i32>(0, 1, 0));
+    let d3 = sample_material_distance(slot, ib + vec3<i32>(1, 1, 0));
+    let d4 = sample_material_distance(slot, ib + vec3<i32>(0, 0, 1));
+    let d5 = sample_material_distance(slot, ib + vec3<i32>(1, 0, 1));
+    let d6 = sample_material_distance(slot, ib + vec3<i32>(0, 1, 1));
+    let d7 = sample_material_distance(slot, ib + vec3<i32>(1, 1, 1));
 
+    // Two labels is the overwhelming case: the second field is the negation
+    // of the first, so one interpolation answers both and no list is built.
+    // The first corner id that differs from i0: assigned last wins, so the
+    // lowest-numbered differing corner does.
+    var second_id = i0;
+    second_id = select(second_id, i7, i7 != i0);
+    second_id = select(second_id, i6, i6 != i0);
+    second_id = select(second_id, i5, i5 != i0);
+    second_id = select(second_id, i4, i4 != i0);
+    second_id = select(second_id, i3, i3 != i0);
+    second_id = select(second_id, i2, i2 != i0);
+    second_id = select(second_id, i1, i1 != i0);
+    var only_two = true;
+    only_two = only_two && (i1 == i0 || i1 == second_id);
+    only_two = only_two && (i2 == i0 || i2 == second_id);
+    only_two = only_two && (i3 == i0 || i3 == second_id);
+    only_two = only_two && (i4 == i0 || i4 == second_id);
+    only_two = only_two && (i5 == i0 || i5 == second_id);
+    only_two = only_two && (i6 == i0 || i6 == second_id);
+    only_two = only_two && (i7 == i0 || i7 == second_id);
+    if (only_two) {
+        let v = trilinear8(
+            d0, select(-d1, d1, i1 == i0),
+            select(-d2, d2, i2 == i0), select(-d3, d3, i3 == i0),
+            select(-d4, d4, i4 == i0), select(-d5, d5, i5 == i0),
+            select(-d6, d6, i6 == i0), select(-d7, d7, i7 == i0),
+            f,
+        );
+        return FragBlend(i0, second_id, material_blend_weight(v, -v));
+    }
+
+    // Three or more: rank the labels' fields and take the top two.
     var ids: array<u32, 8>;
     var n = 0u;
-    var d: array<f32, 8>;
+    let corner = array<u32, 8>(i0, i1, i2, i3, i4, i5, i6, i7);
     for (var i = 0u; i < 8u; i++) {
-        let o = vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
-        d[i] = sample_material_distance(slot, ib + o);
         var found = false;
         for (var j = 0u; j < n; j++) {
-            found = found || (ids[j] == corner_ids[i]);
+            found = found || (ids[j] == corner[i]);
         }
-        if (!found) { ids[n] = corner_ids[i]; n += 1u; }
+        if (!found) { ids[n] = corner[i]; n += 1u; }
     }
-
-    // Two labels is the overwhelming case, and there the second field is
-    // the negation of the first, so one interpolation answers both.
-    if (n == 2u) {
-        var phi: array<f32, 8>;
-        for (var i = 0u; i < 8u; i++) {
-            phi[i] = select(-d[i], d[i], corner_ids[i] == ids[0]);
-        }
-        let v = trilinear8(phi, f);
-        return FragBlend(ids[0], ids[1], material_blend_weight(v, -v));
-    }
-
     var best = 0u;
     var best_phi = -1.0e30;
     var second = 0u;
     var second_phi = -1.0e30;
     for (var j = 0u; j < n; j++) {
-        var phi: array<f32, 8>;
-        for (var i = 0u; i < 8u; i++) {
-            phi[i] = select(-d[i], d[i], corner_ids[i] == ids[j]);
-        }
-        let v = trilinear8(phi, f);
+        let l = ids[j];
+        let v = trilinear8(
+            select(-d0, d0, i0 == l), select(-d1, d1, i1 == l),
+            select(-d2, d2, i2 == l), select(-d3, d3, i3 == l),
+            select(-d4, d4, i4 == l), select(-d5, d5, i5 == l),
+            select(-d6, d6, i6 == l), select(-d7, d7, i7 == l),
+            f,
+        );
         if (v > best_phi) {
             second_phi = best_phi;
             second = best;
@@ -201,7 +228,6 @@ fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
             second = j;
         }
     }
-
     return FragBlend(ids[best], ids[second], material_blend_weight(best_phi, second_phi));
 }
 
