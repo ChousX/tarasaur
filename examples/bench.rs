@@ -2152,6 +2152,9 @@ struct MeshProbeState {
     /// open edge beside one of these is a gap, beside anything else the edge
     /// of the loaded world.
     loaded: HashSet<IVec3>,
+    /// Every loaded chunk's LOD, meshed or not: what `seam_lod_ranks`
+    /// would record for it now (see `stale_rank_lines`).
+    loaded_lods: HashMap<IVec3, LOD>,
     /// The frame the current probe was asked for.
     current_frame: u32,
     requested_frame: u32,
@@ -2234,6 +2237,8 @@ struct MeshReport {
     world_triangles: Vec<(IVec3, LOD, [Vec3; 3])>,
     /// See `MeshProbeState::loaded`.
     loaded: HashSet<IVec3>,
+    /// See `MeshProbeState::loaded_lods`.
+    loaded_lods: HashMap<IVec3, LOD>,
     /// Each meshed chunk's seam ranks, as last uploaded.
     ranks: HashMap<IVec3, [u32; 2]>,
     /// Vertices within `WATCH_RADIUS` of a `MeshProbeState::watch` point.
@@ -2326,7 +2331,7 @@ fn drive_mesh_probe(
     bench: Res<Bench>,
     probe: Res<MeshProbe>,
     gap_probes: Res<GapProbes>,
-    chunks: Query<&ChunkPosition, With<LOD>>,
+    chunks: Query<(&ChunkPosition, &LOD)>,
 ) {
     let fly_gap = gap_probes.0
         && bench.phase == Phase::Fly
@@ -2338,7 +2343,8 @@ fn drive_mesh_probe(
     if let Ok(mut s) = probe.0.lock() {
         s.requested = Some(bench.phase);
         s.requested_frame = bench.frame_in_phase;
-        s.loaded = chunks.iter().map(|c| c.0).collect();
+        s.loaded = chunks.iter().map(|(c, _)| c.0).collect();
+        s.loaded_lods = chunks.iter().map(|(c, l)| (c.0, *l)).collect();
         s.exclude = if bench.phase == Phase::Edit {
             let margin = Vec3::splat(EDIT_RADIUS + CHUNK_SIZE);
             overlapping_chunks(edit_target(), margin).collect()
@@ -2397,6 +2403,7 @@ fn read_back_meshes(
                 .map(|(pos, lod, _)| (pos, lod))
                 .collect(),
             loaded: std::mem::take(&mut s.loaded),
+            loaded_lods: std::mem::take(&mut s.loaded_lods),
             ..default()
         };
         let mesh_arenas = arenas.mesh_arenas();
@@ -3507,6 +3514,71 @@ fn chunks_at_vertex(pos: IVec3, local: Vec3, n: f32) -> Vec<IVec3> {
     out
 }
 
+/// Chunks holding a seam rank that disagrees with the LOD a neighbour is
+/// actually meshed at. The mesher rescales that neighbour's apron values by
+/// the rank it stored, so a disagreement means a whole apron region is read
+/// at the wrong scale (and placed at the wrong spacing) until the chunk
+/// re-meshes, which nothing makes it do while its own inputs are unchanged.
+///
+/// Compared against every *loaded* neighbour, meshed or not: the apron
+/// reads a loaded chunk whatever it meshes, so its rank should be its LOD.
+/// An absent neighbour is own-substituted by design and is skipped.
+fn stale_rank_lines(r: &MeshReport) -> Vec<String> {
+    let mut stale: Vec<(IVec3, IVec3, u32, LOD)> = Vec::new();
+    for (&pos, &ranks) in &r.ranks {
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let d = IVec3::new(dx, dy, dz);
+                    if d == IVec3::ZERO {
+                        continue;
+                    }
+                    let at = pos.saturating_add(d);
+                    // A loaded chunk is readable, so its rank is its LOD
+                    // whether or not it meshes anything; an absent one is
+                    // own-substituted by design and is not compared.
+                    let Some(&lod) = r.loaded_lods.get(&at).or_else(|| r.lods.get(&at)) else {
+                        continue;
+                    };
+                    let k = d.saturating_add(IVec3::ONE).dot(IVec3::new(1, 3, 9)).unsigned_abs();
+                    let word = ranks.get(usize_from(k / 16)).copied().unwrap_or(0);
+                    let stored = word.wrapping_shr((k % 16).wrapping_mul(2)) & 3;
+                    if stored != lod.rank() {
+                        stale.push((pos, d, stored, lod));
+                    }
+                }
+            }
+        }
+    }
+    if stale.is_empty() {
+        return vec![
+            "  no chunk holds a seam rank a loaded neighbour disagrees with".to_string(),
+        ];
+    }
+    stale.sort_by_key(|(p, d, _, _)| (p.to_array(), d.to_array()));
+    let chunks: Vec<IVec3> = {
+        let mut c: Vec<IVec3> = stale.iter().map(|(p, ..)| *p).collect();
+        c.dedup();
+        c
+    };
+    let mut lines = vec![format!(
+        "  STALE SEAM RANKS: {} directions over {} chunks hold a rank a loaded neighbour disagrees with; their apron is rescaled by the stored rank, so those regions are read at the wrong scale",
+        stale.len(),
+        chunks.len()
+    )];
+    for (pos, d, stored, lod) in stale.iter().take(12) {
+        lines.push(format!(
+            "    chunk {pos} stored rank {stored} for {},{},{} ({}), which is loaded at {lod:?} ({})",
+            d.x,
+            d.y,
+            d.z,
+            pos.saturating_add(*d),
+            lod.rank()
+        ));
+    }
+    lines
+}
+
 /// For each normal-flagged vertex, the seam ranks every chunk touching it
 /// was meshed against, and where those disagree with the LODs now resident:
 /// the first thing to know about a normal that fires in one run and not the
@@ -3586,6 +3658,7 @@ fn pinned_report_lines(r: &MeshReport) -> Vec<String> {
         "  worst off-surface per LOD, not pinned (voxels): {}",
         per_lod(r.max_off_unpinned)
     ));
+    lines.extend(stale_rank_lines(r));
     for f in r.worst_unpinned.iter().flatten() {
         // Which of the stitch's cells, if any, holds it: the first thing
         // to know about a near-threshold vertex that is not pinned.
@@ -5225,9 +5298,9 @@ mod seam_gpu {
             }
             let world = app.world_mut();
             let mut q = world.query::<(&ChunkPosition, &TargetLOD, Option<&LOD>)>();
-            let chunks: Vec<(IVec3, bool)> = q
+            let chunks: Vec<(IVec3, bool, LOD)> = q
                 .iter(world)
-                .map(|(p, t, l)| (p.0, l == Some(&t.0)))
+                .map(|(p, t, l)| (p.0, l == Some(&t.0), l.copied().unwrap_or(t.0)))
                 .collect();
             // The bench's own "load done" test (`is_idle`), with `resident`
             // for `draws`: the camera needn't see the blocks. A fixed frame
@@ -5257,6 +5330,7 @@ mod seam_gpu {
                 if let Ok(mut s) = probe.0.lock() {
                     s.requested = Some(Phase::Hold);
                     s.loaded = chunks.iter().map(|c| c.0).collect();
+                    s.loaded_lods = chunks.iter().map(|&(p, _, lod)| (p, lod)).collect();
                     s.watch = sites.iter().map(|site| site.vertex).collect();
                 }
                 asked = true;

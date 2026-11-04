@@ -26,6 +26,40 @@
 //! trigger. [`pinned_cell`] identifies these vertices instead, so a check can
 //! exempt them the way it exempts folds, and keep its teeth everywhere else.
 //!
+//! # Known issue: a chunk can hold a seam rank its neighbour disagrees with
+//!
+//! The ranks are a snapshot taken when the chunk was last extracted, and a
+//! chunk can keep one that no longer matches a loaded neighbour's LOD:
+//! measured on toth in 10 of 12 bench runs, 1 to 9 directions each, always
+//! the same shape -- the chunk's *own* rank stored for a neighbour that is
+//! loaded at a coarser LOD, which is `seam_lod_ranks`' substitution for an
+//! unreadable neighbour, left behind.
+//!
+//! It matters because the mesher rescales an apron value, and places the
+//! layer it sits in, by the rank stored for that region. A chunk whose
+//! apron was filled from a Medium neighbour but whose rank says High reads
+//! that whole region at half its true distance: measured at 4953 texels of
+//! one chunk, up to 2.06 voxels out. Vertices there are unaffected (they
+//! come from the shared cell), but `compute_normal` is a central difference
+//! of that same padded SDF, so a vertex on the boundary gets a normal from
+//! half-scale values. That is the bench's intermittent
+//! `hold/check:mesh_on_surface` normal at `[4,-1,4]`: 34.97 degrees where
+//! the same vertex, in the same place, reads 12.7 when the rank is current.
+//!
+//! **Tried and rejected** (wave 5): making `plan_jobs` re-pad instead of
+//! restitching when a rank the apron depends on changes, on the theory that
+//! a metadata-only restitch was splitting the data and the ranks across two
+//! extractions. It is gated green but changed nothing -- 12 of 12 runs still
+//! held stale ranks -- so the restitch path is not where they come from, and
+//! it was reverted rather than kept for its cost in extra re-pads. What is
+//! established is that the slot's ranks disagree with the main world's own
+//! view at probe time, after loading has settled and while nothing is
+//! re-meshing; where that split is introduced is not pinned down.
+//!
+//! The bench reports it: `STALE SEAM RANKS` in every mesh report, naming
+//! each chunk and direction. The errors are small on screen, so this is
+//! recorded rather than chased.
+//!
 //! # Keeping it in step
 //!
 //! This is a port: change pass3's `seam_*` functions and this must change
