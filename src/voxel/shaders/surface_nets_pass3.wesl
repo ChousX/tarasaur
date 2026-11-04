@@ -241,6 +241,21 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
     // distance against a chosen pair it stays well defined where three
     // materials meet. The top two fields are equal on the boundary between
     // them, so their difference gives the blend directly.
+    // Two labels is the overwhelming case, and there the second field is
+    // the negation of the first, so one interpolation answers both.
+    if (uniq_count == 2u) {
+        var phi: array<f32, 8>;
+        for (var i = 0u; i < 8u; i++) {
+            phi[i] = select(-corner_d[i], corner_d[i], corner_id[i] == uniq_ids[0]);
+        }
+        let v = trilinear8(phi, frac);
+        let w = u32(clamp(material_blend_weight(v, -v) * 255.0, 0.0, 255.0));
+        if (uniq_ids[1] < uniq_ids[0]) {
+            return MaterialBlend(uniq_ids[1], uniq_ids[0], 255u - w);
+        }
+        return MaterialBlend(uniq_ids[0], uniq_ids[1], w);
+    }
+
     var best = 0u;
     var best_phi = -1.0e30;
     var second = 0u;

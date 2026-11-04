@@ -170,6 +170,17 @@ fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
         if (!found) { ids[n] = corner_ids[i]; n += 1u; }
     }
 
+    // Two labels is the overwhelming case, and there the second field is
+    // the negation of the first, so one interpolation answers both.
+    if (n == 2u) {
+        var phi: array<f32, 8>;
+        for (var i = 0u; i < 8u; i++) {
+            phi[i] = select(-d[i], d[i], corner_ids[i] == ids[0]);
+        }
+        let v = trilinear8(phi, f);
+        return FragBlend(ids[0], ids[1], material_blend_weight(v, -v));
+    }
+
     var best = 0u;
     var best_phi = -1.0e30;
     var second = 0u;
