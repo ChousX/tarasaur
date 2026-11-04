@@ -147,6 +147,11 @@ pub trait VoxelField: Component<Mutability = Mutable> + Sized {
     fn gpu_bytes(vol: &[Self::Elem]) -> Vec<u8> {
         bytemuck::cast_slice(vol).to_vec()
     }
+    /// [`Self::gpu_bytes`] for a chunk uploaded at `lod`, where a field
+    /// sends an arena less than it stores. Default: the same bytes.
+    fn gpu_bytes_at(vol: &[Self::Elem], _lod: LOD) -> Vec<u8> {
+        Self::gpu_bytes(vol)
+    }
     /// Converts a value sampled from a grid `ratio`x finer (or, if <1,
     /// coarser) than the destination. Only distances care: SDF values are
     /// in voxels of their own LOD, so they divide by `ratio`. Categorical

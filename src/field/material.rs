@@ -193,6 +193,15 @@ impl<M: VoxelMaterial> VoxelField for MaterialField<M> {
         out
     }
 
+    /// An arena that carries no distances is sent the ids alone, so the
+    /// distance half is never built or transferred for it either.
+    fn gpu_bytes_at(vol: &[Self::Elem], lod: LOD) -> Vec<u8> {
+        if keeps_material_distance(lod) {
+            return Self::gpu_bytes(vol);
+        }
+        vol.iter().copied().map(material_id).collect()
+    }
+
     /// The id is categorical, so it takes the nearest voxel's; the distance
     /// is a smooth quantity and interpolates, which is the whole point of
     /// keeping it. Interpolating it across a boundary is sound: it is a

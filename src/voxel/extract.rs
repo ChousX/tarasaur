@@ -583,7 +583,7 @@ where
                 std::any::type_name::<T::Elem>()
             );
         }
-        return vec![(SubSurface(0), T::gpu_bytes(&vol))];
+        return vec![(SubSurface(0), T::gpu_bytes_at(&vol, eff))];
     };
     // Each surface's distances, from the chunk and from every neighbour in
     // its own LOD; then each is padded as an SDF.
