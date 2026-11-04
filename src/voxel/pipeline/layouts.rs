@@ -80,7 +80,8 @@ pub fn pass3_surface_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(8, ShaderStages::COMPUTE, true), // slot_vertex_base
         storage_buffer_entry(9, ShaderStages::COMPUTE, true), // slot_vertex_count
         storage_buffer_entry(10, ShaderStages::COMPUTE, true), // active_slot_map: dispatch-order pos -> real arena slot
-        // material_buffer: packed as array<u32>, 4 material-id bytes per
+        // material_buffer: packed as array<u32>, two voxels per word (each
+        // an id byte then a boundary-distance byte), 4 bytes per
         // word — WGSL storage buffers have no array<u8>. Pass1 doesn't
         // read it; the raster pass does (binding 4 of its group 3).
         storage_buffer_entry(11, ShaderStages::COMPUTE, true),
@@ -106,7 +107,7 @@ pub fn raster_chunk_visibility_entries() -> Vec<BindGroupLayoutEntry> {
         storage_buffer_entry(1, ShaderStages::FRAGMENT, true), // visibility_mask_buffer
         storage_buffer_entry(2, ShaderStages::FRAGMENT, true), // chunk_has_mask_buffer
         uniform_buffer_entry(3, ShaderStages::FRAGMENT, NonZeroU64::new(16)), // BatchUniforms
-        storage_buffer_entry(4, ShaderStages::FRAGMENT, true), // material_buffer (packed u8 ids in u32 words)
+        storage_buffer_entry(4, ShaderStages::FRAGMENT, true), // material_buffer (id + distance bytes in u32 words)
         storage_buffer_entry(5, ShaderStages::FRAGMENT, true), // slot_sub_buffer: [slot] -> SubSurface
     ]
 }

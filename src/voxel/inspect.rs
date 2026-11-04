@@ -16,9 +16,10 @@ use crate::{
     },
 };
 
-/// Where a resident chunk's material ids live on the GPU.
+/// Where a resident chunk's materials live on the GPU.
 pub struct MaterialSlot {
-    /// The arena's material buffer (one `u8` id per voxel, `COPY_SRC`).
+    /// The arena's material buffer: per voxel a `u8` palette id, then a
+    /// `u8` distance to the nearest material boundary (`COPY_SRC`).
     pub buffer: Buffer,
     /// Byte offset of the chunk's padded volume in `buffer`.
     pub offset: u64,
@@ -162,7 +163,8 @@ impl ArenaInspector<'_> {
             .arenas
             .get(VoxelChunkArenaSet::lod_index(lod))?
             .get(found.arena_idx)?;
-        let bytes = u64::from(arena.sdf_elems_per_chunk);
+        // Two bytes per voxel: the palette id, then its boundary distance.
+        let bytes = u64::from(arena.sdf_elems_per_chunk).saturating_mul(2);
         Some(MaterialSlot {
             buffer: arena.material_buffer.clone(),
             offset: u64::from(found.slot).saturating_mul(bytes),
