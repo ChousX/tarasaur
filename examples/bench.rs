@@ -120,7 +120,7 @@ use bevy::{
 };
 use common::{
     TerrainMaterial, determine_material, register_terrain, render_plugin, setup_terrain_palette,
-    terrain_height, terrain_materials,
+    material_boundary_distance, terrain_height, terrain_materials,
 };
 use renderdoc::{RenderDoc, V141};
 use tarasaur::{
@@ -2287,11 +2287,23 @@ impl MatCount {
 }
 
 /// Material mismatch by LOD, by whether the chunk touches a LOD seam, and
-/// by distance to the chunk's faces (`MATERIAL_BUCKETS`).
+/// by distance to the chunk's faces (`MATERIAL_BUCKETS`), plus the same
+/// split by which boundary is nearest (`MATERIAL_BOUNDARIES`).
 #[derive(Default, Clone)]
 struct MaterialTally {
     cells: [[[MatCount; 3]; 2]; LOD::COUNT],
+    by_boundary: [[MatCount; 2]; LOD::COUNT],
 }
+
+/// The terrain's material boundaries, split by whether a vertex's nearest
+/// one lies on the voxel lattice at every LOD. `y = 2.5` is an exact
+/// multiple of all four voxel sizes, so a reconstruction that is exact on
+/// lattice-aligned planes would look perfect on it alone; the other two
+/// follow the terrain's height and are neither flat nor aligned.
+const MATERIAL_BOUNDARIES: [&str; 2] = [
+    "the lattice-aligned y = 2.5 plane",
+    "the curved height-following boundaries",
+];
 
 impl MaterialTally {
     fn at(&mut self, lod: LOD, seam: bool, bucket: usize) -> Option<&mut MatCount> {
@@ -2310,7 +2322,26 @@ impl MaterialTally {
             .unwrap_or_default()
     }
 
+    fn boundary(&mut self, lod: LOD, curved: bool) -> Option<&mut MatCount> {
+        self.by_boundary
+            .get_mut(usize_from(lod.rank()))?
+            .get_mut(usize::from(curved))
+    }
+
+    fn boundary_get(&self, lod: LOD, curved: bool) -> MatCount {
+        self.by_boundary
+            .get(usize_from(lod.rank()))
+            .and_then(|b| b.get(usize::from(curved)))
+            .copied()
+            .unwrap_or_default()
+    }
+
     fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.by_boundary.iter_mut().zip(&other.by_boundary) {
+            for (mine, theirs) in mine.iter_mut().zip(theirs) {
+                mine.add(*theirs);
+            }
+        }
         for (mine, theirs) in self.cells.iter_mut().zip(&other.cells) {
             for (mine, theirs) in mine.iter_mut().zip(theirs) {
                 for (mine, theirs) in mine.iter_mut().zip(theirs) {
@@ -3180,9 +3211,23 @@ fn tally_material(
         .iter()
         .position(|&(_, limit)| to_face <= limit)
         .unwrap_or(2);
+    let wrong = shown != truth;
     if let Some(cell) = report.material.at(chunk.lod, touches_seam(ranks), bucket) {
         cell.compared = cell.compared.saturating_add(1);
-        if shown != truth {
+        if wrong {
+            cell.wrong = cell.wrong.saturating_add(1);
+        }
+    }
+    // Which boundary this vertex is nearest: the flat one is lattice-aligned
+    // at every LOD, so it is the easy case and is counted apart.
+    let (gx, gz) = heightfield_slope(p);
+    let height = terrain_height(p.x, p.z);
+    let k = gz.mul_add(gz, gx.mul_add(gx, 1.0)).sqrt().recip();
+    let flat = (p.y - 2.5).abs();
+    let curved = material_boundary_distance(p.y, height, k) < flat;
+    if let Some(cell) = report.material.boundary(chunk.lod, curved) {
+        cell.compared = cell.compared.saturating_add(1);
+        if wrong {
             cell.wrong = cell.wrong.saturating_add(1);
         }
     }
@@ -3682,6 +3727,15 @@ fn material_lines(r: &MeshReport) -> Vec<String> {
         lines.push(format!(
             "  material vs the generator, {lod:?} ({total} vertices):"
         ));
+        let split: Vec<String> = MATERIAL_BOUNDARIES
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let c = r.material.boundary_get(lod, i == 1);
+                format!("{name}: {:.2}% of {}", c.pct(), c.compared)
+            })
+            .collect();
+        lines.push(format!("    nearest boundary  {}", split.join("; ")));
         for (seam, label) in [(true, "seam chunks"), (false, "no seam    ")] {
             let row: Vec<String> = MATERIAL_BUCKETS
                 .iter()

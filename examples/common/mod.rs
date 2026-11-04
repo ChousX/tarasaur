@@ -20,7 +20,7 @@ use tarasaur::{
     field::{
         LOD, MaterialField, MaterialVoxel, VoxelMaterial,
         ops::{AccumulateExt, BlendExt},
-        pack_material,
+        pack_material, quantize_material_distance,
     },
     num::{f32_from_u32, i16_from_f32, u8_from_f32, usize_from},
     storage::generator::ChunkGeneratorRegistry,
@@ -386,9 +386,29 @@ pub fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
 }
 
 pub fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<MaterialVoxel> {
-    Columns::new(pos, lod).fill(|y, h, _| {
-        // Saturated: no boundary near enough to steer a blend, which is how
-        // the field behaved before it carried a distance at all.
-        pack_material(determine_material(h, y).to_id(), u8::MAX)
+    Columns::new(pos, lod).fill(|y, h, k| {
+        pack_material(
+            determine_material(h, y).to_id(),
+            quantize_material_distance(material_boundary_distance(y, h, k)),
+        )
     })
+}
+
+/// Distance from a voxel to the nearest boundary of `determine_material`,
+/// in world units, for the material field to carry beside its id.
+///
+/// Each of the three conditions is a function that changes sign on its
+/// boundary, so dividing by that function's gradient turns it into a
+/// distance, to first order: exact for the `world_y < 2.5` plane, and
+/// accurate elsewhere to the terrain's curvature. `k` is the column's
+/// `1/sqrt(1 + |grad h|^2)`, which is that gradient for the two
+/// height-following boundaries.
+#[must_use]
+pub fn material_boundary_distance(world_y: f32, height: f32, k: f32) -> f32 {
+    // |grad h| back out of k = 1/sqrt(1 + |grad h|^2).
+    let slope = (1.0 / (k * k) - 1.0).max(0.0).sqrt();
+    let sand = (world_y - 2.5).abs();
+    let stone = (height - 13.5).abs() / slope.max(1e-6);
+    let dirt = ((height - 0.8) - world_y).abs() * k;
+    sand.min(stone).min(dirt)
 }
