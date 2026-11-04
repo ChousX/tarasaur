@@ -20,7 +20,7 @@ use tarasaur::{
     field::{
         LOD, MaterialField, MaterialVoxel, VoxelMaterial,
         ops::{AccumulateExt, BlendExt},
-        pack_material, quantize_material_distance,
+        keeps_material_distance, pack_material, quantize_material_distance,
     },
     num::{f32_from_u32, i16_from_f32, u8_from_f32, usize_from},
     storage::generator::ChunkGeneratorRegistry,
@@ -386,6 +386,13 @@ pub fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
 }
 
 pub fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<MaterialVoxel> {
+    // An arena that keeps no distances never reads one, so don't work one
+    // out: at High that is a square root and a handful of flops over
+    // 262144 voxels per chunk, thrown away at the upload.
+    if !keeps_material_distance(lod) {
+        return Columns::new(pos, lod)
+            .fill(|y, h, _| pack_material(determine_material(h, y).to_id(), u8::MAX));
+    }
     Columns::new(pos, lod).fill(|y, h, k| {
         pack_material(
             determine_material(h, y).to_id(),
