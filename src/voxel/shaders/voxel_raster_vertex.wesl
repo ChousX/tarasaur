@@ -12,7 +12,9 @@
 //     @vertex
 //     fn vs_main(input: VertexInput) -> VertexOutput { return voxel_vertex(input); }
 
-import tarasaur::voxel::shaders::voxel_common::{BatchUniforms, ChunkMeta, flatten_sdf_idx};
+import tarasaur::voxel::shaders::voxel_common::{
+    BatchUniforms, ChunkMeta, MATERIAL_BAND, flatten_sdf_idx, material_blend_weight, trilinear8,
+};
 import bevy_pbr::render::mesh_view_bindings::view;
 
 // --- Group 3: per-arena chunk data, fragment-stage only. ---
@@ -82,12 +84,27 @@ fn voxel_vertex(input: VertexInput) -> VertexOutput {
 
 // --- Material ids ---
 
-fn sample_material_id(slot: u32, coord: vec3<i32>) -> u32 {
+// Two bytes per voxel: the palette id, then the distance to the nearest
+// material boundary (see field/material.rs).
+fn sample_material(slot: u32, coord: vec3<i32>) -> vec2<u32> {
     let ts = vis_uniforms.texture_size;
     let c = vec3<u32>(clamp(coord, vec3<i32>(0), vec3<i32>(i32(ts) - 1)));
     let elem = slot * ts * ts * ts + flatten_sdf_idx(c, ts);
-    let word = material_buffer[elem / 4u];
-    return (word >> ((elem % 4u) * 8u)) & 0xFFu;
+    let word = material_buffer[elem / 2u];
+    let shift = (elem % 2u) * 16u;
+    return vec2<u32>((word >> shift) & 0xFFu, (word >> (shift + 8u)) & 0xFFu);
+}
+
+fn sample_material_id(slot: u32, coord: vec3<i32>) -> u32 {
+    return sample_material(slot, coord).x;
+}
+
+// The boundary distance at `coord`, in world units. Stored in world units
+// precisely so this stage needs nothing it does not have: there are no seam
+// ranks in group 3, so a voxel-unit distance could not be read across an
+// LOD seam here at all.
+fn sample_material_distance(slot: u32, coord: vec3<i32>) -> f32 {
+    return f32(sample_material(slot, coord).y) / 255.0 * MATERIAL_BAND;
 }
 
 struct FragBlend {
@@ -122,37 +139,49 @@ fn fragment_material_blend(slot: u32, world_pos: vec3<f32>) -> FragBlend {
         return FragBlend(first, first, 1.0);
     }
 
-    // Pass 2: mixed cell. Trilinear corner weights, merged per unique id.
+    // Pass 2: mixed cell. Each voxel carries the distance to the nearest
+    // material boundary, so give every label present its own signed field
+    // over the cell (+d where the corner holds that label, -d elsewhere),
+    // interpolate those, and take the largest. That is the multiphase
+    // level-set rule: it puts the boundary back inside the voxel instead of
+    // on the grid, and stays well defined where three materials meet.
     let f = local - base;
 
     var ids: array<u32, 8>;
-    var ws: array<f32, 8>;
     var n = 0u;
-
+    var d: array<f32, 8>;
     for (var i = 0u; i < 8u; i++) {
-        let wx = select(1.0 - f.x, f.x, (i & 1u) == 1u);
-        let wy = select(1.0 - f.y, f.y, ((i >> 1u) & 1u) == 1u);
-        let wz = select(1.0 - f.z, f.z, ((i >> 2u) & 1u) == 1u);
-        let w = wx * wy * wz;
-        let id = corner_ids[i];
-
+        let o = vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
+        d[i] = sample_material_distance(slot, ib + o);
         var found = false;
         for (var j = 0u; j < n; j++) {
-            if (ids[j] == id) { ws[j] += w; found = true; break; }
+            found = found || (ids[j] == corner_ids[i]);
         }
-        if (!found) { ids[n] = id; ws[n] = w; n += 1u; }
+        if (!found) { ids[n] = corner_ids[i]; n += 1u; }
     }
 
     var best = 0u;
-    for (var j = 1u; j < n; j++) { if (ws[j] > ws[best]) { best = j; } }
-
-    var second = best;
-    var second_w = -1.0;
+    var best_phi = -1.0e30;
+    var second = 0u;
+    var second_phi = -1.0e30;
     for (var j = 0u; j < n; j++) {
-        if (j != best && ws[j] > second_w) { second_w = ws[j]; second = j; }
+        var phi: array<f32, 8>;
+        for (var i = 0u; i < 8u; i++) {
+            phi[i] = select(-d[i], d[i], corner_ids[i] == ids[j]);
+        }
+        let v = trilinear8(phi, f);
+        if (v > best_phi) {
+            second_phi = best_phi;
+            second = best;
+            best_phi = v;
+            best = j;
+        } else if (v > second_phi) {
+            second_phi = v;
+            second = j;
+        }
     }
 
-    return FragBlend(ids[best], ids[second], ws[best] / (ws[best] + second_w));
+    return FragBlend(ids[best], ids[second], material_blend_weight(best_phi, second_phi));
 }
 
 // --- Visibility ---

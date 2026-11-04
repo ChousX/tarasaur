@@ -3,8 +3,8 @@
 // emits quads into the slot's fixed vertex/index range.
 
 import tarasaur::voxel::shaders::voxel_common::{
-    BatchUniforms, ChunkMeta, apron_unit_shift, decode_sdf, flatten_sdf_idx,
-    rank_log2_size, seam_rank,
+    BatchUniforms, ChunkMeta, MATERIAL_BAND, apron_unit_shift, decode_sdf, flatten_sdf_idx,
+    material_blend_weight, rank_log2_size, seam_rank, trilinear8,
 };
 
 struct Vertex {
@@ -49,11 +49,26 @@ fn sdf_offset_for(slot: u32) -> u32 {
     return slot * uniforms.texture_size * uniforms.texture_size * uniforms.texture_size;
 }
 
+// Two bytes per voxel: the palette id, then the distance to the nearest
+// material boundary (see field/material.rs). Element e therefore starts at
+// byte 2e, so two elements share a word.
+fn sample_material(material_base: u32, elem_idx: u32) -> vec2<u32> {
+    let elem = material_base + elem_idx;
+    let word = material_buffer[elem / 2u];
+    let shift = (elem % 2u) * 16u;
+    return vec2<u32>((word >> shift) & 0xFFu, (word >> (shift + 8u)) & 0xFFu);
+}
+
 fn sample_material_id(material_base: u32, elem_idx: u32) -> u32 {
-    let word_idx = (material_base + elem_idx) / 4u;
-    let byte_shift = ((material_base + elem_idx) % 4u) * 8u;
-    let word = material_buffer[word_idx];
-    return (word >> byte_shift) & 0xFFu;
+    return sample_material(material_base, elem_idx).x;
+}
+
+// The boundary distance at texel `t`, in world units. Unlike the SDF this
+// needs no seam-rank rescale: it is stored in world units everywhere, so an
+// apron texel from another LOD already means the same thing.
+fn material_distance_at(material_base: u32, t: vec3<u32>) -> f32 {
+    let m = sample_material(material_base, flatten_sdf_idx(t, uniforms.texture_size));
+    return f32(m.y) / 255.0 * MATERIAL_BAND;
 }
 
 fn cell_offset_for(chunk_idx: u32) -> u32 {
@@ -184,67 +199,61 @@ fn tally_corner_materials(material_base: u32, lo: vec3<u32>, step: vec3<u32>, fr
         vec3<u32>(0u, 1u, 1u), vec3<u32>(1u, 1u, 1u)
     );
 
-    var corner_weights: array<f32, 8>;
-    for (var i = 0u; i < 8u; i++) {
-        let c = corners[i];
-        let wx = select(1.0 - frac.x, frac.x, c.x == 1u);
-        let wy = select(1.0 - frac.y, frac.y, c.y == 1u);
-        let wz = select(1.0 - frac.z, frac.z, c.z == 1u);
-        corner_weights[i] = wx * wy * wz;
-    }
-
+    var corner_id: array<u32, 8>;
+    var corner_d: array<f32, 8>;
     var uniq_ids: array<u32, 8>;
-    var uniq_weights: array<f32, 8>;
     var uniq_count = 0u;
-
     for (var i = 0u; i < 8u; i++) {
-        let mat_id = sample_material_id(material_base, flatten_sdf_idx(lo + corners[i] * step, uniforms.texture_size));
-        let w = corner_weights[i];
-
+        let t = lo + corners[i] * step;
+        corner_id[i] = sample_material_id(material_base, flatten_sdf_idx(t, uniforms.texture_size));
+        corner_d[i] = material_distance_at(material_base, t);
         var found = false;
         for (var j = 0u; j < uniq_count; j++) {
-            if (uniq_ids[j] == mat_id) {
-                uniq_weights[j] = uniq_weights[j] + w;
-                found = true;
-                break;
-            }
+            found = found || (uniq_ids[j] == corner_id[i]);
         }
         if (!found) {
-            uniq_ids[uniq_count] = mat_id;
-            uniq_weights[uniq_count] = w;
+            uniq_ids[uniq_count] = corner_id[i];
             uniq_count = uniq_count + 1u;
         }
     }
+    if (uniq_count == 1u) {
+        return MaterialBlend(corner_id[0], corner_id[0], 255u);
+    }
 
-    var best_idx = 0u;
-    var best_w = -1.0;
+    // Every voxel carries the distance to the nearest material boundary, so
+    // give each label present its own signed field over the cell (+d where
+    // the corner holds that label, -d elsewhere), interpolate those, and
+    // take the largest: the label whose region this point is deepest
+    // inside. That is the multiphase level-set rule, and unlike signing one
+    // distance against a chosen pair it stays well defined where three
+    // materials meet. The top two fields are equal on the boundary between
+    // them, so their difference gives the blend directly.
+    var best = 0u;
+    var best_phi = -1.0e30;
+    var second = 0u;
+    var second_phi = -1.0e30;
     for (var j = 0u; j < uniq_count; j++) {
-        if (uniq_weights[j] > best_w) {
-            best_w = uniq_weights[j];
-            best_idx = j;
+        var phi: array<f32, 8>;
+        for (var i = 0u; i < 8u; i++) {
+            phi[i] = select(-corner_d[i], corner_d[i], corner_id[i] == uniq_ids[j]);
+        }
+        let v = trilinear8(phi, frac);
+        if (v > best_phi) {
+            second_phi = best_phi;
+            second = best;
+            best_phi = v;
+            best = j;
+        } else if (v > second_phi) {
+            second_phi = v;
+            second = j;
         }
     }
 
-    var second_idx = best_idx;
-    var second_w = -1.0;
-    for (var j = 0u; j < uniq_count; j++) {
-        if (j != best_idx && uniq_weights[j] > second_w) {
-            second_w = uniq_weights[j];
-            second_idx = j;
-        }
-    }
-
-    let id_a = uniq_ids[best_idx];
-    var id_b = id_a;
-    var weight_u8 = 255u;
-    if (second_w >= 0.0 && (best_w + second_w) > 0.00001) {
-        id_b = uniq_ids[second_idx];
-        let norm_a = best_w / (best_w + second_w);
-        weight_u8 = u32(clamp(norm_a * 255.0, 0.0, 255.0));
-    }
-
-    // Canonical order: lower id is always "a". Weight is always "amount of the
-    // lower id", so every vertex touching the same pair agrees on direction.
+    let id_a = uniq_ids[best];
+    let id_b = uniq_ids[second];
+    let weight_u8 = u32(clamp(material_blend_weight(best_phi, second_phi) * 255.0, 0.0, 255.0));
+    // Canonical order: lower id is always "a", and the weight is always the
+    // amount of the lower id, so every vertex touching the same pair agrees.
     if (id_b < id_a) {
         return MaterialBlend(id_b, id_a, 255u - weight_u8);
     }

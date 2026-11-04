@@ -18,8 +18,9 @@ use bevy::{
 use tarasaur::{
     chunk::CHUNK_SIZE,
     field::{
-        LOD, MaterialField, VoxelMaterial,
+        LOD, MaterialField, MaterialVoxel, VoxelMaterial,
         ops::{AccumulateExt, BlendExt},
+        pack_material,
     },
     num::{f32_from_u32, i16_from_f32, u8_from_f32, usize_from},
     storage::generator::ChunkGeneratorRegistry,
@@ -44,7 +45,7 @@ pub fn register_terrain(app: &mut App) {
     g.register_sdf_distance(terrain_sdf);
     // The key must equal the type_name the persistence registry uses for
     // this field (register_field::<F> uses std::any::type_name::<F>()).
-    g.register::<u8>(
+    g.register::<MaterialVoxel>(
         type_name::<MaterialField<TerrainMaterial>>(),
         terrain_materials,
     );
@@ -384,6 +385,10 @@ pub fn terrain_sdf(pos: IVec3, lod: LOD) -> Vec<f32> {
     Columns::new(pos, lod).fill(|y, h, k| (y - h) * k)
 }
 
-pub fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<u8> {
-    Columns::new(pos, lod).fill(|y, h, _| determine_material(h, y).to_id())
+pub fn terrain_materials(pos: IVec3, lod: LOD) -> Vec<MaterialVoxel> {
+    Columns::new(pos, lod).fill(|y, h, _| {
+        // Saturated: no boundary near enough to steer a blend, which is how
+        // the field behaved before it carried a distance at all.
+        pack_material(determine_material(h, y).to_id(), u8::MAX)
+    })
 }

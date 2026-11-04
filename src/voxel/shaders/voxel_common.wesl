@@ -38,6 +38,39 @@ fn rank_log2_size(rank: u32) -> i32 {
     return select(r + 3, 2, r == 0);
 }
 
+// --- Material boundary distances ---
+// Each voxel keeps its palette id and the distance to the nearest material
+// boundary, so a blend can put that boundary back inside the voxel instead
+// of on the grid. Keep both constants in step with field/material.rs.
+
+// Distances are stored in WORLD units and saturate here (one Lowest
+// voxel). World units mean the value needs no rescale when it is read
+// across an LOD seam -- the fragment stage has no seam ranks to rescale
+// with -- and that it stride-downsamples to a coarser LOD unchanged.
+const MATERIAL_BAND: f32 = 2.5;
+// Half-width of the blend between two materials, in world units. Constant
+// in world space, so the boundary neither moves nor changes width when a
+// chunk switches LOD.
+const MATERIAL_BLEND_WORLD: f32 = 0.25;
+
+// Trilinear interpolation of 8 cell corners, corner i being (i&1, i>>1&1,
+// i>>2&1), at `f` within the cell.
+fn trilinear8(v: array<f32, 8>, f: vec3<f32>) -> f32 {
+    var c = v;
+    let x00 = mix(c[0], c[1], f.x);
+    let x10 = mix(c[2], c[3], f.x);
+    let x01 = mix(c[4], c[5], f.x);
+    let x11 = mix(c[6], c[7], f.x);
+    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+
+// The winning label's share, from the top two interpolated label fields.
+// They are equal on the boundary, and their half-difference is the signed
+// distance to it, so this is a world-constant ramp across it.
+fn material_blend_weight(best: f32, second: f32) -> f32 {
+    return clamp(0.5 + (best - second) / (4.0 * MATERIAL_BLEND_WORLD), 0.0, 1.0);
+}
+
 // LOD rank of the chunk at `offset` (-1..1 per axis; 0 = this chunk).
 fn seam_rank(seam_ranks: vec2<u32>, offset: vec3<i32>) -> u32 {
     let k = u32(offset.x + 1 + 3 * (offset.y + 1) + 9 * (offset.z + 1));

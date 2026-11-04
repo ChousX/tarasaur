@@ -130,7 +130,8 @@ use tarasaur::{
         world_pos_to_chunk_pos,
     },
     field::{
-        Field, LOD, MaterialField, SDF, SDF_BAND, VisibilityField, VoxelField, VoxelMaterial,
+        Field, LOD, MaterialField, MaterialVoxel, SDF, SDF_BAND, VisibilityField, VoxelField,
+        VoxelMaterial, material_id,
         editor::{
             SdfCsgSphere, SdfSculptOp, SdfSculptSphere, VisibilityCsgBox, VisibilityCsgSphere,
             WorldEditor,
@@ -1641,6 +1642,7 @@ fn check_material_box(
                     let gen_id = generated
                         .get(flatten_cube(x, y, z, n))
                         .copied()
+                        .map(material_id)
                         .unwrap_or_default();
                     let in_shell = !in_box && v.cmpge(lo - 1.0).all() && v.cmple(hi + 1.0).all();
                     if in_shell {
@@ -1960,8 +1962,8 @@ struct SlotRequest {
     pos: IVec3,
     entity: Entity,
     lod: LOD,
-    /// The main world's field, `lod.size()`^3 ids.
-    expected: Arc<[u8]>,
+    /// The main world's field, `lod.size()`^3 voxels (id + distance).
+    expected: Arc<[MaterialVoxel]>,
 }
 
 #[derive(Default)]
@@ -2028,7 +2030,8 @@ fn read_back_slots(
             continue;
         };
         let padded = slot.padded_size;
-        let bytes = u64::from(padded).pow(3);
+        // Two bytes per voxel: the palette id, then its boundary distance.
+        let bytes = u64::from(padded).pow(3).saturating_mul(2);
         let readback = device.create_buffer(&BufferDescriptor {
             label: Some("bench_material_readback"),
             size: bytes,
@@ -2055,8 +2058,12 @@ fn read_back_slots(
                         for z in 0..n {
                             for y in 0..n {
                                 for x in 0..n {
-                                    let got = gpu.get(flatten_cube(x, y, z, padded));
-                                    let want = req.expected.get(flatten_cube(x, y, z, n));
+                                    let at = flatten_cube(x, y, z, padded).saturating_mul(2);
+                                    let got = gpu
+                                        .get(at..at.saturating_add(2))
+                                        .and_then(|b| b.try_into().ok())
+                                        .map(u16::from_le_bytes);
+                                    let want = req.expected.get(flatten_cube(x, y, z, n)).copied();
                                     if got != want {
                                         wrong = wrong.saturating_add(1);
                                     }

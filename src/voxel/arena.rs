@@ -103,7 +103,7 @@ fn max_chunks(
         / 10;
 
     let sdf_bytes = u64::from(sdf_elems_per_chunk).saturating_mul(2); // snorm16
-    let material_bytes = u64::from(sdf_elems_per_chunk);
+    let material_bytes = u64::from(sdf_elems_per_chunk).saturating_mul(2); // id + distance
     let vertex_bytes = u64::from(budget_cells_per_chunk).saturating_mul(VERTEX_BYTES);
     let index_bytes = u64::from(budget_cells_per_chunk)
         .saturating_mul(u64::from(INDICES_PER_CELL))
@@ -391,7 +391,8 @@ impl ArenaBuffers {
             ),
             material: dev.storage(
                 "arena_material_buffer",
-                per_chunk(sdf_elems),
+                per_chunk(sdf_elems.saturating_mul(2)), // id byte + distance byte
+
                 STORAGE_DST | BufferUsages::COPY_SRC,
             ),
             // COPY_SRC on these and the material buffer: lets tests read a

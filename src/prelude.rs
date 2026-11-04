@@ -11,13 +11,15 @@ pub use crate::storage::generator::ChunkGeneratorRegistry;
 
 // Fields and editing
 pub use crate::field::{
-    DistanceField, Field, GpuChannel, LOD, MaterialField, MaxEditLod, SDF, TargetLOD,
-    VisibilityField, VoxelField, VoxelMaterial,
+    DistanceField, Field, GpuChannel, LOD, MATERIAL_BAND, MaterialField, MaterialVoxel, MaxEditLod,
+    SDF, TargetLOD, VisibilityField, VoxelField, VoxelMaterial,
     editor::{
         EditMode, MaterialPaint, SdfCsgSphere, SdfSculptOp, SdfSculptSphere, SdfSphereStamp,
         VisibilityCsgBox, VisibilityCsgSphere, WorldEditor,
     },
+    material_distance, material_id,
     ops::{AccumulateExt, BlendExt, PlaneMode, Sweep},
+    pack_material, quantize_material_distance,
 };
 pub use crate::storage::persistence::{AutosaveIntervalSecs, SaveChunkMessage, SaveDirectory};
 
@@ -28,8 +30,8 @@ pub use crate::raycast::{
         cast_filtered,
     },
     cursor::{
-        BrushShape, BrushStroke, BrushTool, CursorBrush, CursorFilter, CursorHit,
-        CursorQueryMode, FlattenPlane, Stroke,
+        BrushShape, BrushStroke, BrushTool, CursorBrush, CursorFilter, CursorHit, CursorQueryMode,
+        FlattenPlane, Stroke,
     },
     terrain_ray::TerrainRay,
 };

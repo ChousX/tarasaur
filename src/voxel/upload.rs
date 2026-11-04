@@ -795,7 +795,10 @@ pub fn prepare_material_upload<F: VoxelField>(
         if !arena.can_mark_dirty(slot) {
             continue; // no scratch left this frame; retried next frame
         }
-        let offset = u64::from(slot).wrapping_mul(u64::from(arena.sdf_elems_per_chunk));
+        // Two bytes per voxel: the palette id, then its boundary distance.
+        let offset = u64::from(slot)
+            .wrapping_mul(u64::from(arena.sdf_elems_per_chunk))
+            .wrapping_mul(2);
         render_queue.write_buffer(&arena.material_buffer, offset, &up.data);
         arena.mark_dirty(slot); // pass3 bakes materials into vertices
         if let Some(e) = up.extracted {
