@@ -139,17 +139,21 @@ impl<M: VoxelMaterial> Field<M> for MaterialField<M> {
     }
 
     /// An edit knows the id it is painting but not where the boundary it
-    /// just moved now lies, so the voxel is marked as far from one as the
-    /// byte goes. The blend then falls back to the grid there, which is
-    /// what it did before the distance existed, rather than steering the
-    /// boundary with a stale number.
+    /// just moved now lies, so a voxel whose id changes is marked as far
+    /// from one as the byte goes. The blend then falls back to the grid
+    /// there, which is what it did before the distance existed, rather
+    /// than steering the boundary with a stale number.
+    ///
+    /// Painting the id a voxel already has changes nothing and must not
+    /// bump the version: that is what tells the rest of the engine the
+    /// chunk needs re-padding, re-uploading and re-meshing.
     fn set(&mut self, x: u32, y: u32, z: u32, value: M) {
         let idx = flatten_with_size(x, y, z, self.size());
-        let voxel = pack_material(value.to_id(), u8::MAX);
+        let id = value.to_id();
         if let Some(slot) = self.data.get_mut(idx)
-            && *slot != voxel
+            && material_id(*slot) != id
         {
-            *slot = voxel;
+            *slot = pack_material(id, u8::MAX);
             self.version = self.version.wrapping_add(1);
         }
     }
